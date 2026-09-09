@@ -17,6 +17,9 @@ export default defineConfig({
   ],
   build: {
     target: 'esnext',
+    // Never inline assets as data: URLs — the nginx CSP is font-src 'self',
+    // so inlined font subsets (small @fontsource files) would be blocked.
+    assetsInlineLimit: 0,
     rollupOptions: {
       output: {
         manualChunks(id) {
