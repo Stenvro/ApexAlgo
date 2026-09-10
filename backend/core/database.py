@@ -152,6 +152,30 @@ def run_migrations():
 
         conn.commit()
 
+        _sweep_orphaned_bot_rows(conn, existing_tables)
+
+
+def _sweep_orphaned_bot_rows(conn, existing_tables) -> None:
+    """Delete per-bot rows whose bot no longer exists.
+
+    Bot deletion cleans these tables in a background task after the response
+    is sent; a restart in that window (or rows from before the cleanup covered
+    every table) leaves orphans behind. Rows are keyed by bot name, so nothing
+    else references them once the bot is gone.
+    """
+    if "bots" not in existing_tables:
+        return
+    for table in ("signals", "orders", "positions", "bot_logs"):
+        if table not in existing_tables:
+            continue
+        result = conn.execute(text(
+            f"DELETE FROM {table} WHERE bot_name IS NOT NULL "
+            f"AND bot_name NOT IN (SELECT name FROM bots)"
+        ))
+        conn.commit()
+        if result.rowcount > 0:
+            logger.info("Cleanup: removed %d orphaned %s row(s) for deleted bots", result.rowcount, table)
+
 def get_db():
     db = SessionLocal()
     try:

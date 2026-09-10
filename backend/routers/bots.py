@@ -253,6 +253,7 @@ def update_bot(bot_id: int, background_tasks: BackgroundTasks, bot_data: dict = 
         db.query(Signal).filter(Signal.bot_name == old_name).update({"bot_name": new_name}, synchronize_session=False)
         db.query(Order).filter(Order.bot_name == old_name).update({"bot_name": new_name}, synchronize_session=False)
         db.query(Position).filter(Position.bot_name == old_name).update({"bot_name": new_name}, synchronize_session=False)
+        db.query(BotLog).filter(BotLog.bot_name == old_name).update({"bot_name": new_name}, synchronize_session=False)
 
     if "is_sandbox" in bot_data:
         bot.is_sandbox = bot_data["is_sandbox"]
