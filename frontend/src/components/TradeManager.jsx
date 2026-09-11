@@ -56,6 +56,18 @@ const longestFlatGap = (intervals, windowFrom, windowTo) => {
     return best;
 };
 
+// Entry timestamp — use entry order timestamps as fallback for backtest positions
+// whose created_at may be the wall-clock run time, not the candle entry time
+const entryTimeOf = (p, exitTs, entryTsByPos) => {
+    if (p.created_at) {
+        const createdTs = new Date(p.created_at);
+        if (exitTs > createdTs) return createdTs;
+    }
+    const entryTs = entryTsByPos[p.id];
+    if (entryTs && exitTs > entryTs) return entryTs;
+    return null;
+};
+
 const pnlColor = (v) => (v >= 0 ? 'text-success' : 'text-danger');
 const pnlSign = (v) => (v >= 0 ? '+' : '');
 
@@ -570,17 +582,7 @@ export default function TradeManager({ setError, bots = [] }) {
             if (peakEq > 0) maxDDpct = Math.max(maxDDpct, ((peakEq - equity) / peakEq) * 100);
         }
 
-        // Entry timestamp — use entry order timestamps as fallback for backtest positions
-        // whose created_at may be the wall-clock run time, not the candle entry time
-        const entryOf = (p, exitTs) => {
-            if (p.created_at) {
-                const createdTs = new Date(p.created_at);
-                if (exitTs > createdTs) return createdTs;
-            }
-            const entryTs = entryTsByPos[p.id];
-            if (entryTs && exitTs > entryTs) return entryTs;
-            return null;
-        };
+        const entryOf = (p, exitTs) => entryTimeOf(p, exitTs, entryTsByPos);
         const spans = closedPositions.map(p => {
             if (!p.closed_at) return null;
             const exitTs = new Date(p.closed_at);
@@ -590,25 +592,6 @@ export default function TradeManager({ setError, bots = [] }) {
         const avgHoldMs = spans.length > 0
             ? spans.reduce((s, i) => s + (i.end - i.start), 0) / spans.length
             : 0;
-
-        // Longest flat period — an open position is "in the market" indefinitely,
-        // so nothing after its entry can count as flat
-        const openSpans = activePositions.map(p => {
-            const entryTs = entryOf(p, new Date(8.64e15));
-            return entryTs ? { start: entryTs.getTime(), end: Infinity } : null;
-        }).filter(Boolean);
-        // Window edges: the user's date filter, else the data range the engine
-        // walked in the last backtest of the bots in view (so the stretch before
-        // the first trade counts too)
-        let dataFrom = null, dataTo = null;
-        for (const name of filteredBotNames) {
-            const s = bots.find(b => b.name === name)?.settings?.last_backtest_summary;
-            const f = s?.data_from ? new Date(s.data_from).getTime() : NaN;
-            const t = s?.data_to ? new Date(s.data_to).getTime() : NaN;
-            if (!Number.isNaN(f) && (dataFrom === null || f < dataFrom)) dataFrom = f;
-            if (!Number.isNaN(t) && (dataTo === null || t > dataTo)) dataTo = t;
-        }
-        const longestFlat = longestFlatGap([...spans, ...openSpans], dateFrom ?? dataFrom, dateTo ?? dataTo);
 
         // Return/Risk (simplified Sharpe)
         const returns = closedPositions.map(p => p.profit_pct || 0);
@@ -634,7 +617,7 @@ export default function TradeManager({ setError, bots = [] }) {
             profitFactor,
             maxDDpct,
             avgHoldMs,
-            longestFlat,
+            avgTrade: closedPositions.length > 0 ? netPnl / closedPositions.length : 0,
             sharpe,
             totalFees,
             avgWin: wins.length > 0 ? grossProfit / wins.length : 0,
@@ -643,7 +626,7 @@ export default function TradeManager({ setError, bots = [] }) {
             botCount: filteredBotNames.length,
             returnPct: totalCapital > 0 ? (netPnl / totalCapital) * 100 : 0,
         };
-    }, [closedPositions, activePositions, orders, entryTsByPos, bots, dateFrom, dateTo]);
+    }, [closedPositions, activePositions, orders, entryTsByPos, bots]);
 
     // ── Breakdown tables (by algorithm / by pair) ─────────────────────────────
 
@@ -652,7 +635,7 @@ export default function TradeManager({ setError, bots = [] }) {
             const groups = new Map();
             for (const p of closedPositions) {
                 const key = keyFn(p);
-                if (!groups.has(key)) groups.set(key, { key, label: labelFn(p), trades: 0, wins: 0, gross: 0, loss: 0, net: 0, modes: new Set(), fees: 0, holdMs: 0, holdN: 0, best: -Infinity, worst: Infinity });
+                if (!groups.has(key)) groups.set(key, { key, label: labelFn(p), trades: 0, wins: 0, gross: 0, loss: 0, net: 0, modes: new Set(), fees: 0, holdMs: 0, holdN: 0, best: -Infinity, worst: Infinity, spans: [], botNames: new Set() });
                 const g = groups.get(key);
                 const pnl = p.profit_abs || 0;
                 g.trades += 1;
@@ -666,12 +649,39 @@ export default function TradeManager({ setError, bots = [] }) {
                     const h = new Date(p.closed_at) - new Date(p.created_at);
                     if (h > 0) { g.holdMs += h; g.holdN += 1; }
                 }
+                g.botNames.add(p.bot_name);
+                if (p.closed_at) {
+                    const exitTs = new Date(p.closed_at);
+                    const entryTs = entryTimeOf(p, exitTs, entryTsByPos);
+                    if (entryTs) g.spans.push({ start: entryTs.getTime(), end: exitTs.getTime() });
+                }
+            }
+            // Open positions are "in the market" indefinitely for the flat-gap calc
+            for (const p of activePositions) {
+                const g = groups.get(keyFn(p));
+                if (!g) continue;
+                const entryTs = entryTimeOf(p, new Date(8.64e15), entryTsByPos);
+                if (entryTs) g.spans.push({ start: entryTs.getTime(), end: Infinity });
             }
             return [...groups.values()].map(g => {
                 const bot = bots.find(b => b.name === g.key);
                 const capital = bot ? botCapital(bot, g.modes) : null;
+                // Flat-gap window: the date filter, else the data range the engine
+                // walked in the last backtest of the bots behind this row
+                let dataFrom = null, dataTo = null;
+                for (const name of g.botNames) {
+                    const sm = bots.find(b => b.name === name)?.settings?.last_backtest_summary;
+                    const f = sm?.data_from ? new Date(sm.data_from).getTime() : NaN;
+                    const t = sm?.data_to ? new Date(sm.data_to).getTime() : NaN;
+                    if (!Number.isNaN(f) && (dataFrom === null || f < dataFrom)) dataFrom = f;
+                    if (!Number.isNaN(t) && (dataTo === null || t > dataTo)) dataTo = t;
+                }
+                const longestFlat = longestFlatGap(g.spans, dateFrom ?? dataFrom, dateTo ?? dataTo);
                 return {
                     ...g,
+                    spans: undefined,
+                    botNames: undefined,
+                    longestFlat,
                     modes: [...g.modes],
                     winRate: g.trades ? (g.wins / g.trades) * 100 : 0,
                     profitFactor: g.loss > 0 ? g.gross / g.loss : (g.gross > 0 ? Infinity : 0),
@@ -688,7 +698,7 @@ export default function TradeManager({ setError, bots = [] }) {
             byBot: build(p => p.bot_name, p => p.bot_name),
             bySymbol: build(p => `${p.exchange || 'okx'}:${p.symbol}`, p => p.symbol),
         };
-    }, [closedPositions, feesByPosId, bots, tfByBot]);
+    }, [closedPositions, activePositions, entryTsByPos, feesByPosId, bots, tfByBot, dateFrom, dateTo]);
 
     const [breakdownView, setBreakdownView] = useState('bot');
 
@@ -1055,12 +1065,10 @@ export default function TradeManager({ setError, bots = [] }) {
                         color="white"
                     />
                     <StatCard
-                        label="Longest Flat"
-                        value={stats.longestFlat ? formatHoldTime(stats.longestFlat.ms) : '—'}
-                        sub={stats.longestFlat
-                            ? `${fmtShortDate(stats.longestFlat.from)} – ${fmtShortDate(stats.longestFlat.to)}`
-                            : 'never flat in this range'}
-                        color="white"
+                        label="Avg Trade"
+                        value={stats.total > 0 ? `${stats.avgTrade >= 0 ? '+' : '-'}$${safeNum(Math.abs(stats.avgTrade))}` : '—'}
+                        sub="net PnL per closed trade"
+                        color={stats.total > 0 ? (stats.avgTrade >= 0 ? 'green' : 'red') : 'white'}
                     />
                 </div>
             )}
@@ -1208,6 +1216,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                         {breakdownView === 'bot' && <th className={`${thClass} text-right`}>Max DD</th>}
                                         <th className={`${thClass} text-right`}>Best / Worst</th>
                                         <th className={`${thClass} text-right`}>Avg hold</th>
+                                        <th className={`${thClass} text-right`}>Longest flat</th>
                                         <th className={`${thClass} text-right`}>Fees</th>
                                     </tr>
                                 </thead>
@@ -1237,6 +1246,10 @@ export default function TradeManager({ setError, bots = [] }) {
                                             )}
                                             <td className="px-4 py-2.5 text-right font-num"><span className="text-success">+${safeNum(Math.max(0, r.best))}</span> <span className="text-faint">/</span> <span className="text-danger">-${safeNum(Math.abs(Math.min(0, r.worst)))}</span></td>
                                             <td className="px-4 py-2.5 text-right font-num text-muted">{r.avgHoldMs ? formatHoldTime(r.avgHoldMs) : '—'}</td>
+                                            <td className="px-4 py-2.5 text-right font-num text-muted"
+                                                title={r.longestFlat ? `${fmtShortDate(r.longestFlat.from)} – ${fmtShortDate(r.longestFlat.to)}` : 'never flat in this range'}>
+                                                {r.longestFlat ? formatHoldTime(r.longestFlat.ms) : '—'}
+                                            </td>
                                             <td className="px-4 py-2.5 text-right font-num text-muted">${safeNum(r.fees)}</td>
                                         </tr>
                                     ))}
