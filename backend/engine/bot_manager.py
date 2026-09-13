@@ -1579,8 +1579,9 @@ class BotManager:
                     if scope == "per_pair":
                         open_count = len(bot_positions)
                     else:
-                        # For global scope, count all modes and all symbols for this bot
-                        open_count = sum(len(v) for k, v in _positions_by_bot_mode.items() if k[0] == bot.name)
+                        # Global scope: all symbols, but only the bot's own mode — a
+                        # position left open by the backtest must not take a live slot
+                        open_count = len(_positions_by_bot_mode.get((bot.name, mode), []))
 
                     ccxt_symbol = symbol.replace('-', '/').upper()
                     just_opened_ids = set()
