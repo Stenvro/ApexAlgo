@@ -165,7 +165,7 @@ def _sweep_orphaned_bot_rows(conn, existing_tables) -> None:
     """
     if "bots" not in existing_tables:
         return
-    for table in ("signals", "orders", "positions", "bot_logs"):
+    for table in ("signals", "orders", "positions", "bot_logs", "bot_config_runs"):
         if table not in existing_tables:
             continue
         result = conn.execute(text(

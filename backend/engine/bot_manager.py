@@ -77,6 +77,32 @@ def _naive_utc(ts):
     return ts
 
 
+# Settings that do not change what the strategy does on the data: layout,
+# order routing, live sizing and the engine's own runtime bookkeeping.
+_NON_STRATEGY_KEYS = frozenset({
+    "ui_layout", "api_execution", "api_key_name", "live_allocation_pct", "max_order_value",
+    "backtest_on_start", "last_backtest_summary", "last_backtest_max_drawdown",
+    "last_stop_reason", "drawdown_peak_reset_at", "live_starting_capital",
+})
+
+
+def _config_fingerprint(settings: dict) -> str:
+    """Stable hash of the strategy-relevant part of a bot's settings, used to
+    count how many distinct variants have been backtested."""
+    relevant = {k: v for k, v in (settings or {}).items() if k not in _NON_STRATEGY_KEYS}
+    return md5(json.dumps(relevant, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _record_config_run(db, bot_name: str, settings: dict) -> int:
+    """Register this configuration as backtested and return the number of
+    distinct configurations the bot has run so far (this one included)."""
+    db.execute(
+        text("INSERT OR IGNORE INTO bot_config_runs (bot_name, config_hash, first_run_at) VALUES (:bn, :h, :ts)"),
+        {"bn": bot_name, "h": _config_fingerprint(settings), "ts": datetime.now(timezone.utc).replace(tzinfo=None)},
+    )
+    return int(db.execute(text("SELECT COUNT(*) FROM bot_config_runs WHERE bot_name = :bn"), {"bn": bot_name}).scalar() or 0)
+
+
 class BotManager:
     def __init__(self):
         self.running = False
@@ -1215,6 +1241,9 @@ class BotManager:
                         # measure flat periods before the first / after the last trade
                         "data_from": timeline[0][0].isoformat() if timeline else None,
                         "data_to": timeline[-1][0].isoformat() if timeline else None,
+                        # Distinct configurations this bot has backtested — plain
+                        # tweak-awareness, no judgement attached
+                        "variants": _record_config_run(db, bot.name, bot.settings),
                         "finished_at": datetime.now(timezone.utc).isoformat(),
                     }
                     bot.settings = {**bot.settings, "last_backtest_max_drawdown": round(bt_max_dd, 2), "last_backtest_summary": summary}

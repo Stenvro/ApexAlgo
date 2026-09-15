@@ -161,6 +161,8 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
     : (bot.settings?.symbol ? [bot.settings.symbol] : []);
   const visiblePairs = assignedPairs.slice(0, 3);
   const extraPairs   = assignedPairs.length - visiblePairs.length;
+  // Distinct configs backtested so far (from the last backtest summary)
+  const variants     = Number((bot.last_backtest_summary ?? bot.settings?.last_backtest_summary)?.variants) || 0;
 
   return (
     <div
@@ -192,6 +194,12 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
               <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Pairs</span>
               <span className="text-[11px] font-num font-bold text-text">{assignedPairs.length}</span>
             </div>
+            {variants > 0 && (
+              <div className="flex flex-col" title={`${variants} distinct configuration${variants === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.`}>
+                <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Variant</span>
+                <span className="text-[11px] font-num font-bold text-text">#{variants}</span>
+              </div>
+            )}
             <div className="flex flex-col min-w-0" title={assignedPairs.join(', ')}>
               <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Whitelist</span>
               <span className="flex items-center gap-1 flex-wrap">
@@ -352,7 +360,8 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
   prev.openConsoles[prev.bot.id] === next.openConsoles[next.bot.id] &&
   prev.clearSignals[prev.bot.name] === next.clearSignals[next.bot.name] &&
   JSON.stringify(prev.bot.runtime) === JSON.stringify(next.bot.runtime) &&
-  JSON.stringify(prev.bot.settings) === JSON.stringify(next.bot.settings)
+  JSON.stringify(prev.bot.settings) === JSON.stringify(next.bot.settings) &&
+  prev.bot.last_backtest_summary?.variants === next.bot.last_backtest_summary?.variants
 );
 
 function ChevronIcon({ open }) {

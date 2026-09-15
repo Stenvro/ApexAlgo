@@ -22,6 +22,7 @@ from backend.engine.settings_validator import validate_bot_settings
 from backend.engine.bot_manager import bot_manager
 from backend.core import bot_log_buffer as blb
 from backend.models.bot_logs import BotLog
+from backend.models.bot_config_runs import BotConfigRun
 from backend.models.exchange_keys import ExchangeKey
 
 
@@ -254,6 +255,7 @@ def update_bot(bot_id: int, background_tasks: BackgroundTasks, bot_data: dict = 
         db.query(Order).filter(Order.bot_name == old_name).update({"bot_name": new_name}, synchronize_session=False)
         db.query(Position).filter(Position.bot_name == old_name).update({"bot_name": new_name}, synchronize_session=False)
         db.query(BotLog).filter(BotLog.bot_name == old_name).update({"bot_name": new_name}, synchronize_session=False)
+        db.query(BotConfigRun).filter(BotConfigRun.bot_name == old_name).update({"bot_name": new_name}, synchronize_session=False)
 
     if "is_sandbox" in bot_data:
         bot.is_sandbox = bot_data["is_sandbox"]
@@ -323,6 +325,7 @@ def _cleanup_bot_data(bot_name: str):
         _chunked_delete(db, "positions", "bot_name = :bot_name", params)
         _chunked_delete(db, "signals", "bot_name = :bot_name", params)
         _chunked_delete(db, "bot_logs", "bot_name = :bot_name", params)
+        _chunked_delete(db, "bot_config_runs", "bot_name = :bot_name", params)
     except Exception as e:
         db.rollback()
         logger.error("Background cleanup failed for '%s': %s", bot_name, e)
@@ -529,6 +532,8 @@ def clear_bot_cache(bot_name: str, db: Session = Depends(get_db)):
         running = bool(bot and bot.is_active)
         result = db.execute(text("DELETE FROM signals WHERE bot_name = :bn"), {"bn": bot_name})
         deleted_signals = result.rowcount
+        # Variant counter starts over: a reset is a clean slate for the strategy too
+        db.execute(text("DELETE FROM bot_config_runs WHERE bot_name = :bn"), {"bn": bot_name})
         deleted_sim = 0
         if not running:
             for mode in ("backtest", "forward_test"):
