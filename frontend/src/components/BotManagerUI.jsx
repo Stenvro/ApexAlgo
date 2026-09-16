@@ -150,6 +150,50 @@ function StopReason({ bot }) {
   );
 }
 
+const fmtDay = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '?' : d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: '2-digit' });
+};
+
+/* What the last backtest said — the number the drawdown gate enforces, the
+   range it walked, and a jump to the same trades in Analytics */
+function BacktestResult({ bot }) {
+  const sm = bot.last_backtest_summary ?? bot.settings?.last_backtest_summary;
+  if (!sm || typeof sm.trades !== 'number') return null;
+  const net = Number(sm.net_pnl) || 0;
+  const ret = Number(sm.return_pct) || 0;
+  const dd = Number(sm.max_drawdown) || 0;
+  const limit = Number(bot.settings?.max_drawdown) || 0;
+  const variants = Number(sm.variants) || 0;
+  const cell = (label, value, cls = 'text-text', title) => (
+    <div className="flex flex-col min-w-0" title={title}>
+      <span className="text-[8px] font-bold uppercase tracking-wider text-faint">{label}</span>
+      <span className={`text-[11px] font-num font-bold ${cls}`}>{value}</span>
+    </div>
+  );
+  return (
+    <div className="px-5 py-2.5 border-b border-border bg-bg/40 flex items-center justify-between gap-3 flex-wrap"
+      title={variants > 0 ? `Variant #${variants} — ${variants} distinct configuration${variants === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.` : undefined}>
+      <div className="flex items-center gap-4 flex-wrap">
+        <span className="text-[8px] font-bold uppercase tracking-widest text-muted self-start pt-0.5">Backtest{variants > 0 && <span className="text-faint"> #{variants}</span>}</span>
+        {cell('Net PnL', `${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)}`, net >= 0 ? 'text-success' : 'text-danger')}
+        {cell('Return', `${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%`, ret >= 0 ? 'text-success' : 'text-danger', `on $${Number(bot.settings?.backtest_capital) || 1000} starting capital`)}
+        {cell('Trades', `${sm.trades}${sm.trades > 0 ? ` · ${Number(sm.win_rate || 0).toFixed(0)}% win` : ''}`)}
+        {cell('Max DD', `-${dd.toFixed(1)}%${limit > 0 ? ` / ${limit}%` : ''}`, limit > 0 && dd >= limit ? 'text-danger' : 'text-text',
+          limit > 0 ? `Mark-to-market drawdown vs the ${limit}% limit that stops the bot` : 'Mark-to-market drawdown (no limit set)')}
+        {sm.data_from && sm.data_to && (
+          <span className="text-[9px] font-num text-muted self-end pb-px">{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>
+        )}
+      </div>
+      <button type="button"
+        onClick={() => window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: bot.name, mode: 'backtest' } }))}
+        className="text-[9px] font-bold uppercase tracking-wider text-info hover:text-text transition-colors shrink-0">
+        View in Analytics →
+      </button>
+    </div>
+  );
+}
+
 const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, openConsoles, clearSignals, toggleBotState, restartBot, handleExport, handleDuplicate, handleClearCacheClick, handleDeleteClick, updateBotConfig, toggleConsole }) {
   const isBacktestOn     = bot.settings?.backtest_on_start === true;
   const isApiExecutionOn = bot.settings?.api_execution === true;
@@ -162,9 +206,6 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
     : (bot.settings?.symbol ? [bot.settings.symbol] : []);
   const visiblePairs = assignedPairs.slice(0, 3);
   const extraPairs   = assignedPairs.length - visiblePairs.length;
-  // Distinct configs backtested so far (from the last backtest summary)
-  const variants     = Number((bot.last_backtest_summary ?? bot.settings?.last_backtest_summary)?.variants) || 0;
-
   return (
     <div
       className={`terminal-card flex flex-col overflow-hidden transition-all duration-300 hover:border-border-strong ${
@@ -193,12 +234,6 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
               <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Pairs</span>
               <span className="text-[11px] font-num font-bold text-text">{assignedPairs.length}</span>
             </div>
-            {variants > 0 && (
-              <div className="flex flex-col" title={`${variants} distinct configuration${variants === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.`}>
-                <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Variant</span>
-                <span className="text-[11px] font-num font-bold text-text">#{variants}</span>
-              </div>
-            )}
             <div className="flex flex-col min-w-0" title={assignedPairs.join(', ')}>
               <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Whitelist</span>
               <span className="flex items-center gap-1 flex-wrap">
@@ -237,6 +272,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
 
       <RuntimeStrip bot={bot} />
       <StopReason bot={bot} />
+      <BacktestResult bot={bot} />
 
       {/* ── Card Body ── */}
       <div className="px-5 py-4 flex-1 flex flex-col space-y-5">
@@ -361,7 +397,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
   prev.clearSignals[prev.bot.name] === next.clearSignals[next.bot.name] &&
   JSON.stringify(prev.bot.runtime) === JSON.stringify(next.bot.runtime) &&
   JSON.stringify(prev.bot.settings) === JSON.stringify(next.bot.settings) &&
-  prev.bot.last_backtest_summary?.variants === next.bot.last_backtest_summary?.variants
+  JSON.stringify(prev.bot.last_backtest_summary) === JSON.stringify(next.bot.last_backtest_summary)
 );
 
 function ChevronIcon({ open }) {

@@ -1,4 +1,5 @@
 import logging
+import time
 import ccxt
 
 logger = logging.getLogger("apexalgo.exchange_registry")
@@ -104,6 +105,35 @@ def get_exchange_timeframes(exchange_id: str) -> dict[str, str]:
 
     _timeframe_cache[exchange_id] = tf_map
     return tf_map
+
+
+# Active spot symbols per exchange, refreshed after _MARKETS_TTL seconds so a
+# newly listed pair shows up without a restart
+_markets_cache: dict[str, tuple[float, list[str]]] = {}
+_MARKETS_TTL = 3600
+
+
+def get_exchange_symbols(exchange_id: str) -> list[str]:
+    """Sorted list of tradeable spot symbols ("BTC/USDT") on the exchange.
+
+    Empty when the exchange cannot be reached — callers must treat that as
+    "unknown", not "nothing is tradeable"."""
+    exchange_id = exchange_id.lower()
+    hit = _markets_cache.get(exchange_id)
+    if hit and time.monotonic() - hit[0] < _MARKETS_TTL:
+        return hit[1]
+    try:
+        exchange = build_exchange(exchange_id)
+        markets = exchange.load_markets()
+        symbols = sorted(
+            sym for sym, m in markets.items()
+            if m.get("spot", True) and m.get("active", True) is not False
+        )
+    except Exception as exc:
+        logger.warning("Failed to load markets for '%s': %s", exchange_id, exc)
+        return hit[1] if hit else []
+    _markets_cache[exchange_id] = (time.monotonic(), symbols)
+    return symbols
 
 
 def build_exchange_from_key(key_record) -> ccxt.Exchange:

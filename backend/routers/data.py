@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from backend.core.database import get_db, SessionLocal
 from backend.models.candles import Candle
 from backend.core.security import verify_api_key
-from backend.core.exchange_registry import build_exchange, SUPPORTED_EXCHANGES, get_exchange_timeframes
+from backend.core.exchange_registry import build_exchange, SUPPORTED_EXCHANGES, get_exchange_timeframes, get_exchange_symbols
 
 logger = logging.getLogger("apexalgo.data")
 
@@ -35,6 +35,18 @@ async def get_timeframes(exchange_id: str):
         raise HTTPException(status_code=400, detail=f"Unknown exchange '{exchange_id}'.")
     tf_map = await asyncio.to_thread(get_exchange_timeframes, exchange_id)
     return {"exchange": exchange_id, "timeframes": list(tf_map.keys())}
+
+
+@router.get("/symbols/{exchange_id}")
+async def get_symbols(exchange_id: str):
+    """Tradeable spot symbols on an exchange — the builder validates the
+    whitelist against this. ``symbols`` is empty (and ``known`` false) when the
+    exchange could not be reached, so callers do not reject every pair."""
+    exchange_id = exchange_id.lower()
+    if exchange_id not in SUPPORTED_EXCHANGES:
+        raise HTTPException(status_code=400, detail=f"Unknown exchange '{exchange_id}'.")
+    symbols = await asyncio.to_thread(get_exchange_symbols, exchange_id)
+    return {"exchange": exchange_id, "symbols": symbols, "known": bool(symbols)}
 
 
 class HistoricalDataFetch(BaseModel):

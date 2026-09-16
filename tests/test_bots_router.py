@@ -256,3 +256,49 @@ def test_summary_reports_the_mode_the_engine_would_book_in(db, client):
     modes = {b["name"]: b["execution_mode"] for b in client.get("/api/bots/summary", headers=HEADERS).json()}
     assert modes == {"fwd": "forward_test", "fwd-key-off": "forward_test", "paper": "paper", "live": "live",
                      "missing-key": "forward_test"}
+
+
+def test_open_real_positions_cannot_be_deleted_only_closed_ones(db, client, running_bot):
+    """Plan 3.3: dropping the record of a position that still exists on the
+    exchange would orphan the coins. Open live/paper → 409; closed → deleted;
+    open forward-test (nothing on the exchange) → deleted."""
+    running_bot(positions=[("live", SYMBOL, 1.0), ("paper", SYMBOL, 1.0), ("forward_test", SYMBOL, 1.0)])
+    live_id, paper_id, fwd_id = [
+        r[0] for r in db.query(Position.id).order_by(Position.id).all()
+    ]
+    for pid in (live_id, paper_id):
+        r = client.delete(f"/api/trades/positions/{pid}", headers=HEADERS)
+        assert r.status_code == 409 and "Close it" in r.json()["detail"], r.text
+    r = client.post("/api/trades/positions/bulk-delete", json=[live_id, fwd_id], headers=HEADERS)
+    assert r.status_code == 409, r.text
+    assert db.query(Position).count() == 3
+
+    assert client.delete(f"/api/trades/positions/{fwd_id}", headers=HEADERS).status_code == 200
+    db.query(Position).filter(Position.id == paper_id).update({"status": "closed"})
+    db.commit()
+    assert client.delete(f"/api/trades/positions/{paper_id}", headers=HEADERS).status_code == 200
+    db.expire_all()
+    assert [r[0] for r in db.query(Position.id).all()] == [live_id]
+
+
+def test_symbols_endpoint_lists_active_spot_markets_and_degrades_to_unknown(client, monkeypatch):
+    """Plan 3.4: the builder validates the whitelist against this. An
+    unreachable exchange must answer known=false, never an empty allowlist."""
+    from backend.core import exchange_registry as reg
+
+    class Ex:
+        def load_markets(self):
+            return {"BTC/USDT": {"spot": True, "active": True}, "ETH/USDT": {"spot": True},
+                    "OLD/USDT": {"spot": True, "active": False}, "BTC/USDT:USDT": {"spot": False, "swap": True}}
+    monkeypatch.setattr(reg, "_markets_cache", {})
+    monkeypatch.setattr(reg, "build_exchange", lambda exchange_id: Ex())
+    r = client.get("/api/data/symbols/okx", headers=HEADERS)
+    assert r.status_code == 200 and r.json() == {"exchange": "okx", "symbols": ["BTC/USDT", "ETH/USDT"], "known": True}
+
+    def boom(exchange_id):
+        raise RuntimeError("offline")
+    monkeypatch.setattr(reg, "_markets_cache", {})
+    monkeypatch.setattr(reg, "build_exchange", boom)
+    r = client.get("/api/data/symbols/kraken", headers=HEADERS)
+    assert r.status_code == 200 and r.json() == {"exchange": "kraken", "symbols": [], "known": False}
+    assert client.get("/api/data/symbols/nope", headers=HEADERS).status_code == 400

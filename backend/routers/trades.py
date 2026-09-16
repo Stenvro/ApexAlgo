@@ -200,6 +200,13 @@ def delete_historical_position(position_id: int, db: Session = Depends(get_db)):
     pos = db.query(Position).filter(Position.id == position_id).first()
     if not pos:
         raise HTTPException(status_code=404, detail="Position not found")
+    # Deleting the record of an open real position would leave the coins on
+    # the exchange with nothing tracking them — close it first.
+    if pos.status != "closed" and pos.mode in ("live", "paper"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Position #{position_id} is still {pos.status} on the exchange ({pos.mode}). Close it before deleting the record.",
+        )
 
     bot_name = pos.bot_name
     try:
@@ -218,6 +225,11 @@ def bulk_delete_positions(ids: list[int] = Body(...), db: Session = Depends(get_
     """Delete multiple positions and their orders in a single transaction."""
     if not ids:
         return {"deleted": 0}
+    open_real = db.query(Position.id).filter(
+        Position.id.in_(ids), Position.status != "closed", Position.mode.in_(("live", "paper"))
+    ).count()
+    if open_real:
+        raise HTTPException(status_code=409, detail=f"{open_real} position(s) are still open on the exchange. Close them before deleting the records.")
     try:
         bot_names = [r[0] for r in db.query(Position.bot_name).filter(Position.id.in_(ids)).distinct().all()]
         db.query(Order).filter(Order.position_id.in_(ids)).delete(synchronize_session=False)
