@@ -1,0 +1,228 @@
+{
+ "open_positions_after_run": 0,
+ "orders": [
+  {
+   "amount": 1.60671822,
+   "fee": 0.330165,
+   "price": 205.4902938,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-01-27T12:00:00"
+  },
+  {
+   "amount": 1.60671822,
+   "fee": 0.32693328,
+   "price": 203.47891692,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-01-31T00:00:00"
+  },
+  {
+   "amount": 1.57411614,
+   "fee": 0.32888105,
+   "price": 208.9306131,
+   "side": "buy",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-02-04T16:00:00"
+  },
+  {
+   "amount": 1.04318457,
+   "fee": 0.22018745,
+   "price": 211.07238345,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-02-05T04:00:00"
+  },
+  {
+   "amount": 1.57411614,
+   "fee": 0.31424314,
+   "price": 199.6314861,
+   "side": "sell",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-02-07T12:00:00"
+  },
+  {
+   "amount": 1.04318457,
+   "fee": 0.20975695,
+   "price": 201.0736669,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-02-09T04:00:00"
+  },
+  {
+   "amount": 1.43040299,
+   "fee": 0.32025005,
+   "price": 223.88798805,
+   "side": "buy",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-02-12T00:00:00"
+  },
+  {
+   "amount": 0.99615905,
+   "fee": 0.21440896,
+   "price": 215.23566405,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-02-12T12:00:00"
+  },
+  {
+   "amount": 1.43040299,
+   "fee": 0.31382543,
+   "price": 219.39651226,
+   "side": "sell",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-02-15T16:00:00"
+  },
+  {
+   "amount": 0.99615905,
+   "fee": 0.20240894,
+   "price": 203.18938301,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-02-15T20:00:00"
+  },
+  {
+   "amount": 1.45092672,
+   "fee": 0.31381991,
+   "price": 216.2892906,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-02-19T08:00:00"
+  },
+  {
+   "amount": 0.9723551,
+   "fee": 0.21010395,
+   "price": 216.0773847,
+   "side": "buy",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-02-28T12:00:00"
+  },
+  {
+   "amount": 1.45092672,
+   "fee": 0.38854879,
+   "price": 267.79353034,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-03-01T12:00:00"
+  },
+  {
+   "amount": 3.7903198,
+   "fee": 0.26882253,
+   "price": 70.923444,
+   "side": "buy",
+   "symbol": "BTC/USDC",
+   "timestamp": "2023-03-04T16:00:00"
+  },
+  {
+   "amount": 0.9723551,
+   "fee": 0.2290616,
+   "price": 235.57402145,
+   "side": "sell",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-03-06T20:00:00"
+  },
+  {
+   "amount": 3.7903198,
+   "fee": 0.34816322,
+   "price": 91.85589674,
+   "side": "sell",
+   "symbol": "BTC/USDC",
+   "timestamp": "2023-03-14T00:00:00"
+  },
+  {
+   "amount": 3.65639051,
+   "fee": 0.37036684,
+   "price": 101.2930212,
+   "side": "buy",
+   "symbol": "BTC/USDC",
+   "timestamp": "2023-03-26T00:00:00"
+  },
+  {
+   "amount": 1.18227357,
+   "fee": 0.24796239,
+   "price": 209.73351435,
+   "side": "buy",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-03-26T16:00:00"
+  },
+  {
+   "amount": 3.65639051,
+   "fee": 0.39288708,
+   "price": 107.45216732,
+   "side": "sell",
+   "symbol": "BTC/USDC",
+   "timestamp": "2023-03-28T12:00:00"
+  },
+  {
+   "amount": 1.18227357,
+   "fee": 0.25908012,
+   "price": 219.13719882,
+   "side": "sell",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-03-31T04:00:00"
+  },
+  {
+   "amount": 1.96551669,
+   "fee": 0.38105351,
+   "price": 193.86938625,
+   "side": "buy",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-04-10T12:00:00"
+  },
+  {
+   "amount": 1.48315001,
+   "fee": 0.25511717,
+   "price": 172.0103622,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-04-16T16:00:00"
+  },
+  {
+   "amount": 1.96551669,
+   "fee": 0.44022709,
+   "price": 223.97524733,
+   "side": "sell",
+   "symbol": "SOL/USDC",
+   "timestamp": "2023-04-17T16:00:00"
+  },
+  {
+   "amount": 1.48315001,
+   "fee": 0.24281625,
+   "price": 163.71657889,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-04-18T20:00:00"
+  },
+  {
+   "amount": 2.36223366,
+   "fee": 0.39609366,
+   "price": 167.6775969,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-04-24T00:00:00"
+  },
+  {
+   "amount": 2.36223366,
+   "fee": 0.39128307,
+   "price": 165.641138,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-04-24T04:00:00"
+  }
+ ],
+ "summary": {
+  "candles": 1800,
+  "data_from": "2023-01-17T16:00:00",
+  "data_to": "2023-04-27T12:00:00",
+  "entries_blocked_count": 0,
+  "entries_blocked_days": 0.0,
+  "max_capital_loss": 6.26,
+  "max_drawdown": 7.76,
+  "net_pnl": 194.09,
+  "return_pct": 19.41,
+  "trades": 13,
+  "variants": 1,
+  "win_rate": 46.2,
+  "wins": 6
+ }
+}

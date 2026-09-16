@@ -10,7 +10,7 @@ from backend.core.database import get_db
 from backend.models.exchange_keys import ExchangeKey
 from backend.models.bots import BotConfig
 from backend.core.security import verify_api_key
-from backend.core.encryption import encrypt_data, decrypt_data
+from backend.core.encryption import encrypt_data
 from backend.core.exchange_registry import build_exchange, build_exchange_from_key, SUPPORTED_EXCHANGES
 
 logger = logging.getLogger("apexalgo.keys")
@@ -292,7 +292,7 @@ def execute_quick_swap(name: str, payload: dict = Body(...), db: Session = Depen
         return JSONResponse(status_code=400, content={"detail": "Exchange rejected the order. Please check your assets and try again."})
     except ccxt.InsufficientFunds:
         return JSONResponse(status_code=400, content={"detail": "Insufficient funds in your account to cover this swap amount."})
-    except ccxt.InvalidOrder as e:
+    except ccxt.InvalidOrder:
         return JSONResponse(status_code=400, content={"detail": "Order size too small or invalid for this exchange."})
     except Exception as e:
         logger.error("Swap error for wallet '%s': %s", name, e, exc_info=True)

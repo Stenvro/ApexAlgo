@@ -9,7 +9,7 @@ from itertools import pairwise
 from sqlalchemy.orm import Session
 
 from backend.core.database import SessionLocal
-from backend.core.exchange_registry import build_exchange, get_exchange_timeframes
+from backend.core.exchange_registry import build_exchange
 from backend.core.events import event_bus
 from backend.models.bots import BotConfig
 from backend.models.candles import Candle

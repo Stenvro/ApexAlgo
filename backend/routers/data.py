@@ -80,11 +80,6 @@ async def fetch_historical_data(
 def _fetch_and_save_data(formatted_symbol: str, exchange_id: str, req: HistoricalDataFetch):
     exch = build_exchange(exchange_id)
 
-    try:
-        tf_seconds = exch.parse_timeframe(req.timeframe)
-    except Exception:
-        tf_seconds = 60
-
     start_ts = int(req.start_date.timestamp() * 1000)
     end_ts = int(req.end_date.timestamp() * 1000)
 
@@ -92,7 +87,6 @@ def _fetch_and_save_data(formatted_symbol: str, exchange_id: str, req: Historica
     total_fetched = 0
     total_saved = 0
     actual_oldest_ts = None
-    actual_newest_ts = None
 
     logger.info(
         "Manual sync: %s/%s/%s — fetching from %s to %s.",
@@ -176,7 +170,6 @@ def _fetch_and_save_data(formatted_symbol: str, exchange_id: str, req: Historica
 
                 if actual_oldest_ts is None:
                     actual_oldest_ts = int(valid[0][0])
-                actual_newest_ts = int(valid[-1][0])
 
             last_ts = int(batch[-1][0])
 

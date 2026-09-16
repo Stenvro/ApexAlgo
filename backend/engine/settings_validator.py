@@ -168,7 +168,6 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
     # Trade settings
     trade_settings = settings.get("trade_settings", {})
     entry_ts = trade_settings.get("entry", {})
-    exit_ts = trade_settings.get("exit", {})
 
     # Entry amount
     amount_type = entry_ts.get("amount_type", "percentage")

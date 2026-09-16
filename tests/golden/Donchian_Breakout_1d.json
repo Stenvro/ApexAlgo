@@ -1,0 +1,196 @@
+{
+ "open_positions_after_run": 0,
+ "orders": [
+  {
+   "amount": 2.31642237,
+   "fee": 0.50025,
+   "price": 215.95802505,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-06-15T00:00:00"
+  },
+  {
+   "amount": 2.31642237,
+   "fee": 0.46527479,
+   "price": 200.85922015,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-07-01T00:00:00"
+  },
+  {
+   "amount": 2.28550799,
+   "fee": 0.48227065,
+   "price": 211.0124535,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-08-03T00:00:00"
+  },
+  {
+   "amount": 2.28550799,
+   "fee": 0.46083459,
+   "price": 201.6333329,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-08-24T00:00:00"
+  },
+  {
+   "amount": 2.12924452,
+   "fee": 0.47107547,
+   "price": 221.24066505,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-09-20T00:00:00"
+  },
+  {
+   "amount": 2.12924452,
+   "fee": 0.42771649,
+   "price": 200.8771112,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-10-06T00:00:00"
+  },
+  {
+   "amount": 2.00540765,
+   "fee": 0.44893552,
+   "price": 223.8624753,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2023-11-14T00:00:00"
+  },
+  {
+   "amount": 2.00540765,
+   "fee": 0.52984561,
+   "price": 264.2084297,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2024-01-09T00:00:00"
+  },
+  {
+   "amount": 7.15316157,
+   "fee": 0.48892115,
+   "price": 68.3503581,
+   "side": "buy",
+   "symbol": "BTC/USDC",
+   "timestamp": "2024-01-10T00:00:00"
+  },
+  {
+   "amount": 7.15316157,
+   "fee": 0.69588412,
+   "price": 97.28343395,
+   "side": "sell",
+   "symbol": "BTC/USDC",
+   "timestamp": "2024-04-19T00:00:00"
+  },
+  {
+   "amount": 5.2404946,
+   "fee": 0.59186168,
+   "price": 112.9400418,
+   "side": "buy",
+   "symbol": "BTC/USDC",
+   "timestamp": "2024-05-23T00:00:00"
+  },
+  {
+   "amount": 5.2404946,
+   "fee": 0.53122545,
+   "price": 101.36933498,
+   "side": "sell",
+   "symbol": "BTC/USDC",
+   "timestamp": "2024-06-09T00:00:00"
+  },
+  {
+   "amount": 4.70020664,
+   "fee": 0.56096658,
+   "price": 119.34934485,
+   "side": "buy",
+   "symbol": "BTC/USDC",
+   "timestamp": "2024-06-24T00:00:00"
+  },
+  {
+   "amount": 4.70020664,
+   "fee": 0.5637395,
+   "price": 119.93930035,
+   "side": "sell",
+   "symbol": "BTC/USDC",
+   "timestamp": "2024-07-23T00:00:00"
+  },
+  {
+   "amount": 4.31976889,
+   "fee": 0.5617911,
+   "price": 130.0511931,
+   "side": "buy",
+   "symbol": "BTC/USDC",
+   "timestamp": "2024-08-20T00:00:00"
+  },
+  {
+   "amount": 1.60454495,
+   "fee": 0.28047407,
+   "price": 174.7997562,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2024-09-23T00:00:00"
+  },
+  {
+   "amount": 1.60454495,
+   "fee": 0.26099902,
+   "price": 162.66232815,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2024-10-11T00:00:00"
+  },
+  {
+   "amount": 1.52795927,
+   "fee": 0.2704608,
+   "price": 177.0078597,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2024-10-17T00:00:00"
+  },
+  {
+   "amount": 1.52795927,
+   "fee": 0.24331336,
+   "price": 159.2407398,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2024-10-24T00:00:00"
+  },
+  {
+   "amount": 4.31976889,
+   "fee": 0.62145203,
+   "price": 143.86233285,
+   "side": "sell",
+   "symbol": "BTC/USDC",
+   "timestamp": "2024-10-27T00:00:00"
+  },
+  {
+   "amount": 3.12050192,
+   "fee": 0.56719378,
+   "price": 181.7636364,
+   "side": "buy",
+   "symbol": "ETH/USDC",
+   "timestamp": "2024-11-17T00:00:00"
+  },
+  {
+   "amount": 3.12050192,
+   "fee": 0.58365993,
+   "price": 187.0404,
+   "side": "sell",
+   "symbol": "ETH/USDC",
+   "timestamp": "2024-11-30T00:00:00"
+  }
+ ],
+ "summary": {
+  "candles": 1200,
+  "data_from": "2023-04-11T00:00:00",
+  "data_to": "2024-11-30T00:00:00",
+  "entries_blocked_count": 0,
+  "entries_blocked_days": 0.0,
+  "max_capital_loss": 12.13,
+  "max_drawdown": 13.43,
+  "net_pnl": 149.14,
+  "return_pct": 14.91,
+  "trades": 11,
+  "variants": 1,
+  "win_rate": 45.5,
+  "wins": 5
+ }
+}

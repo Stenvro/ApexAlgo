@@ -10,8 +10,7 @@ import ccxt
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from sqlalchemy import text, func
-from sqlalchemy.orm import Session, selectinload
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import flag_modified
 from backend.core.database import SessionLocal
 from backend.models.bots import BotConfig
@@ -22,7 +21,6 @@ from backend.models.positions import Position
 from backend.models.exchange_keys import ExchangeKey
 from backend.engine.evaluator import NodeEvaluator
 from backend.core.events import event_bus
-from backend.core.encryption import decrypt_data
 from backend.core.exchange_registry import build_exchange_from_key, get_exchange_timeframes
 from backend.core import bot_log_buffer as blb
 
