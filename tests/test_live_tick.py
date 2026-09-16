@@ -11,6 +11,7 @@ import pytest
 
 from backend.engine.bot_manager import BotManager
 from backend.models.bots import BotConfig
+from backend.models.candles import Candle
 from backend.models.exchange_keys import ExchangeKey
 from backend.models.orders import Order
 from backend.models.positions import Position
@@ -103,10 +104,12 @@ def _settings(entry_always=True, max_positions=1, scope="per_pair", sl_pct=10, m
 
 @pytest.fixture
 def live_bot(db):
-    def _make(settings=None, last_low=None):
+    def _make(settings=None, last_low=None, last_high=None):
         candles = make_candles(EXCHANGE, SYMBOL, TF, N_CANDLES, seed=7, start_price=100.0)
         if last_low is not None:
             candles[-1].low = last_low
+        if last_high is not None:
+            candles[-1].high = last_high
         insert_candles(db, candles)
         db.add(ExchangeKey(name=KEY_NAME, exchange=EXCHANGE, api_key="x", api_secret="y", passphrase="", is_sandbox=False))
         bot = BotConfig(name="live-bot", is_active=True, is_sandbox=False, strategy="node_graph",
@@ -363,3 +366,184 @@ def test_startup_reconciliation_flags_positions_the_wallet_cannot_back(db, live_
 
     # Paper positions are checked against the paper wallet only; none open here
     assert bm._reconcile_positions_with_wallet(db, bot, mock, short_balance, "paper") == []
+
+
+# ── forward test = backtest economics (2.1) ────────────────────────────────
+
+def _forward_settings(**kw):
+    s = _settings(**kw)
+    s["api_execution"] = False
+    s["api_key_name"] = None
+    s["trade_settings"]["entry"]["slippage"] = 0.5
+    s["trade_settings"]["exit"]["slippage"] = 0.5
+    return s
+
+
+def _fwd_positions(db, status=None):
+    q = db.query(Position).filter(Position.bot_name == "live-bot", Position.mode == "forward_test")
+    if status:
+        q = q.filter(Position.status == status)
+    return q.all()
+
+
+def test_forward_entry_pays_slippage_and_fee_and_sizes_from_pool(db, live_bot, run_tick):
+    _, candles = live_bot(_forward_settings(amount_pct=50))
+    close = candles[-1].close
+    mock = ExchangeMock()
+    run_tick(mock)
+    db.expire_all()
+
+    assert mock.created == []  # no exchange involved
+    pos = _fwd_positions(db, "open")
+    assert len(pos) == 1
+    entry_price = close * 1.005
+    assert pos[0].entry_price == pytest.approx(entry_price)
+    # 50% of the 1000 pool, capped so price+fee fit — same as the backtest
+    assert pos[0].amount == pytest.approx(0.5 * 1000 / close, rel=1e-6)
+    order = db.query(Order).filter(Order.bot_name == "live-bot", Order.mode == "forward_test").one()
+    assert order.fee == pytest.approx(entry_price * pos[0].amount * 0.001)
+
+
+def test_forward_pool_carries_realized_pnl_and_locked_capital(db, live_bot, run_tick):
+    """Second entry sizes from backtest_capital + realized PnL − deployed cost,
+    not from the original capital every time."""
+    _, candles = live_bot(_forward_settings(amount_pct=100, symbols=(SYMBOL, "ETH/USDT")))
+    close = candles[-1].close
+    ts = candles[-2].timestamp
+    # A closed forward-test loss of 200 and an open ETH position worth 300 → pool = 500
+    db.add(Position(exchange=EXCHANGE, bot_name="live-bot", symbol="ETH/USDT", mode="forward_test", status="closed",
+                    side="long", entry_price=10.0, amount=10.0, profit_abs=-200.0, created_at=ts, closed_at=ts))
+    db.add(Position(exchange=EXCHANGE, bot_name="live-bot", symbol="ETH/USDT", mode="forward_test", status="open",
+                    side="long", entry_price=30.0, amount=10.0, created_at=ts))
+    db.commit()
+    run_tick(ExchangeMock())
+    db.expire_all()
+
+    pos = [p for p in _fwd_positions(db, "open") if p.symbol == SYMBOL]
+    assert len(pos) == 1
+    entry_price = close * 1.005
+    assert pos[0].amount == pytest.approx(500 / (entry_price * 1.001), rel=1e-6)
+
+
+def test_forward_pool_depleted_skips_entry_but_keeps_exits(db, live_bot, run_tick):
+    _, candles = live_bot(_forward_settings(amount_pct=100), last_low=50.0)
+    ts = candles[-2].timestamp
+    # Everything locked in an open ETH position → pool 0; BTC position must still hit its stop
+    db.add(Position(exchange=EXCHANGE, bot_name="live-bot", symbol="ETH/USDT", mode="forward_test", status="open",
+                    side="long", entry_price=100.0, amount=10.0, created_at=ts))
+    btc = Position(exchange=EXCHANGE, bot_name="live-bot", symbol=SYMBOL, mode="forward_test", status="open",
+                   side="long", entry_price=100.0, amount=1.0, created_at=ts)
+    db.add(btc)
+    db.flush()
+    db.add(Order(position_id=btc.id, exchange=EXCHANGE, bot_name="live-bot", mode="forward_test", symbol=SYMBOL,
+                 side="buy", order_type="market", price=100.0, amount=1.0, fee=0.1, status="filled", timestamp=ts))
+    db.commit()
+    run_tick(ExchangeMock())
+    db.expire_all()
+
+    assert len(_fwd_positions(db, "open")) == 1  # ETH only: no new BTC entry, BTC stop fired
+    closed = [p for p in _fwd_positions(db, "closed") if p.symbol == SYMBOL]
+    assert len(closed) == 1
+    sell = db.query(Order).filter(Order.position_id == closed[0].id, Order.side == "sell").one()
+    exit_price = 90.0 * (1 - 0.005)  # 10% stop, minus exit slippage
+    assert sell.price == pytest.approx(exit_price)
+    assert sell.fee == pytest.approx(exit_price * 1.0 * 0.001)
+    assert closed[0].profit_abs == pytest.approx((exit_price - 100.0) * 1.0 - 0.1 - sell.fee)
+
+
+# ── live risk gates mark-to-market (2.2) ───────────────────────────────────
+
+def test_open_loss_trips_max_drawdown_before_it_is_realized(db, live_bot, run_tick):
+    """Realized PnL is 0, but the open position is 30% under water on 1000 of
+    starting capital → 30% MTM drawdown ≥ the 20% limit → close all + stop."""
+    s = _settings(entry_always=False, sl_pct=90)
+    s["max_drawdown"] = 20
+    s["drawdown_action"] = "close_all"
+    bot, candles = live_bot(s)
+    close = candles[-1].close
+    # 1000 capital fully deployed at a price 30% above the latest close
+    _open_live_position(db, candles, entry=close / 0.7, amount=700 / close)
+    mock = ExchangeMock(average=close)
+    run_tick(mock)
+    db.expire_all()
+
+    assert [o["side"] for o in mock.created] == ["sell"]
+    assert _positions(db, "open") == []
+    bot = db.query(BotConfig).filter(BotConfig.name == "live-bot").one()
+    assert bot.is_active is False
+    assert "drawdown" in (bot.settings.get("last_stop_reason") or "").lower()
+
+
+def test_small_open_loss_does_not_trip_max_drawdown(db, live_bot, run_tick):
+    s = _settings(entry_always=False, sl_pct=90)
+    s["max_drawdown"] = 20
+    bot, candles = live_bot(s)
+    close = candles[-1].close
+    # 5% under water on half the capital → 2.5% MTM drawdown
+    _open_live_position(db, candles, entry=close / 0.95, amount=500 / close)
+    mock = ExchangeMock(average=close)
+    run_tick(mock)
+    db.expire_all()
+
+    assert mock.created == []
+    assert len(_positions(db, "open")) == 1
+    assert db.query(BotConfig).filter(BotConfig.name == "live-bot").one().is_active is True
+
+
+# ── partial exits close % of the original amount (2.4) ─────────────────────
+
+def test_two_half_take_profits_close_the_whole_position(db, live_bot, run_tick):
+    s = _settings(entry_always=False, sl_pct=50)
+    s["trade_settings"]["entry"]["take_profits"] = [
+        {"type": "percentage", "value": 1, "close_amount_type": "percentage", "close_amount_value": 50},
+        {"type": "percentage", "value": 2, "close_amount_type": "percentage", "close_amount_value": 50},
+    ]
+    bot, candles = live_bot(s, last_high=105.0)
+    _open_live_position(db, candles, entry=100.0, amount=1.0)
+    mock = ExchangeMock(average=102.0)
+    run_tick(mock)
+    db.expire_all()
+
+    assert [round(o["amount"], 6) for o in mock.created] == [0.5, 0.5], "50% + 50% of the original, not 50% + 25%"
+    assert _positions(db, "open") == []
+    assert len(_positions(db, "closed")) == 1
+
+
+# ── backlog candles are evaluated at their own timestamp (2.5) ─────────────
+
+def test_backlog_candle_is_evaluated_not_the_newest_row(db, live_bot, run_tick, monkeypatch):
+    """A stop that was hit on the second-to-last candle must fire when that
+    candle's event is processed, at that candle's timestamp — even though a
+    newer candle (whose low never reached the stop) is already stored."""
+    from datetime import timezone
+    bot, candles = live_bot(_settings(entry_always=False, sl_pct=10))
+    stop_candle = candles[-2]
+    db.query(Candle).filter(Candle.exchange == EXCHANGE, Candle.symbol == SYMBOL, Candle.timeframe == TF,
+                            Candle.timestamp == stop_candle.timestamp).update({"low": 50.0})
+    db.commit()
+    pos = Position(exchange=EXCHANGE, bot_name="live-bot", symbol=SYMBOL, mode="live", status="open",
+                   side="long", entry_price=100.0, amount=0.5, created_at=candles[-3].timestamp)
+    db.add(pos)
+    db.flush()
+    db.add(Order(position_id=pos.id, exchange=EXCHANGE, bot_name="live-bot", mode="live", symbol=SYMBOL,
+                 side="buy", order_type="market", price=100.0, amount=0.5, fee=0.0, status="filled",
+                 timestamp=candles[-3].timestamp, exchange_order_id="seed"))
+    db.commit()
+
+    mock = ExchangeMock(average=90.0)
+    bm = BotManager()
+    monkeypatch.setattr(bm, "_get_ccxt_instance", lambda key_record: mock)
+    real = BotManager._reconcile_order
+    monkeypatch.setattr(bm, "_reconcile_order",
+                        lambda inst, order, sym, attempts=5, delay=1.0: real(bm, inst, order, sym, attempts, 0))
+    asyncio.run(bm._handle_candle_close(EXCHANGE, SYMBOL, TF, stop_candle.timestamp.replace(tzinfo=timezone.utc)))
+    db.expire_all()
+
+    assert [o["side"] for o in mock.created] == ["sell"]
+    sell = db.query(Order).filter(Order.position_id == pos.id, Order.side == "sell").one()
+    assert sell.timestamp == stop_candle.timestamp
+    assert _positions(db, "open") == []
+
+    # The newer candle then processes normally and must not re-sell
+    asyncio.run(bm._handle_candle_close(EXCHANGE, SYMBOL, TF, candles[-1].timestamp.replace(tzinfo=timezone.utc)))
+    assert len(mock.created) == 1

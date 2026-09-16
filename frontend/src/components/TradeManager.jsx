@@ -4,6 +4,7 @@ import PageShell from './ui/PageShell';
 import Button from './ui/Button';
 import { Select } from './ui/Input';
 import Badge from './ui/Badge';
+import ModeBadge from './ui/ModeBadge';
 import StatCard from './ui/StatCard';
 import EmptyState from './ui/EmptyState';
 import { Skeleton } from './ui/Skeleton';
@@ -70,13 +71,6 @@ const entryTimeOf = (p, exitTs, entryTsByPos) => {
 
 const pnlColor = (v) => (v >= 0 ? 'text-success' : 'text-danger');
 const pnlSign = (v) => (v >= 0 ? '+' : '');
-
-const MODE_BADGE_VARIANT = {
-    live: 'success',
-    paper: 'info',
-    backtest: 'neutral',
-    forward_test: 'purple',
-};
 
 // ─── Equity Curve SVG ────────────────────────────────────────────────────────
 
@@ -318,6 +312,22 @@ const botCapital = (bot, modes) => {
 };
 const modesOf = (positions) => new Set(positions.map(p => p.mode).filter(Boolean));
 
+// Mode filter values: 'real' = paper + live (money or a sandbox that mimics
+// it), 'all' = everything mixed together, otherwise a single engine mode.
+const REAL_MODES = new Set(['paper', 'live']);
+const modeMatches = (filter, mode) =>
+    filter === 'all' || (filter === 'real' ? REAL_MODES.has(mode) : mode === filter);
+// Default view: real money first, else the forward test, else the backtest —
+// never a sum across simulated and real trades unless explicitly chosen.
+const defaultModeFor = (positions) => {
+    const modes = modesOf(positions);
+    if (modes.has('live') || modes.has('paper')) return 'real';
+    if (modes.has('forward_test')) return 'forward_test';
+    return 'backtest';
+};
+const MODE_ORDER = ['live', 'paper', 'forward_test', 'backtest'];
+const sortModes = (modes) => [...modes].sort((a, b) => MODE_ORDER.indexOf(a) - MODE_ORDER.indexOf(b));
+
 export default function TradeManager({ setError, bots = [] }) {
     const [positions, setPositions] = useState([]);
     const [orders, setOrders] = useState([]);
@@ -335,7 +345,8 @@ export default function TradeManager({ setError, bots = [] }) {
     const [filterBot, setFilterBot] = useState('all');
     const [filterSymbol, setFilterSymbol] = useState('all');
     const [filterExchange, setFilterExchange] = useState('all');
-    const [filterMode, setFilterMode] = useState('all');
+    // null = auto (resolved from the loaded positions, see defaultModeFor)
+    const [filterModeChoice, setFilterMode] = useState(null);
     const [filterInterval, setFilterInterval] = useState('all');
     // Analysis window (ms epoch, null = unbounded). Applies to closed trades and orders.
     const [dateFrom, setDateFrom] = useState(null);
@@ -407,12 +418,16 @@ export default function TradeManager({ setError, bots = [] }) {
         return map;
     }, [bots]);
 
+    const filterMode = useMemo(
+        () => filterModeChoice ?? defaultModeFor(positions),
+        [filterModeChoice, positions]);
+
     const applyFilters = useCallback((arr) =>
         arr
             .filter(x => filterBot === 'all' || x.bot_name === filterBot)
             .filter(x => filterSymbol === 'all' || x.symbol === filterSymbol)
             .filter(x => filterExchange === 'all' || (x.exchange || 'okx') === filterExchange)
-            .filter(x => filterMode === 'all' || x.mode === filterMode)
+            .filter(x => modeMatches(filterMode, x.mode))
             .filter(x => filterInterval === 'all' || tfByBot[x.bot_name] === filterInterval),
     [filterBot, filterSymbol, filterExchange, filterMode, filterInterval, tfByBot]);
 
@@ -563,19 +578,29 @@ export default function TradeManager({ setError, bots = [] }) {
         const winRate = closedPositions.length > 0 ? (wins.length / closedPositions.length) * 100 : 0;
         const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0);
 
-        // Max drawdown — percentage of peak equity using backtest_capital as starting equity
+        // Max drawdown — percentage of peak equity using the pools in view as starting equity
         const sorted = [...closedPositions].sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at));
         // Look up backtest_capital from bot config (default $1000)
         const filteredBotNames = [...new Set(sorted.map(p => p.bot_name).filter(Boolean))];
         const viewModes = modesOf(sorted);
         const capitalPerBot = filteredBotNames.map(name => botCapital(bots.find(b => b.name === name), viewModes));
-        // Per-bot capital is a separate pool, so total deployed capital is the
-        // sum across the bots in view; a single bot is just its own pool.
-        // No trades in view → no capital deployed; never fall back to a phantom $1000.
-        const startingCapital = capitalPerBot.length > 0 ? Math.max(...capitalPerBot) : 0;
+        // Per-bot capital is a separate pool, so the capital in view is the sum
+        // across the bots in view — one base for both the return and the
+        // drawdown below. No trades in view → no capital deployed; never fall
+        // back to a phantom $1000.
         const totalCapital = capitalPerBot.reduce((a, b) => a + b, 0);
 
-        let equity = startingCapital, peakEq = startingCapital, maxDDpct = 0;
+        // Simulated and real trades never sum to one number: when the view
+        // mixes modes the tile shows one line per mode instead
+        const pnlByMode = {};
+        for (const p of closedPositions) {
+            if (!p.mode) continue;
+            pnlByMode[p.mode] = (pnlByMode[p.mode] || 0) + (p.profit_abs || 0);
+        }
+        const modes = sortModes(Object.keys(pnlByMode));
+        const mixed = modes.length > 1;
+
+        let equity = totalCapital, peakEq = totalCapital, maxDDpct = 0;
         for (const p of sorted) {
             equity += (p.profit_abs || 0);
             if (equity > peakEq) peakEq = equity;
@@ -1228,7 +1253,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                                     {breakdownView === 'bot' && <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${r.isActive ? 'bg-success animate-pulse' : 'bg-faint/40'}`} />}
                                                     <span className="truncate max-w-[220px]" title={r.label}>{r.label}</span>
                                                     {breakdownView === 'bot' && r.timeframe && <span className="text-[9px] font-num text-accent">{r.timeframe}</span>}
-                                                    {r.modes.map(m => <Badge key={m} variant={MODE_BADGE_VARIANT[m] || 'neutral'} className="text-[8px]!">{m}</Badge>)}
+                                                    {r.modes.map(m => <ModeBadge key={m} mode={m} short className="text-[8px]!" />)}
                                                 </div>
                                             </td>
                                             <td className="px-4 py-2.5 text-right font-num text-muted">{r.trades} <span className="text-faint">({r.wins}W)</span></td>
@@ -1327,7 +1352,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${r.isActive ? 'bg-success animate-pulse' : 'bg-faint/40'}`} />
                                                     <span className="truncate max-w-[220px]" title={r.label}>{r.label}</span>
                                                     {r.timeframe && <span className="text-[9px] font-num text-accent">{r.timeframe}</span>}
-                                                    <Badge variant={MODE_BADGE_VARIANT[r.mode] || 'neutral'} className="text-[8px]!">{r.mode}</Badge>
+                                                    <ModeBadge mode={r.mode} short className="text-[8px]!" />
                                                 </div>
                                             </td>
                                             <td className="px-4 py-2.5 text-right font-num font-bold text-text">${safeNum(r.pool, 0)}</td>
@@ -1421,7 +1446,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                         <tr key={pos.id} className="border-b border-border/40 hover:bg-text/[0.03] transition-colors">
                                             <td className="px-4 py-3 font-bold text-text">
                                                 <span className="align-middle">{pos.bot_name}</span>
-                                                <Badge variant={MODE_BADGE_VARIANT[pos.mode] || 'neutral'} className="ml-2 text-[8px]!">{pos.mode}</Badge>
+                                                <ModeBadge mode={pos.mode} short className="ml-2 text-[8px]!" />
                                             </td>
                                             <td className="px-4 py-3 text-accent font-bold uppercase text-[10px]">{pos.exchange || 'okx'}</td>
                                             <td className="px-4 py-3 font-bold text-text font-num">{pos.symbol}</td>
@@ -1529,7 +1554,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                                 </td>
                                                 <td className="px-4 py-2.5 font-bold text-text">
                                                     <span className="align-middle">{pos.bot_name}</span>
-                                                    <Badge variant={MODE_BADGE_VARIANT[pos.mode] || 'neutral'} className="ml-1.5 text-[8px]!">{pos.mode}</Badge>
+                                                    <ModeBadge mode={pos.mode} short className="ml-1.5 text-[8px]!" />
                                                 </td>
                                                 <td className="px-4 py-2.5 text-accent font-bold uppercase text-[10px]">{pos.exchange || 'okx'}</td>
                                                 <td className="px-4 py-2.5 font-bold font-num text-text">{pos.symbol}</td>
@@ -1614,7 +1639,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                             <td className="px-4 py-2.5 font-num text-muted text-[10px]">{new Date(order.timestamp).toLocaleString()}</td>
                                             <td className="px-4 py-2.5 font-bold text-text">
                                                 <span className="align-middle">{order.bot_name}</span>
-                                                <Badge variant={MODE_BADGE_VARIANT[order.mode] || 'neutral'} className="ml-1.5 text-[8px]!">{order.mode}</Badge>
+                                                <ModeBadge mode={order.mode} short className="ml-1.5 text-[8px]!" />
                                             </td>
                                             <td className="px-4 py-2.5 text-accent font-bold uppercase text-[10px]">{order.exchange || 'okx'}</td>
                                             <td className="px-4 py-2.5 font-bold font-num text-text">{order.symbol}</td>

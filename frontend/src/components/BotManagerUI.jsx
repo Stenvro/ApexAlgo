@@ -6,6 +6,7 @@ import PageShell from './ui/PageShell';
 import SectionHeader from './ui/SectionHeader';
 import Button from './ui/Button';
 import Badge from './ui/Badge';
+import ModeBadge from './ui/ModeBadge';
 import EmptyState from './ui/EmptyState';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
@@ -178,10 +179,8 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
             {bot.is_active
               ? <Badge variant="success" dot pulse>Running</Badge>
               : <Badge variant="neutral" dot>Stopped</Badge>}
-            {isApiExecutionOn
-              ? <Badge variant="accent">Live</Badge>
-              : <Badge variant="info">Paper</Badge>}
-            {isBacktestOn && <Badge variant="purple">Backtest</Badge>}
+            <ModeBadge mode={bot.execution_mode || (isApiExecutionOn ? 'live' : 'forward_test')} />
+            {isBacktestOn && <Badge variant="neutral">+ Backtest</Badge>}
           </div>
 
           {/* Metrics row */}
@@ -252,18 +251,18 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
             <button
               disabled={bot.is_active}
               onClick={() => updateBotConfig(bot.id, bot, { settings: { api_execution: false } })}
-              title="Simulate orders locally without touching the exchange."
-              className={`flex-1 py-2 text-[9px] font-bold uppercase transition-all duration-200 disabled:opacity-50 ${!isApiExecutionOn ? 'bg-info/10 text-info' : 'text-muted hover:text-text hover:bg-raised'}`}
+              title="Forward test: simulate fills locally on live candles without touching the exchange."
+              className={`flex-1 py-2 text-[9px] font-bold uppercase transition-all duration-200 disabled:opacity-50 ${!isApiExecutionOn ? 'bg-purple/10 text-purple' : 'text-muted hover:text-text hover:bg-raised'}`}
             >
-              Paper Trade
+              Forward test
             </button>
             <button
               disabled={bot.is_active || !hasApiKey}
               onClick={() => updateBotConfig(bot.id, bot, { settings: { api_execution: true } })}
-              title={!hasApiKey ? 'Assign an API key to enable live/paper routing.' : 'Route orders through API key.'}
+              title={!hasApiKey ? 'Assign an API key to route orders (paper on a sandbox key, live otherwise).' : 'Route orders through the API key: paper on a sandbox key, live (real money) otherwise.'}
               className={`flex-1 py-2 text-[9px] font-bold uppercase transition-all duration-200 border-l border-border disabled:opacity-50 ${isApiExecutionOn ? 'bg-accent/10 text-accent' : 'text-muted hover:text-text hover:bg-raised'}`}
             >
-              Live Exchange
+              Exchange orders
             </button>
           </div>
         </div>
@@ -355,6 +354,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
   prev.bot.id === next.bot.id &&
   prev.bot.is_active === next.bot.is_active &&
   prev.bot.name === next.bot.name &&
+  prev.bot.execution_mode === next.bot.execution_mode &&
   prev.busyAction === next.busyAction &&
   (prev.togglingBot === prev.bot.id) === (next.togglingBot === next.bot.id) &&
   prev.openConsoles[prev.bot.id] === next.openConsoles[next.bot.id] &&

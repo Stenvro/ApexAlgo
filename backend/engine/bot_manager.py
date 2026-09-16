@@ -218,17 +218,41 @@ class BotManager:
             if s["peak_equity"] > 0:
                 s["max_dd"] = max(s["max_dd"], ((s["peak_equity"] - equity) / s["peak_equity"]) * 100)
 
-    @staticmethod
-    def _dd_now(state):
+    def _dd_now(self, state, unrealized=0.0):
         """Current (not historical-max) drawdown % and capital-loss % from a
-        drawdown-cache state. Current drawdown recovers as equity climbs back,
-        which is what the block_entries hysteresis needs."""
-        equity = state["starting_capital"] + state["running_pnl"]
-        peak = state["peak_equity"]
-        dd = ((peak - equity) / peak) * 100 if peak > 0 else 0.0
-        start = state["starting_capital"]
-        loss = ((start - equity) / start) * 100 if start > 0 else 0.0
+        drawdown-cache state, marked to market: `unrealized` is the open PnL
+        of the bot's open positions at the latest closes. The peak and max
+        drawdown are advanced on the mark-to-market curve too — the same
+        quantity the backtest gate measures, so a limit that held in the
+        backtest means the same thing live. Current drawdown recovers as
+        equity climbs back, which is what the block_entries hysteresis needs."""
+        with self._drawdown_lock:
+            equity = state["starting_capital"] + state["running_pnl"] + unrealized
+            state["peak_equity"] = max(state["peak_equity"], equity)
+            peak = state["peak_equity"]
+            dd = ((peak - equity) / peak) * 100 if peak > 0 else 0.0
+            state["max_dd"] = max(state["max_dd"], dd)
+            start = state["starting_capital"]
+            loss = ((start - equity) / start) * 100 if start > 0 else 0.0
         return max(dd, 0.0), max(loss, 0.0)
+
+    @staticmethod
+    def _unrealized_pnl(db, positions, exchange, timeframe, close_cache):
+        """Open PnL of `positions` at each symbol's latest stored close (one
+        Candle query per symbol per tick, memoized in `close_cache`)."""
+        total = 0.0
+        for p in positions:
+            key = (p.exchange or exchange, p.symbol)
+            if key not in close_cache:
+                row = db.query(Candle.close).filter(
+                    Candle.exchange == key[0], Candle.symbol == p.symbol, Candle.timeframe == timeframe
+                ).order_by(Candle.timestamp.desc()).first()
+                close_cache[key] = float(row[0]) if row and row[0] is not None else None
+            last = close_cache[key]
+            if last is None:
+                continue
+            total += (last - (p.entry_price or 0.0)) * (p.amount or 0.0)
+        return total
 
     async def start(self):
         self.running = True
@@ -261,7 +285,7 @@ class BotManager:
                 prev = self._processed_candles.get(key)
                 if prev is not None and candle_ts <= prev:
                     return
-            await self._process_bots(exchange, symbol, timeframe)
+            await self._process_bots(exchange, symbol, timeframe, candle_ts)
             if candle_ts is not None:
                 self._processed_candles[key] = candle_ts
 
@@ -344,15 +368,40 @@ class BotManager:
         return cost
 
     @staticmethod
-    def _deployed_capital(db, bot_names, quote):
-        """Quote-currency cost (entry price x amount) of the open paper/live
-        positions of the given bots in pairs quoted in `quote`."""
+    def _sim_frictions(settings):
+        """(entry_fee, exit_fee, entry_slippage, exit_slippage) as fractions
+        from trade_settings — the frictions the backtest applies to every
+        simulated fill. Exit fee falls back to the entry fee when unset."""
+        ts = settings.get("trade_settings", {}) or {}
+        entry_fee = _num(ts.get("entry", {}).get("fee"), 0) / 100
+        raw_exit_fee = ts.get("exit", {}).get("fee")
+        exit_fee = _num(raw_exit_fee, entry_fee * 100) / 100 if raw_exit_fee not in (None, "") else entry_fee
+        entry_slip = _num(ts.get("entry", {}).get("slippage"), 0) / 100
+        exit_slip = _num(ts.get("exit", {}).get("slippage"), 0) / 100
+        return entry_fee, exit_fee, entry_slip, exit_slip
+
+    @staticmethod
+    def _deployed_capital(db, bot_names, quote, modes=("paper", "live")):
+        """Quote-currency cost (entry price x amount) of the open positions of
+        the given bots in the given modes, in pairs quoted in `quote`."""
         if not bot_names:
             return 0.0
         rows = db.query(Position.entry_price, Position.amount, Position.symbol).filter(
             Position.bot_name.in_(list(bot_names)), Position.status == "open",
-            Position.mode.in_(["paper", "live"])).all()
+            Position.mode.in_(list(modes))).all()
         return sum((r[0] or 0.0) * (r[1] or 0.0) for r in rows if (r[2] or "").replace('-', '/').upper().endswith('/' + quote))
+
+    def _forward_pool(self, db, bot, quote):
+        """Cash a forward-test bot may still deploy: the backtest's capital
+        pool carried forward — backtest_capital plus realized forward-test
+        PnL (fees included) minus what its open forward-test positions have
+        locked. Same economics as bt_equity, so a forward test sizes exactly
+        like the backtest it is meant to confirm."""
+        realized = db.query(func.coalesce(func.sum(Position.profit_abs), 0.0)).filter(
+            Position.bot_name == bot.name, Position.status == "closed",
+            Position.mode == "forward_test").scalar() or 0.0
+        deployed = self._deployed_capital(db, [bot.name], quote, modes=("forward_test",))
+        return _num(bot.settings.get("backtest_capital"), 1000) + float(realized) - deployed
 
     def _live_allocation(self, db, bot, quote, free_balance):
         """Capital this bot may still deploy: its share (live_allocation_pct) of
@@ -834,12 +883,7 @@ class BotManager:
             bt_dd_detail = {"peak_ts": None, "peak_eq": bt_starting_capital, "trough_ts": None, "trough_eq": bt_starting_capital, "open_at_trough": 0}
 
             # Fee and slippage for realistic backtest P&L
-            bt_trade_settings = bot.settings.get("trade_settings", {})
-            bt_entry_fee = _num(bt_trade_settings.get("entry", {}).get("fee"), 0) / 100
-            raw_exit_fee = bt_trade_settings.get("exit", {}).get("fee")
-            bt_exit_fee = _num(raw_exit_fee, bt_entry_fee * 100) / 100 if raw_exit_fee not in (None, "") else bt_entry_fee
-            bt_entry_slippage = _num(bt_trade_settings.get("entry", {}).get("slippage"), 0) / 100
-            bt_exit_slippage = _num(bt_trade_settings.get("exit", {}).get("slippage"), 0) / 100
+            bt_entry_fee, bt_exit_fee, bt_entry_slippage, bt_exit_slippage = self._sim_frictions(bot.settings)
 
             cooldown_trades = _int(bot.settings.get("cooldown_trades"), 0)
             cooldown_candles = _int(bot.settings.get("cooldown_candles"), 0)
@@ -1040,6 +1084,7 @@ class BotManager:
             timeline.sort(key=lambda t: (t[0], t[1]))
 
             max_pos = _int(bot.settings.get("max_positions"), 1)
+            max_pos_scope = bot.settings.get("max_positions_scope", "per_pair")
             _tl_total = len(timeline)
             _tl_step = max(1, _tl_total // 40)
             if run_backtest:
@@ -1083,8 +1128,13 @@ class BotManager:
                         if len(recent_trades) >= cooldown_trades:
                             can_buy_cooldown = False
 
+                    # Global scope caps the portfolio across all pairs, exactly
+                    # as the live gate does — a backtest of a strategy the live
+                    # bot is never allowed to run says nothing about it
+                    open_global = sum(1 for c2 in sym_contexts if c2["open_pos"] is not None)
+                    slot_free = max_pos_scope == "per_pair" or open_global < max_pos
                     # Capital depletion halt / drawdown block: no new entries, exits keep running
-                    if is_buy and not open_bt_pos and 1 <= max_pos and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
+                    if is_buy and not open_bt_pos and slot_free and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
                         trade_amount = self._calculate_trade_amount(current_price, bot.settings, current_equity=bt_equity)
                         if trade_amount is not None:
                             bt_entry_price = current_price * (1 + bt_entry_slippage)
@@ -1118,7 +1168,10 @@ class BotManager:
                             if ev.get('close_amount_type') == 'fixed':
                                 close_qty = min(ev['qty_pct'], open_bt_pos.amount)
                             else:
-                                close_qty = open_bt_pos.amount * (ev['qty_pct'] / 100)
+                                # Percentage of the *original* size, so two 50% take-
+                                # profits close the whole position instead of 75%
+                                _base_qty = ctx["original_amount"] or open_bt_pos.amount
+                                close_qty = _base_qty * (ev['qty_pct'] / 100)
                             close_qty = min(close_qty, open_bt_pos.amount)
                             if close_qty <= 0: continue
 
@@ -1299,6 +1352,17 @@ class BotManager:
                         # measure flat periods before the first / after the last trade
                         "data_from": timeline[0][0].isoformat() if timeline else None,
                         "data_to": timeline[-1][0].isoformat() if timeline else None,
+                        # Buy & hold over the same walked range, per symbol — the
+                        # only fair benchmark for the backtest return above
+                        "buy_hold": {
+                            c["symbol"]: {
+                                "first_close": round(float(c["df"]["close"].iloc[0]), 8),
+                                "last_close": round(float(c["df"]["close"].iloc[-1]), 8),
+                                "pct": round(100.0 * (float(c["df"]["close"].iloc[-1]) / float(c["df"]["close"].iloc[0]) - 1.0), 2)
+                                if float(c["df"]["close"].iloc[0]) > 0 else None,
+                            }
+                            for c in sym_contexts if len(c["df"]) > 0
+                        },
                         # Distinct configurations this bot has backtested — plain
                         # tweak-awareness, no judgement attached
                         "variants": _record_config_run(db, bot.name, bot.settings),
@@ -1454,7 +1518,28 @@ class BotManager:
                     order_id = f"local_{int(latest_time.timestamp())}_{uuid.uuid4().hex[:8]}"
 
                     buy_fee = 0.0
-                    if mode in ["paper", "live"] and api_key_record:
+                    if mode == "forward_test":
+                        # Same economics as the backtest: size from the carried
+                        # pool, pay entry slippage and fee. A forward test that
+                        # trades frictionless on the original capital would
+                        # confirm a strategy the backtest never ran.
+                        _quote = ccxt_symbol.split('/')[-1]
+                        pool = self._forward_pool(db, bot, _quote)
+                        if pool <= 0:
+                            blb.push(bot.name, "WARN", f"BUY signal on {symbol} skipped — forward-test pool depleted ({pool:,.2f} {_quote})")
+                            return None
+                        entry_fee_pct, _, entry_slip, _ = self._sim_frictions(bot.settings)
+                        trade_amount = self._calculate_trade_amount(current_price, bot.settings, current_equity=pool)
+                        if trade_amount is None:
+                            return None
+                        actual_price = current_price * (1 + entry_slip)
+                        if bot.settings.get("trade_settings", {}).get("entry", {}).get("amount_type", "percentage") != "fixed":
+                            trade_amount = min(trade_amount, pool / (actual_price * (1 + entry_fee_pct)))
+                        if trade_amount <= 0 or actual_price * trade_amount * (1 + entry_fee_pct) > pool + 1e-9:
+                            blb.push(bot.name, "WARN", f"BUY signal on {symbol} skipped — entry does not fit the forward-test pool ({pool:,.2f} {_quote})")
+                            return None
+                        buy_fee = actual_price * trade_amount * entry_fee_pct
+                    elif mode in ["paper", "live"] and api_key_record:
                         ccxt_inst = get_ccxt()
 
                         # A restart replays the last candle: never place a second
@@ -1584,7 +1669,12 @@ class BotManager:
                         db.commit()
         return None
 
-    async def _process_bots(self, exchange: str, symbol: str, timeframe: str):
+    async def _process_bots(self, exchange: str, symbol: str, timeframe: str, candle_ts=None):
+        """Evaluate every matching bot on the candle that closed at `candle_ts`.
+        The poller publishes one event per missed candle after a gap, and each
+        must be traded and stop-checked in order — evaluating only the newest
+        row would skip the entries and exits of everything in between. Without
+        `candle_ts` the newest stored candle is used."""
         def run_logic():
             db = SessionLocal()
             try:
@@ -1618,7 +1708,13 @@ class BotManager:
 
                 query = db.query(Candle.id, Candle.timestamp, Candle.open, Candle.high, Candle.low, Candle.close, Candle.volume).filter(
                     Candle.exchange == exchange, Candle.symbol == symbol, Candle.timeframe == timeframe
-                ).order_by(Candle.timestamp.desc()).limit(max_lookback).statement
+                )
+                if candle_ts is not None:
+                    # Window ends at the candle being processed: the row under
+                    # evaluation is the last one and no newer candle can leak
+                    # into the indicators
+                    query = query.filter(Candle.timestamp <= _naive_utc(candle_ts))
+                query = query.order_by(Candle.timestamp.desc()).limit(max_lookback).statement
 
                 df = pd.read_sql(query, db.bind)
 
@@ -1626,6 +1722,9 @@ class BotManager:
                     return
 
                 df = df.iloc[::-1].reset_index(drop=True)
+                if candle_ts is not None and _naive_utc(df['timestamp'].iloc[-1]) != _naive_utc(candle_ts):
+                    logger.warning("Candle %s for %s/%s %s is not stored — evaluating the latest stored candle %s instead",
+                                   candle_ts, exchange, symbol, timeframe, df['timestamp'].iloc[-1])
 
                 indicator_cache = {}  # fingerprint -> DataFrame with indicators computed
 
@@ -1689,6 +1788,9 @@ class BotManager:
 
                 # Collect all signal inserts for a single batch commit
                 _pending_signals = []
+                # Latest close per (exchange, symbol), shared by every bot's
+                # mark-to-market risk check on this tick
+                _last_close_cache = {}
 
                 for bot in matching_bots:
                     if bot.name in self._deleted_bots or bot.name in self._backfilling_bots:
@@ -1722,10 +1824,15 @@ class BotManager:
                             except (ValueError, TypeError):
                                 _peak_reset_at = None
                             dd_state = self._get_drawdown(bot.name, db, mode_group="live", starting_capital=live_capital, peak_reset_at=_peak_reset_at)
-                            dd_now, loss_now = self._dd_now(dd_state)
+                            _open_real = [p for k, v in _positions_by_bot_mode.items() if k[0] == bot.name and k[1] != "backtest" for p in v]
+                            # Mark-to-market like the backtest: open losses count
+                            # before they are realized, so a stop fires on the
+                            # same curve the backtest limit was tested on
+                            _unrealized = self._unrealized_pnl(db, _open_real, exchange, timeframe, _last_close_cache)
+                            dd_now, loss_now = self._dd_now(dd_state, _unrealized)
 
                             stop_reason = None
-                            _open_any = sum(len(v) for k, v in _positions_by_bot_mode.items() if k[0] == bot.name and k[1] != "backtest")
+                            _open_any = len(_open_real)
                             if max_capital_loss_pct > 0 and loss_now >= max_capital_loss_pct:
                                 if dd_action == "block_entries" and _open_any > 0:
                                     # Wind down: no new entries, exits keep running,
@@ -1899,7 +2006,8 @@ class BotManager:
                                 if ev.get('close_amount_type') == 'fixed':
                                     close_qty = min(ev['qty_pct'], pos.amount)
                                 else:
-                                    close_qty = pos.amount * (ev['qty_pct'] / 100)
+                                    # Percentage of the original size (parity with the backtest)
+                                    close_qty = pos_original_amount * (ev['qty_pct'] / 100)
                                 close_qty = min(close_qty, pos.amount)
                                 if close_qty <= 0: continue
 
@@ -1908,7 +2016,13 @@ class BotManager:
                                     order_id = f"local_{int(latest_time.timestamp())}_{uuid.uuid4().hex[:8]}"
 
                                     actual_fee = 0.0
-                                    if mode in ["paper", "live"] and api_key_record:
+                                    if mode == "forward_test":
+                                        # Backtest exit economics: slippage against
+                                        # the fill, fee on the proceeds
+                                        _, exit_fee_pct, _, exit_slip = self._sim_frictions(bot.settings)
+                                        actual_price = ev['price'] * (1 - exit_slip)
+                                        actual_fee = actual_price * close_qty * exit_fee_pct
+                                    elif mode in ["paper", "live"] and api_key_record:
                                         ccxt_inst = get_ccxt()
                                         close_qty = float(ccxt_inst.amount_to_precision(ccxt_symbol, close_qty))
                                         if close_qty <= 0:

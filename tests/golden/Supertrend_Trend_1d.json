@@ -227,6 +227,18 @@
   }
  ],
  "summary": {
+  "buy_hold": {
+   "BTC/USDC": {
+    "first_close": 116.9496,
+    "last_close": 136.8775,
+    "pct": 17.04
+   },
+   "ETH/USDC": {
+    "first_close": 207.7333,
+    "last_close": 187.0404,
+    "pct": -9.96
+   }
+  },
   "candles": 1200,
   "data_from": "2023-04-11T00:00:00",
   "data_to": "2024-11-30T00:00:00",

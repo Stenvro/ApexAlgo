@@ -73,10 +73,23 @@ def get_bot_by_id(bot_id: int, db: Session = Depends(get_db)):
     return bot
 
 
+def _execution_mode(settings: dict, sandbox_by_key: dict) -> str:
+    """The mode this bot's fills are booked in — the same rule the engine
+    applies: an API key routes orders (paper on a sandbox key, live otherwise),
+    no key means a local forward test. The UI shows this word, not a guess
+    from api_execution alone."""
+    settings = settings or {}
+    key_name = settings.get("api_key_name")
+    if settings.get("api_execution") and key_name and key_name in sandbox_by_key:
+        return "paper" if sandbox_by_key[key_name] else "live"
+    return "forward_test"
+
+
 @router.get("/summary")
 def get_bots_summary(db: Session = Depends(get_db)):
     """Lightweight bot list for polling — excludes full settings/node graph."""
     bots = db.query(BotConfig).all()
+    sandbox_by_key = {k.name: bool(k.is_sandbox) for k in db.query(ExchangeKey.name, ExchangeKey.is_sandbox).all()}
     return [
         {
             "id": b.id,
@@ -84,6 +97,7 @@ def get_bots_summary(db: Session = Depends(get_db)):
             "is_active": b.is_active,
             "is_sandbox": b.is_sandbox,
             "created_at": b.created_at.isoformat() if b.created_at else None,
+            "execution_mode": _execution_mode(b.settings, sandbox_by_key),
             "settings": {
                 "timeframe": b.settings.get("timeframe") if b.settings else None,
                 "symbols": b.settings.get("symbols", []) if b.settings else [],

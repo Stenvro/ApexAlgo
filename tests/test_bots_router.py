@@ -241,3 +241,18 @@ def test_swap_caps_notional_and_is_idempotent(db, client, running_bot, monkeypat
     r = client.post(f"/api/keys/{KEY_NAME}/swap", json={"from_asset": "BTC", "to_asset": "USDT", "amount": 2, "amount_type": "from"}, headers=HEADERS)
     assert r.status_code == 200, r.text
     assert ex.created[-1]["side"] == "sell" and ex.created[-1]["amount"] == 2.0
+
+
+def test_summary_reports_the_mode_the_engine_would_book_in(db, client):
+    db.add(ExchangeKey(name="sandbox-key", exchange=EXCHANGE, api_key="x", api_secret="y", passphrase="", is_sandbox=True))
+    db.add(ExchangeKey(name="real-key", exchange=EXCHANGE, api_key="x", api_secret="y", passphrase="", is_sandbox=False))
+    for name, api_exec, key in (("fwd", False, None), ("fwd-key-off", False, "real-key"), ("paper", True, "sandbox-key"),
+                                ("live", True, "real-key"), ("missing-key", True, "gone")):
+        s = _settings()
+        s["api_execution"], s["api_key_name"] = api_exec, key
+        db.add(BotConfig(name=name, is_active=False, is_sandbox=False, strategy="node_graph", settings=s))
+    db.commit()
+
+    modes = {b["name"]: b["execution_mode"] for b in client.get("/api/bots/summary", headers=HEADERS).json()}
+    assert modes == {"fwd": "forward_test", "fwd-key-off": "forward_test", "paper": "paper", "live": "live",
+                     "missing-key": "forward_test"}

@@ -1,4 +1,5 @@
 import Badge from './ui/Badge';
+import ModeBadge from './ui/ModeBadge';
 import Button from './ui/Button';
 import EmptyState from './ui/EmptyState';
 import ExampleLoader from './ExampleLoader';
@@ -48,12 +49,13 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
   const activeBots = bots.filter((b) => b.is_active);
   const startingBots = activeBots.filter((b) => ['starting', 'fetching', 'backtesting'].includes(b.runtime?.phase)).length;
   const haltedBots = bots.filter((b) => !b.is_active && b.settings?.last_stop_reason).length;
-  const liveBots = bots.filter((b) => b.settings?.api_execution);
-  const runningLive = bots.filter((b) => b.is_active && b.settings?.api_execution).length;
-  const runningPaper = bots.filter((b) => b.is_active && !b.settings?.api_execution).length;
-  const executionSub = (runningLive || runningPaper)
-    ? [runningLive ? `${runningLive} live` : null, runningPaper ? `${runningPaper} paper` : null].filter(Boolean).join(' · ') + ' running'
-    : (liveBots.length ? 'configured, none running' : 'no live execution configured');
+  const liveBots = bots.filter((b) => b.execution_mode === 'live');
+  const runningLive = bots.filter((b) => b.is_active && b.execution_mode === 'live').length;
+  const runningPaper = bots.filter((b) => b.is_active && b.execution_mode === 'paper').length;
+  const runningForward = bots.filter((b) => b.is_active && b.execution_mode === 'forward_test').length;
+  const executionSub = (runningLive || runningPaper || runningForward)
+    ? [runningLive ? `${runningLive} live` : null, runningPaper ? `${runningPaper} paper` : null, runningForward ? `${runningForward} forward test` : null].filter(Boolean).join(' · ') + ' running'
+    : (liveBots.length ? 'live configured, none running' : 'no live execution configured');
   const recentBots = [...bots]
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
     .slice(0, 5);
@@ -188,9 +190,7 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
                           </p>
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
-                          {bot.settings?.api_execution
-                            ? <Badge variant="danger">Live</Badge>
-                            : <Badge variant="neutral">Sim</Badge>}
+                          <ModeBadge mode={bot.execution_mode} />
                           {bot.is_active
                             ? <Badge variant="success" dot pulse>Running</Badge>
                             : <Badge variant="neutral">Stopped</Badge>}
