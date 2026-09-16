@@ -14,6 +14,12 @@ VALID_CONDITION_OPS = {'>', '<', '>=', '<=', '==', '!=', 'cross_above', 'cross_b
 VALID_LOGIC_OPS = {'and', 'or', 'xor', 'nand', 'nor', 'not'}
 VALID_PRICE_TYPES = {'open', 'high', 'low', 'close', 'volume'}
 VALID_DRAWDOWN_ACTIONS = {'close_all', 'block_entries'}
+# DataFrame columns the evaluator resolves before it looks at nodes: a node
+# with one of these ids would silently be replaced by the raw column.
+RESERVED_NODE_IDS = {'open', 'high', 'low', 'close', 'volume', 'timestamp', 'atr'}
+MAX_STREAK_LENGTH = 500
+# Warm-up margin the backtest lookback should leave on top of the longest indicator
+LOOKBACK_MARGIN = 50
 
 
 def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dict:
@@ -113,6 +119,9 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
     for node_id, node in nodes.items():
         node_class = node.get("class")
 
+        if str(node_id).lower() in RESERVED_NODE_IDS:
+            errors.append(f"Node '{node_id}': this id is reserved for the '{str(node_id).lower()}' price column; rename the node.")
+
         if node_class == "indicator":
             method = str(node.get("method", "")).lower()
             spec = get_spec(method) if method else None
@@ -154,7 +163,17 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
             if op and op not in VALID_CONDITION_OPS:
                 errors.append(f"Node '{node_id}': invalid condition operator '{op}'.")
             _validate_operand_ref(node.get("left"), node_id, "left", nodes, warnings)
-            if op not in ("increasing", "decreasing"):
+            if op in ("increasing_for", "decreasing_for"):
+                # The streak length is a fixed window, not a series
+                right = node.get("right", 2)
+                try:
+                    n = int(float(right))
+                except (ValueError, TypeError):
+                    errors.append(f"Node '{node_id}': '{op}' needs a whole number of candles as its right operand, not '{right}'.")
+                else:
+                    if n < 1 or n > MAX_STREAK_LENGTH:
+                        errors.append(f"Node '{node_id}': '{op}' length must be between 1 and {MAX_STREAK_LENGTH} candles (got {n}).")
+            elif op not in ("increasing", "decreasing"):
                 _validate_operand_ref(node.get("right"), node_id, "right", nodes, warnings)
 
         elif node_class == "logic":
@@ -164,6 +183,19 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
             _validate_operand_ref(node.get("left"), node_id, "left", nodes, warnings)
             if op != "not":
                 _validate_operand_ref(node.get("right"), node_id, "right", nodes, warnings)
+
+    for cyc in _find_cycles(nodes):
+        errors.append(f"Node graph has a cycle: {' -> '.join(cyc)}. A node cannot depend on itself.")
+
+    # Backtest lookback must cover the longest indicator warm-up
+    longest = _longest_indicator_length(nodes)
+    try:
+        lookback = int(float(settings.get("backtest_lookback", 0) or 0))
+    except (ValueError, TypeError):
+        lookback = 0
+    if longest and lookback and lookback < longest + LOOKBACK_MARGIN:
+        warnings.append(f"backtest_lookback ({lookback}) is short for the longest indicator window ({longest}): the first "
+                        f"~{longest} candles are warm-up, leaving little to trade on. Use at least {longest + LOOKBACK_MARGIN}.")
 
     # Trade settings
     trade_settings = settings.get("trade_settings", {})
@@ -229,14 +261,31 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
             max_order_value = 0
         if max_order_value <= 0:
             errors.append("Live execution requires max_order_value > 0 as a safety cap.")
+        else:
+            # The engine clamps every live entry to the cap, so a cap below
+            # the configured size silently turns the strategy into a smaller
+            # one than the backtest simulated
+            try:
+                capital = float(settings.get("backtest_capital") or 0)
+                planned = float(amount_value or 0)
+                if amount_type == "percentage":
+                    planned = capital * planned / 100.0
+                if planned > max_order_value > 0:
+                    warnings.append(
+                        f"max_order_value ({max_order_value:,.0f}) is below the planned entry size "
+                        f"({planned:,.0f}): live entries will be capped to {max_order_value:,.0f}, "
+                        "so live sizing differs from the backtest. Raise the cap or lower the entry amount."
+                    )
+            except (ValueError, TypeError):
+                pass
 
-    if settings.get("api_execution"):
-        try:
-            entry_fee = float(entry_ts.get("fee") or 0)
-        except (ValueError, TypeError):
-            entry_fee = 0
-        if entry_fee <= 0:
-            warnings.append("Backtest without fees is optimistic; set your exchange's real fee in trade_settings.entry.fee.")
+    # Fees matter for the backtest just as much as for live trading
+    try:
+        entry_fee = float(entry_ts.get("fee") or 0)
+    except (ValueError, TypeError):
+        entry_fee = 0
+    if entry_fee <= 0:
+        warnings.append("Backtest without fees is optimistic; set your exchange's real fee in trade_settings.entry.fee.")
 
     # API key reference reminder
     if settings.get("api_key_name"):
@@ -259,3 +308,54 @@ def _validate_operand_ref(operand, node_id: str, side: str, nodes: dict, warning
             pass
         if operand not in nodes:
             warnings.append(f"Node '{node_id}': {side} references '{operand}' which is not in nodes.")
+
+
+def _node_children(node: dict) -> list:
+    """Ids of the nodes a node reads from (string operands that are node ids)."""
+    kids = []
+    for side in ("left", "right"):
+        ref = node.get(side)
+        if isinstance(ref, str) and ref:
+            kids.append(ref)
+    return kids
+
+
+def _find_cycles(nodes: dict) -> list:
+    """Return one witness path per strongly-connected loop found by DFS."""
+    WHITE, GREY, BLACK = 0, 1, 2
+    colour = {nid: WHITE for nid in nodes}
+    cycles = []
+
+    def visit(nid, path):
+        colour[nid] = GREY
+        path.append(nid)
+        for child in _node_children(nodes[nid]):
+            if child not in nodes:
+                continue
+            if colour[child] == GREY:
+                cycles.append(path[path.index(child):] + [child])
+            elif colour[child] == WHITE:
+                visit(child, path)
+        path.pop()
+        colour[nid] = BLACK
+
+    for nid in nodes:
+        if colour[nid] == WHITE:
+            visit(nid, [])
+    return cycles
+
+
+def _longest_indicator_length(nodes: dict) -> int:
+    """Largest length-like parameter across indicator nodes (0 when none)."""
+    longest = 0
+    for node in nodes.values():
+        if node.get("class") != "indicator":
+            continue
+        params = node.get("params") or {}
+        for pid, val in params.items():
+            if "length" in str(pid) or str(pid) in ("slow", "fast", "signal", "period", "window", "lookback"):
+                try:
+                    longest = max(longest, int(float(val)))
+                except (ValueError, TypeError):
+                    pass
+    return longest

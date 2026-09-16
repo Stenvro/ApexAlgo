@@ -2,9 +2,8 @@
 exchange. The exchange seam is ``_get_ccxt_instance``; everything else (DB,
 sizing, reconciliation, booking) is the real code path in ``live`` mode.
 
-Tests marked ``xfail(strict=True)`` pin behaviour the audit plan changes in
-phase 1 — they flip to passing (and must have the marker removed) when the fix
-lands, so the fix and its test cannot drift apart.
+Behaviour the audit plan still changes is pinned with ``xfail(strict=True)``
+so the fix and its test cannot drift apart.
 """
 import asyncio
 
@@ -33,7 +32,8 @@ class ExchangeMock:
         self.average = average
         self.fee = fee
         self.cancel_raises = cancel_raises
-        self.markets = {SYMBOL: {"symbol": SYMBOL, "limits": {"amount": {"min": min_amount}, "cost": {"min": min_cost}}}}
+        self.markets = {sym: {"symbol": sym, "limits": {"amount": {"min": min_amount}, "cost": {"min": min_cost}}}
+                        for sym in (SYMBOL, "ETH/USDT")}
         self.created = []
         self.cancelled = []
         self._orders = {}
@@ -66,6 +66,9 @@ class ExchangeMock:
     def create_market_sell_order(self, symbol, amount):
         return self._create("sell", symbol, amount)
 
+    def create_order(self, symbol, order_type, side, amount, price=None, params=None):
+        return self._create(side, symbol, amount)
+
     def fetch_order(self, order_id, symbol=None):
         return dict(self._orders[order_id])
 
@@ -76,9 +79,10 @@ class ExchangeMock:
         return {"id": order_id, "status": "canceled"}
 
 
-def _settings(entry_always=True, max_positions=1, scope="per_pair", sl_pct=10, max_order_value=0, amount_pct=50):
+def _settings(entry_always=True, max_positions=1, scope="per_pair", sl_pct=10, max_order_value=0, amount_pct=50,
+              symbols=(SYMBOL,)):
     return {
-        "symbols": [SYMBOL], "timeframe": TF, "data_exchange": EXCHANGE,
+        "symbols": list(symbols), "timeframe": TF, "data_exchange": EXCHANGE,
         "api_execution": True, "api_key_name": KEY_NAME,
         "backtest_on_start": False, "backtest_lookback": N_CANDLES, "backtest_capital": 1000,
         "max_positions": max_positions, "max_positions_scope": scope, "max_order_value": max_order_value,
@@ -240,10 +244,23 @@ def test_min_notional_violation_skips_buy(db, live_bot, run_tick):
     assert _positions(db) == []
 
 
-def test_max_order_value_currently_skips_entry_silently(db, live_bot, run_tick):
-    # Pins today's behaviour (plan 1.3 changes this to clamp + warn)
-    live_bot(_settings(max_order_value=250))
-    mock = ExchangeMock(free_quote=10_000.0)  # 50% → 5000 USDT > 250 cap
+def test_max_order_value_clamps_entry_and_warns(db, live_bot, run_tick):
+    _, candles = live_bot(_settings(max_order_value=250))
+    close = candles[-1].close
+    mock = ExchangeMock(free_quote=10_000.0)  # 50% → 5000 USDT, cap 250
+    run_tick(mock)
+    db.expire_all()
+    assert len(mock.created) == 1
+    assert mock.created[0]["amount"] * close == pytest.approx(250.0, rel=1e-4)
+    assert _positions(db, "open")[0].amount == pytest.approx(mock.created[0]["amount"])
+    from backend.models.bot_logs import BotLog
+    warn = db.query(BotLog).filter(BotLog.bot_name == "live-bot", BotLog.level == "WARN").all()
+    assert any("max_order_value" in w.msg for w in warn)
+
+
+def test_max_order_value_below_exchange_minimum_skips(db, live_bot, run_tick):
+    live_bot(_settings(max_order_value=2))  # cap 2 USDT < 5 USDT min cost
+    mock = ExchangeMock(free_quote=10_000.0, min_cost=5.0)
     run_tick(mock)
     assert mock.created == []
     assert _positions(db) == []
@@ -282,9 +299,8 @@ def test_unknown_sell_state_halts_bot_without_touching_position(db, live_bot, ru
     assert unknown.status == "unknown"
 
 
-# ── phase-1 parity fixes (flip when implemented) ───────────────────────────
+# ── backtest/live parity (plan 1.1 / 1.2) ─────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="plan 1.1: a skipped entry must not skip SL/TP evaluation")
 def test_skipped_entry_still_evaluates_stop_loss(db, live_bot, run_tick):
     # Entry fires but the allocation pool is exhausted (free=0, position already deployed) →
     # the entry is skipped; the 10% SL (low 80 < 90) must still sell.
@@ -297,7 +313,6 @@ def test_skipped_entry_still_evaluates_stop_loss(db, live_bot, run_tick):
     assert db.get(Position, pos.id).status == "closed"
 
 
-@pytest.mark.xfail(strict=True, reason="plan 1.2: live opens at most one position per pair")
 def test_second_buy_on_open_symbol_is_skipped(db, live_bot, run_tick):
     _, candles = live_bot(_settings(entry_always=True, max_positions=2, scope="global"))
     _open_live_position(db, candles)
@@ -305,3 +320,46 @@ def test_second_buy_on_open_symbol_is_skipped(db, live_bot, run_tick):
     run_tick(mock)
     assert mock.created == []
     assert len(_positions(db, "open")) == 1
+
+
+# ── concurrency (plan 1.5) ─────────────────────────────────────────────────
+
+def test_parallel_symbol_ticks_respect_global_max_positions(db, live_bot, monkeypatch):
+    """BTC and ETH candles close at the same moment and are processed in
+    parallel worker threads. With max_positions=1 (global) only one of the two
+    entries may go through — the per-bot lock serializes the gate."""
+    live_bot(_settings(max_positions=1, scope="global", symbols=(SYMBOL, "ETH/USDT")))
+    insert_candles(db, make_candles(EXCHANGE, "ETH/USDT", TF, N_CANDLES, seed=8, start_price=10.0))
+    mock = ExchangeMock(free_quote=10_000.0)
+    bm = BotManager()
+    monkeypatch.setattr(bm, "_get_ccxt_instance", lambda key_record: mock)
+
+    async def both():
+        await asyncio.gather(bm._process_bots(EXCHANGE, SYMBOL, TF), bm._process_bots(EXCHANGE, "ETH/USDT", TF))
+
+    for _ in range(3):  # a few rounds to give a race a chance to show up
+        asyncio.run(both())
+    assert len(mock.created) == 1
+    assert len(_positions(db, "open")) == 1
+
+
+# ── 1.9 startup reconciliation ─────────────────────────────────────────────
+
+def test_startup_reconciliation_flags_positions_the_wallet_cannot_back(db, live_bot):
+    bot, candles = live_bot()
+    _open_live_position(db, candles, amount=0.5)
+    bm = BotManager()
+    mock = ExchangeMock()
+    mock.markets[SYMBOL]["precision"] = {"amount": 0.0001}
+
+    # Wallet holds enough (free + used, within two precision steps) → consistent
+    ok_balance = {"USDT": {"free": 100.0, "used": 0.0}, "BTC": {"free": 0.3, "used": 0.1999}}
+    assert bm._reconcile_positions_with_wallet(db, bot, mock, ok_balance, "live") == []
+
+    # Wallet is short → one mismatch naming the position, DB amount and held amount
+    short_balance = {"USDT": {"free": 100.0, "used": 0.0}, "BTC": {"free": 0.2, "used": 0.0}}
+    problems = bm._reconcile_positions_with_wallet(db, bot, mock, short_balance, "live")
+    assert len(problems) == 1 and "0.5 BTC" in problems[0] and "0.2 BTC" in problems[0]
+
+    # Paper positions are checked against the paper wallet only; none open here
+    assert bm._reconcile_positions_with_wallet(db, bot, mock, short_balance, "paper") == []

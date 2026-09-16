@@ -375,6 +375,57 @@ function ChevronIcon({ open }) {
   );
 }
 
+const MODE_WORD = { live: 'Live', paper: 'Paper', forward_test: 'Forward test' };
+
+/**
+ * The stop endpoints refuse (409) while a bot holds open forward/paper/live
+ * positions. Turn that refusal into an explicit choice; resolves to the
+ * `close_positions` value to retry with, or null when the user cancels.
+ */
+async function askAboutOpenPositions(detail, { bulk = false } = {}) {
+  const positions = detail?.open_positions || [];
+  const real = positions.filter((p) => p.mode === 'live' || p.mode === 'paper').length;
+  const lines = positions.map((p) =>
+    `• ${bulk && p.bot_name ? `${p.bot_name} — ` : ''}${MODE_WORD[p.mode] || p.mode} ${p.symbol}: ${p.amount} @ ${p.entry_price}`,
+  );
+  const choice = await confirmDialog({
+    title: bulk ? 'Bots hold open positions' : 'Bot holds open positions',
+    message:
+      `${lines.join('\n')}\n\n` +
+      (real
+        ? `${real} of these ${real === 1 ? 'is a real position' : 'are real positions'} on the exchange. `
+        : '') +
+      'Close them at market now (even at a loss), or stop and leave them open? Open positions of a stopped bot are unmanaged: no stop-loss or take-profit will fire.',
+    confirmText: 'Close at market & stop',
+    secondaryText: 'Stop, leave open',
+    cancelText: 'Cancel',
+    type: real ? 'danger' : 'warning',
+  });
+  if (choice === true) return true;
+  if (choice === 'secondary') return false;
+  return null;
+}
+
+/** Retry a stop request with the user's choice after a 409; rethrows anything else. */
+async function postStop(url, { bulk = false } = {}) {
+  try {
+    return await apiClient.post(url, null);
+  } catch (err) {
+    if (err.response?.status !== 409 || !Array.isArray(err.response.data?.detail?.open_positions)) throw err;
+    const close = await askAboutOpenPositions(err.response.data.detail, { bulk });
+    if (close === null) return null;
+    return apiClient.post(url, null, { params: { close_positions: close } });
+  }
+}
+
+function describeStop(data) {
+  const closed = data?.closed_positions?.length || 0;
+  const open = data?.unmanaged_positions?.length || 0;
+  if (closed) return `${closed} position${closed === 1 ? '' : 's'} closed at market`;
+  if (open) return `${open} position${open === 1 ? '' : 's'} left open — unmanaged`;
+  return '';
+}
+
 export default function BotManagerUI({ bots = [], refetchBots, backendOk = true }) {
   const [openConsoles, setOpenConsoles] = useState({});
   const [busyAction, setBusyAction]     = useState(null);  // 'delete:ID' or 'wipe:name'
@@ -385,11 +436,21 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
   const toggleBotState = useCallback(async (botId, isCurrentlyActive) => {
     setTogglingBot(botId);
     try {
-      const endpoint = isCurrentlyActive ? `/api/bots/${botId}/stop` : `/api/bots/${botId}/start`;
-      await apiClient.post(endpoint);
-      refetchBots();
-      toast.success(isCurrentlyActive ? 'Bot stopped' : 'Engine started');
+      if (isCurrentlyActive) {
+        const res = await postStop(`/api/bots/${botId}/stop`);
+        if (res) {
+          refetchBots();
+          const extra = describeStop(res.data);
+          (extra.includes('unmanaged') ? toast.warn : toast.success)(extra ? `Bot stopped — ${extra}` : 'Bot stopped');
+        }
+      } else {
+        await apiClient.post(`/api/bots/${botId}/start`);
+        refetchBots();
+        toast.success('Engine started');
+      }
     } catch (err) {
+      // A failed market close still stops the bot; make sure the card reflects that
+      refetchBots();
       toast.error(humanizeApiError(err, 'Failed to toggle bot state.'));
     }
     setTogglingBot(null);
@@ -422,27 +483,31 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
   }, [refetchBots]);
 
   const stopAll = useCallback(async () => {
-    const liveCount = bots.filter(b => b.is_active && b.settings?.api_execution).length;
+    // Open positions are handled by the server's 409 → explicit-choice flow in postStop
     const ok = await confirmDialog({
       title: 'Stop all bots',
-      message: liveCount
-        ? `${liveCount} bot${liveCount === 1 ? ' is' : 's are'} routing live orders. Stopping leaves any open positions unmanaged (no SL/TP) until restarted. Continue?`
-        : 'Stop every running bot? Startups in progress are aborted.',
+      message: 'Stop every running bot? Startups in progress are aborted.',
       confirmText: 'Stop all',
-      type: liveCount ? 'danger' : 'warning',
+      type: 'warning',
     });
     if (!ok) return;
     setBulkBusy('stop');
     try {
-      const res = await apiClient.post('/api/bots/bulk/stop', null);
-      refetchBots();
-      const n = res.data?.stopped?.length || 0;
-      toast.success(n ? `${n} bot${n === 1 ? '' : 's'} stopped` : 'No running bots');
+      const res = await postStop('/api/bots/bulk/stop', { bulk: true });
+      if (res) {
+        refetchBots();
+        const n = res.data?.stopped?.length || 0;
+        const extra = describeStop(res.data);
+        (extra.includes('unmanaged') ? toast.warn : toast.success)(
+          n ? `${n} bot${n === 1 ? '' : 's'} stopped${extra ? ` — ${extra}` : ''}` : 'No running bots',
+        );
+      }
     } catch (err) {
+      refetchBots();
       toast.error(humanizeApiError(err, 'Failed to stop bots.'));
     }
     setBulkBusy(null);
-  }, [bots, refetchBots]);
+  }, [refetchBots]);
 
   const handleDeleteClick = useCallback(async (botId, botName) => {
     if (busyAction) return;

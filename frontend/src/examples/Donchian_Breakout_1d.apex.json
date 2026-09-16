@@ -20,7 +20,7 @@
       "drawdown_action": "block_entries",
       "drawdown_cooldown_days": 14,
       "max_capital_loss": 35,
-      "max_order_value": 250,
+      "max_order_value": 1000,
       "live_allocation_pct": 100,
       "api_execution": false,
       "backtest_on_start": true,

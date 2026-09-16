@@ -10,6 +10,8 @@
  * @param {Function} [props.config.onCancel]    Renders cancel button; also Esc / backdrop click.
  * @param {string} [props.config.confirmText='Confirm']
  * @param {string} [props.config.cancelText='Cancel']
+ * @param {Function} [props.config.onSecondary] Optional third choice, rendered between cancel and confirm.
+ * @param {string} [props.config.secondaryText]
  * @param {boolean} [props.config.busy]         Disables confirm, shows "Processing…".
  * @param {React.ReactNode} [props.customBody]  Replaces the message paragraph.
  *
@@ -63,7 +65,7 @@ const Modal = ({ config, customBody }) => {
 
         <div className="px-5 py-4">
           {customBody || (
-            <p className="text-xs text-text-secondary leading-relaxed">{config.message}</p>
+            <p className="text-xs text-text-secondary leading-relaxed whitespace-pre-line">{config.message}</p>
           )}
         </div>
 
@@ -71,6 +73,11 @@ const Modal = ({ config, customBody }) => {
           {config.onCancel && (
             <Button variant="secondary" size="sm" onClick={config.onCancel} disabled={config.busy}>
               {config.cancelText || 'Cancel'}
+            </Button>
+          )}
+          {config.onSecondary && (
+            <Button variant="ghost" size="sm" onClick={config.onSecondary} disabled={config.busy}>
+              {config.secondaryText || 'Other'}
             </Button>
           )}
           {config.onConfirm && (

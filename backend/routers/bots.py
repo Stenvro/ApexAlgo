@@ -19,7 +19,7 @@ from backend.models.positions import Position
 from backend.core.events import event_bus
 from backend.core.security import verify_api_key
 from backend.engine.settings_validator import validate_bot_settings
-from backend.engine.bot_manager import bot_manager
+from backend.engine.bot_manager import bot_manager, _config_fingerprint
 from backend.core import bot_log_buffer as blb
 from backend.models.bot_logs import BotLog
 from backend.models.bot_config_runs import BotConfigRun
@@ -273,11 +273,14 @@ def update_bot(bot_id: int, background_tasks: BackgroundTasks, bot_data: dict = 
             raise HTTPException(status_code=400, detail={"validation_errors": validation["errors"]})
         validation_warnings = validation["warnings"]
 
+        old_fp = _config_fingerprint(bot.settings)
         bot.settings = current_settings
         flag_modified(bot, "settings")
 
-        # Flush stale signals and backtest data after the response is sent
-        background_tasks.add_task(flush_bot_data, bot.name)
+        # Signals and backtest trades belong to a strategy configuration: flush
+        # them only when that changed, not on a layout/routing-only save
+        if _config_fingerprint(current_settings) != old_fp:
+            background_tasks.add_task(flush_bot_data, bot.name)
 
     db.commit()
     result = {"message": "Bot configuration updated successfully"}
@@ -391,11 +394,72 @@ async def _start(bot: BotConfig, db: Session):
     await event_bus.publish("BOT_STATE_CHANGED", {"bot_id": bot.id, "action": "started"})
 
 
-async def _stop(bot: BotConfig, db: Session):
+async def _deactivate(bot: BotConfig, db: Session):
     bot.is_active = False
     db.commit()
     bot_manager.clear_runtime(bot.name)
     await event_bus.publish("BOT_STATE_CHANGED", {"bot_id": bot.id, "action": "stopped"})
+
+
+def _open_real_positions(bot_name: str, db: Session) -> List[Position]:
+    """Open positions that exist outside the backtest ledger: forward test
+    (simulated but tracked by the running engine) and paper/live (real orders)."""
+    return db.query(Position).filter(
+        Position.bot_name == bot_name, Position.status == "open",
+        Position.mode.in_(["forward_test", "paper", "live"]),
+    ).order_by(Position.id).all()
+
+
+def _position_brief(pos: Position) -> dict:
+    return {"id": pos.id, "symbol": pos.symbol, "mode": pos.mode, "amount": pos.amount,
+            "entry_price": pos.entry_price, "exchange": pos.exchange}
+
+
+async def _stop(bot: BotConfig, db: Session, close_positions: Optional[bool] = None) -> dict:
+    """Deactivate a bot. A user-initiated stop with open non-backtest positions
+    is an explicit choice: ``close_positions=None`` refuses with 409 and the
+    list of positions, ``True`` closes them at market first (like delete),
+    ``False`` leaves them open and unmanaged (no SL/TP) with a console warning.
+    Engine-initiated stops (risk breach, unknown order) never come through here —
+    they always close everything themselves."""
+    open_real = _open_real_positions(bot.name, db)
+    if open_real and close_positions is None:
+        raise HTTPException(status_code=409, detail={
+            "message": f"Bot '{bot.name}' has {len(open_real)} open position(s). Choose whether to close them.",
+            "open_positions": [_position_brief(p) for p in open_real],
+        })
+
+    # Deactivate first so the engine skips this bot on the next tick; the
+    # open→closing update inside close_position_now guards against a tick that
+    # is already mid-flight.
+    await _deactivate(bot, db)
+
+    closed = []
+    if open_real and close_positions:
+        from backend.routers.trades import close_position_now
+        for pos in open_real:
+            try:
+                price = close_position_now(pos, db)
+                closed.append({**_position_brief(pos), "close_price": price})
+                blb.push(bot.name, "INFO", f"Stopped by user: closed {pos.mode} {pos.symbol} position #{pos.id} at {price}")
+            except HTTPException as e:
+                remaining = [p for p in open_real if p.id not in {c['id'] for c in closed}]
+                blb.push(bot.name, "ERROR", f"Stopped by user but could not close {pos.mode} {pos.symbol} position #{pos.id}: {e.detail} "
+                                            f"— {len(remaining)} position(s) left open and unmanaged (no SL/TP).")
+                raise HTTPException(
+                    status_code=e.status_code if e.status_code >= 500 else 409,
+                    detail={
+                        "message": f"Bot '{bot.name}' is stopped, but closing {pos.mode} {pos.symbol} position #{pos.id} failed: {e.detail} "
+                                   f"{len(closed)} of {len(open_real)} positions were closed; the rest are open and unmanaged.",
+                        "open_positions": [_position_brief(p) for p in remaining],
+                        "closed_positions": closed,
+                    },
+                )
+    elif open_real:
+        blb.push(bot.name, "WARN", f"Stopped by user with {len(open_real)} open position(s) left unmanaged — no stop-loss or take-profit "
+                                   f"will fire: {', '.join(f'{p.mode} {p.symbol} #{p.id}' for p in open_real)}")
+
+    return {"closed_positions": closed, "unmanaged_positions": [] if close_positions else [_position_brief(p) for p in open_real]}
 
 
 @router.post("/bulk/start")
@@ -413,15 +477,42 @@ async def start_all_bots(ids: Optional[List[int]] = Body(default=None), db: Sess
 
 
 @router.post("/bulk/stop")
-async def stop_all_bots(ids: Optional[List[int]] = Body(default=None), db: Session = Depends(get_db)):
+async def stop_all_bots(ids: Optional[List[int]] = Body(default=None),
+                        close_positions: Optional[bool] = Query(default=None),
+                        db: Session = Depends(get_db)):
+    """Same contract as the single stop: without ``close_positions`` the call
+    refuses (409) when any selected bot has open non-backtest positions, and
+    lists them per bot so the UI can ask once for the whole batch."""
     q = db.query(BotConfig).filter(BotConfig.is_active == True)
     if ids:
         q = q.filter(BotConfig.id.in_(ids))
-    stopped = []
-    for bot in q.all():
-        await _stop(bot, db)
+    bots = q.all()
+    if close_positions is None:
+        blocking = {b.name: [_position_brief(p) for p in _open_real_positions(b.name, db)] for b in bots}
+        blocking = {k: v for k, v in blocking.items() if v}
+        if blocking:
+            raise HTTPException(status_code=409, detail={
+                "message": f"{len(blocking)} bot(s) have open positions. Choose whether to close them.",
+                "open_positions": [{**p, "bot_name": name} for name, ps in blocking.items() for p in ps],
+                "bots": blocking,
+            })
+    stopped, closed, unmanaged, failed = [], [], [], []
+    for bot in bots:
+        try:
+            res = await _stop(bot, db, close_positions=close_positions)
+        except HTTPException as e:
+            failed.append({"bot_name": bot.name, "detail": e.detail})
+            stopped.append(bot.name)  # deactivation happened before the close attempt
+            continue
         stopped.append(bot.name)
-    return {"stopped": stopped}
+        closed += [{**p, "bot_name": bot.name} for p in res["closed_positions"]]
+        unmanaged += [{**p, "bot_name": bot.name} for p in res["unmanaged_positions"]]
+    if failed:
+        raise HTTPException(status_code=409, detail={
+            "message": f"All {len(stopped)} bot(s) stopped, but closing positions failed for {len(failed)} bot(s).",
+            "failed": failed, "closed_positions": closed,
+        })
+    return {"stopped": stopped, "closed_positions": closed, "unmanaged_positions": unmanaged}
 
 
 @router.post("/{bot_id}/start")
@@ -433,11 +524,20 @@ async def start_bot(bot_id: int, db: Session = Depends(get_db)):
     return {"message": f"Bot '{bot.name}' started.", "is_active": True}
 
 @router.post("/{bot_id}/stop")
-async def stop_bot(bot_id: int, db: Session = Depends(get_db)):
+async def stop_bot(bot_id: int, close_positions: Optional[bool] = Query(default=None), db: Session = Depends(get_db)):
+    """Stop a bot. With open forward-test/paper/live positions this is refused
+    (409, ``detail.open_positions``) until the caller passes
+    ``?close_positions=true`` (close at market, then stop) or ``false`` (stop and
+    leave them open — no SL/TP will fire)."""
     bot = db.query(BotConfig).filter(BotConfig.id == bot_id).first()
     if not bot: raise HTTPException(status_code=404, detail="Bot not found.")
-    await _stop(bot, db)
-    return {"message": f"Bot '{bot.name}' stopped.", "is_active": False}
+    res = await _stop(bot, db, close_positions=close_positions)
+    msg = f"Bot '{bot.name}' stopped."
+    if res["closed_positions"]:
+        msg += f" {len(res['closed_positions'])} open position(s) closed first."
+    elif res["unmanaged_positions"]:
+        msg += f" {len(res['unmanaged_positions'])} position(s) left open and unmanaged."
+    return {"message": msg, "is_active": False, **res}
 
 @router.post("/{bot_id}/restart")
 async def restart_bot(bot_id: int, db: Session = Depends(get_db)):
@@ -446,7 +546,8 @@ async def restart_bot(bot_id: int, db: Session = Depends(get_db)):
     bot = db.query(BotConfig).filter(BotConfig.id == bot_id).first()
     if not bot: raise HTTPException(status_code=404, detail="Bot not found.")
     if bot.is_active:
-        await _stop(bot, db)
+        # Positions stay managed: the restarted engine picks them up again
+        await _deactivate(bot, db)
     await _start(bot, db)
     return {"message": f"Bot '{bot.name}' restarted.", "is_active": True}
 

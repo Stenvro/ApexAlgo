@@ -9,7 +9,7 @@ import math
 from typing import Optional
 from datetime import datetime, timezone
 
-from backend.core.database import get_db
+from backend.core.database import get_db, SessionLocal
 from backend.models.positions import Position
 from backend.models.orders import Order
 from backend.models.candles import Candle
@@ -412,23 +412,29 @@ def force_close_position(position_id: int, db: Session = Depends(get_db)):
     return {"status": "success", "message": f"Position forcefully closed at ${close_price:.2f}"}
 
 @router.get("/export")
-def export_trades_csv(mode: str = "live", db: Session = Depends(get_db)):
+def export_trades_csv(mode: str = "live"):
     def generate():
+        # The request session is closed once the response starts streaming, so
+        # the generator owns its own session for the lifetime of the download
+        db = SessionLocal()
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["ID", "Timestamp", "Bot Name", "Symbol", "Side", "Type", "Price", "Amount", "Fee", "Exchange Order ID"])
-        yield output.getvalue()
-        output.seek(0)
-        output.truncate()
-
-        for order in db.query(Order).filter(Order.mode == mode, Order.status == "filled").order_by(Order.timestamp.desc()).yield_per(500):
-            writer.writerow([
-                order.id, order.timestamp.strftime("%Y-%m-%d %H:%M:%S") if order.timestamp else "",
-                order.bot_name, order.symbol, order.side.upper(), order.order_type.upper(),
-                order.price, order.amount, order.fee, order.exchange_order_id or "N/A"
-            ])
+        try:
+            writer.writerow(["ID", "Timestamp", "Bot Name", "Symbol", "Side", "Type", "Price", "Amount", "Fee", "Exchange Order ID"])
             yield output.getvalue()
             output.seek(0)
             output.truncate()
+
+            for order in db.query(Order).filter(Order.mode == mode, Order.status == "filled").order_by(Order.timestamp.desc()).yield_per(500):
+                writer.writerow([
+                    order.id, order.timestamp.strftime("%Y-%m-%d %H:%M:%S") if order.timestamp else "",
+                    order.bot_name, order.symbol, order.side.upper(), order.order_type.upper(),
+                    order.price, order.amount, order.fee, order.exchange_order_id or "N/A"
+                ])
+                yield output.getvalue()
+                output.seek(0)
+                output.truncate()
+        finally:
+            db.close()
 
     return StreamingResponse(generate(), media_type="text/csv", headers={"Content-Disposition": f"attachment; filename=apexalgo_{mode}_trades.csv"})
