@@ -170,6 +170,12 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                     if existing_buy:
                         logger.info("%s BUY for %s @ %s already recorded, skipping duplicate entry", mode.upper(), symbol, latest_time)
                         return None
+                    # Demo accounts list fewer pairs than the public market
+                    # the backtest ran on — an order there can only fail
+                    if ccxt_inst.markets and ccxt_symbol not in ccxt_inst.markets:
+                        logger.warning("%s BUY skipped: %s is not listed on %s for key '%s'", mode.upper(), ccxt_symbol, api_key_record.exchange, api_key_record.name)
+                        blb.push(bot.name, "WARN", f"BUY signal on {symbol} skipped — not listed on {api_key_record.exchange.upper()}{' demo' if api_key_record.is_sandbox else ''} for key '{api_key_record.name}'")
+                        return None
 
                     # Size trades from the wallet: this bot's share
                     # (live_allocation_pct) of the quote equity, minus
@@ -280,9 +286,12 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                 if mode in ["paper", "live"]:
                     db.commit()
             except Exception as e:
-                logger.error("%s BUY failed: %s", mode.upper(), e, exc_info=True)
-                blb.push(bot.name, "ERROR", f"{mode.upper()} BUY failed: {e}")
-                db.add(Order(exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=current_price, amount=trade_amount, timestamp=latest_time, status="canceled"))
+                # The order never reached the exchange (or the exchange
+                # refused it): "rejected", not "canceled" — a cancel
+                # implies an order that existed
+                logger.error("%s BUY failed for %s: %s: %s", mode.upper(), symbol, type(e).__name__, e, exc_info=True)
+                blb.push(bot.name, "ERROR", f"{mode.upper()} BUY {symbol} rejected — {type(e).__name__}: {str(e)[:200]}")
+                db.add(Order(exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=current_price, amount=trade_amount, timestamp=latest_time, status="rejected"))
                 if mode in ["paper", "live"]:
                     db.commit()
     return None

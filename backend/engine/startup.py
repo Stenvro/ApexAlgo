@@ -346,6 +346,12 @@ def execute_sync_backfill(engine, bot_id: int):
                 _ccxt = engine._get_ccxt_instance(api_key)
                 _bal = _ccxt.fetch_balance()
                 _pairs = [str(s).replace('-', '/').upper() for s in symbols]
+                # The backtest ran on public (production) candles; a demo
+                # account or another region can list fewer pairs, and an
+                # order on a missing one can only fail
+                _missing = [p for p in _pairs if _ccxt.markets and p not in _ccxt.markets]
+                if _missing:
+                    blb.push(bot.name, "WARN", f"Not listed on {api_key.exchange.upper()}{' demo' if api_key.is_sandbox else ''} for key '{api_key.name}': {', '.join(_missing)} — {live_mode} entries on these pairs will be skipped")
                 _tokens = []
                 for _p in _pairs:
                     for _t in _p.split('/'):

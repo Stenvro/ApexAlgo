@@ -391,8 +391,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
 
   // Esc asks to close (same dirty-check as the buttons); a browser reload with
   // unsaved work gets the native "leave page?" prompt.
-  const requestCloseRef = useRef(null);
-  requestCloseRef.current = requestClose;
+  const requestCloseRef = useRef(null);  // set below, once requestClose exists
   useEffect(() => {
       const onKey = (e) => {
           if (e.key !== 'Escape' || e.defaultPrevented) return;
@@ -538,6 +537,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
       if (choice === true) await handleSaveAndCompile();
       else if (choice === 'secondary') closeBuilder();
   };
+  requestCloseRef.current = requestClose;
 
   const handleSaveAndCompile = async () => {
     setSaving(true);
