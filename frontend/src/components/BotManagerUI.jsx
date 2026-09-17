@@ -194,6 +194,12 @@ function BacktestResult({ bot }) {
   );
 }
 
+const runtimeKey = (rt) => {
+  if (!rt) return '';
+  const { updated_at: _u, last_tick_at: _t, ...rest } = rt;
+  return JSON.stringify(rest);
+};
+
 const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, openConsoles, clearSignals, toggleBotState, restartBot, handleExport, handleDuplicate, handleClearCacheClick, handleDeleteClick, updateBotConfig, toggleConsole }) {
   const isBacktestOn     = bot.settings?.backtest_on_start === true;
   const isApiExecutionOn = bot.settings?.api_execution === true;
@@ -395,7 +401,9 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
   (prev.togglingBot === prev.bot.id) === (next.togglingBot === next.bot.id) &&
   prev.openConsoles[prev.bot.id] === next.openConsoles[next.bot.id] &&
   prev.clearSignals[prev.bot.name] === next.clearSignals[next.bot.name] &&
-  JSON.stringify(prev.bot.runtime) === JSON.stringify(next.bot.runtime) &&
+  // Runtime timestamps tick on every poll but are never rendered — strip
+  // them so an idle live bot does not re-render its card every 15 s
+  runtimeKey(prev.bot.runtime) === runtimeKey(next.bot.runtime) &&
   JSON.stringify(prev.bot.settings) === JSON.stringify(next.bot.settings) &&
   JSON.stringify(prev.bot.last_backtest_summary) === JSON.stringify(next.bot.last_backtest_summary)
 );

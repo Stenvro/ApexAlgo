@@ -232,6 +232,15 @@ const rangeThumb = 'appearance-none bg-transparent pointer-events-none absolute 
  * Dual-thumb slider + date inputs + presets. `from`/`to` are ms or null (unbounded).
  * The slider snaps to whole UTC days across the span of all closed trades.
  */
+// Incremental poll merge: rows from the server replace same-id rows, new ids
+// are appended; the API returns newest first and the tables sort themselves.
+const mergeById = (prev, incoming) => {
+    if (incoming.length === 0) return prev;
+    const byId = new Map(prev.map(r => [r.id, r]));
+    incoming.forEach(r => byId.set(r.id, r));
+    return [...byId.values()];
+};
+
 const DateRangeControl = ({ bounds, from, to, onChange }) => {
     if (!bounds) return null;
     const minDay = startOfUtcDay(bounds.min);
@@ -381,47 +390,89 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         setPriceSyncing(false);
     }, []);
 
+    const positionsRef = useRef(positions);
+    const ordersRef = useRef(orders);
+    useEffect(() => {
+        positionsRef.current = positions;
+        ordersRef.current = orders;
+    }, [positions, orders]);
+
     const [lastUpdated, setLastUpdated] = useState(null);
-    const fetchAllData = useCallback(async ({ silent = false } = {}) => {
+    // Server-side window: the earliest backtest window of the bots on screen.
+    // Backtest rows dominate the volume, so this keeps the initial load small;
+    // open positions are always returned by the API regardless of the window
+    // and "Load full history" widens to everything.
+    const botsDataFrom = useMemo(() => {
+        let min = Infinity;
+        bots.forEach(b => {
+            const t = b.last_backtest_summary?.data_from ? new Date(b.last_backtest_summary.data_from).getTime() : NaN;
+            if (!Number.isNaN(t) && t < min) min = t;
+        });
+        return min === Infinity ? null : min;
+    }, [bots]);
+    const [fullHistory, setFullHistory] = useState(false);
+    const serverFrom = fullHistory ? null : botsDataFrom;
+    // Incremental polling: newest ids + last poll time (see /api/trades/positions)
+    const pollCursor = useRef({ posId: 0, ordId: 0, since: null, from: undefined });
+
+    const fetchAllData = useCallback(async ({ silent = false, signal } = {}) => {
         if (!silent) setLoading(true);
+        const cur = pollCursor.current;
+        const incremental = silent && cur.from === serverFrom && (cur.posId > 0 || cur.ordId > 0);
+        const base = serverFrom !== null ? { from: new Date(serverFrom).toISOString() } : {};
+        const polledAt = new Date();
         try {
             const [posRes, ordRes] = await Promise.all([
-                apiClient.get('/api/trades/positions', { params: { limit: 0 } }),
-                apiClient.get('/api/trades/orders', { params: { limit: 0 } }),
+                apiClient.get('/api/trades/positions', { signal, params: incremental
+                    ? { ...base, limit: 0, since_id: cur.posId, since: cur.since }
+                    : { ...base, limit: 0 } }),
+                apiClient.get('/api/trades/orders', { signal, params: incremental
+                    ? { ...base, limit: 0, since_id: cur.ordId }
+                    : { ...base, limit: 0 } }),
             ]);
-            const pos = posRes.data || [];
-            const ord = ordRes.data || [];
+            const posNew = posRes.data || [];
+            const ordNew = ordRes.data || [];
+            let pos = posNew, ord = ordNew;
+            if (incremental) {
+                // Merge by id: changed/new rows replace, everything else stays
+                pos = mergeById(positionsRef.current, posNew);
+                ord = ordNew.length ? mergeById(ordersRef.current, ordNew) : ordersRef.current;
+            }
+            pollCursor.current = {
+                from: serverFrom,
+                posId: pos.reduce((m, p) => Math.max(m, p.id), 0),
+                ordId: ord.reduce((m, o) => Math.max(m, o.id), 0),
+                // 5 min margin against client/server clock skew — re-sent rows merge by id
+                since: new Date(polledAt.getTime() - 5 * 60 * 1000).toISOString(),
+            };
             setPositions(pos);
             setOrders(ord);
-            setLastUpdated(new Date());
+            setLastUpdated(polledAt);
             if (setError) setError(null);
             fetchLivePrices(pos);
         } catch (err) {
+            if (signal?.aborted) return;
             if (!silent && setError) setError(err.response?.data?.detail || 'Failed to load analytics data.');
         }
         if (!silent) setLoading(false);
         setHasLoadedOnce(true);
-    }, [setError, fetchLivePrices]);
+    }, [setError, fetchLivePrices, serverFrom]);
 
     // While any bot runs, new fills can land at any candle close — keep the
     // tables honest without the user hammering Sync.
     const anyBotActive = bots.some(b => b.is_active);
     useEffect(() => {
         if (!anyBotActive) return undefined;
-        const t = setInterval(() => fetchAllData({ silent: true }), 30000);
-        return () => clearInterval(t);
+        const controller = new AbortController();
+        const t = setInterval(() => fetchAllData({ silent: true, signal: controller.signal }), 30000);
+        return () => { controller.abort(); clearInterval(t); };
     }, [anyBotActive, fetchAllData]);
 
     useEffect(() => {
         const controller = new AbortController();
-        fetchAllData(); // eslint-disable-line react-hooks/set-state-in-effect -- initial data load on mount
+        fetchAllData({ signal: controller.signal }); // eslint-disable-line react-hooks/set-state-in-effect -- initial data load on mount
         return () => controller.abort();
     }, [fetchAllData]);
-
-    const positionsRef = useRef(positions);
-    useEffect(() => {
-        positionsRef.current = positions;
-    }, [positions]);
 
     useEffect(() => {
         if (positions.length === 0) return;
@@ -1097,6 +1148,13 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                 </div>
                 <DateRangeControl bounds={dateBounds} from={dateFrom} to={dateTo}
                     onChange={(f, t) => { setDateFrom(f); setDateTo(t); resetPage(); }} />
+                {serverFrom !== null && (
+                    <div className="flex items-center gap-2 pt-2 text-[10px] text-faint font-num">
+                        <span>Loaded trades since {new Date(serverFrom).toISOString().slice(0, 10)} (earliest backtest window of your algorithms; open positions always included)</span>
+                        <button type="button" onClick={() => setFullHistory(true)}
+                            className="text-accent hover:underline font-bold" disabled={loading}>Load full history</button>
+                    </div>
+                )}
             </div>
 
             {/* ── STATS GRID ─────────────────────────────────────────────────── */}

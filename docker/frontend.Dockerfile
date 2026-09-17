@@ -10,8 +10,9 @@ WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci --ignore-scripts
 
-# Copy frontend source
+# Copy frontend source + the example strategies it bundles
 COPY frontend/ ./
+COPY examples/ /app/examples/
 
 COPY docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY docker/frontend-entrypoint.sh /entrypoint.sh

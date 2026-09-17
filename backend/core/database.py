@@ -20,6 +20,7 @@ def set_sqlite_pragmas(dbapi_conn, connection_record):
     cursor.execute("PRAGMA journal_mode=WAL")       # Allow concurrent reads during writes
     cursor.execute("PRAGMA synchronous=NORMAL")     # Faster writes, still crash-safe
     cursor.execute("PRAGMA cache_size=-32000")      # 32 MB page cache
+    cursor.execute("PRAGMA foreign_keys=ON")        # orders.position_id / signals.candle_id are real constraints
     cursor.close()
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -182,3 +183,24 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def run_startup_sweeps():
+    """Defensive one-off repairs at boot, after migrations. Nothing here
+    should ever find anything; each hit is logged as a WARNING because it
+    means a previous run stopped mid-flight."""
+    log = logging.getLogger("apexalgo.database")
+    with engine.begin() as conn:
+        # A position is `closing` only for the duration of one close request;
+        # after a crash it must go back to `open` so the engine keeps
+        # managing (and the UI keeps showing) it
+        n = conn.execute(text("UPDATE positions SET status='open' WHERE status='closing'")).rowcount
+        if n:
+            log.warning("Startup sweep: %d position(s) were stuck in 'closing' — reset to 'open'; check them on the exchange", n)
+        # Orphan orders predate foreign-key enforcement; detach them so a
+        # later status update on such a row cannot fail the constraint
+        n = conn.execute(text(
+            "UPDATE orders SET position_id=NULL WHERE position_id IS NOT NULL "
+            "AND position_id NOT IN (SELECT id FROM positions)")).rowcount
+        if n:
+            log.warning("Startup sweep: %d order(s) referenced a deleted position — detached", n)

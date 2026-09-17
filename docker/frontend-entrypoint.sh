@@ -28,7 +28,7 @@ sed -i "s|__API_ORIGIN__|${API_ORIGIN}|g" /etc/nginx/conf.d/default.conf
 echo "[frontend] CSP connect-src allows 'self' and ${API_ORIGIN}"
 
 # Build frontend if needed (skip if env and source haven't changed since last build)
-SRC_HASH=$(find /app/frontend/src -type f -exec md5sum {} + | sort | md5sum | cut -d' ' -f1)
+SRC_HASH=$(find /app/frontend/src /app/examples -type f -exec md5sum {} + | sort | md5sum | cut -d' ' -f1)
 ENV_HASH=$(md5sum /app/data/.env | cut -d' ' -f1)
 ENV_HASH="${ENV_HASH}-${SRC_HASH}"
 NEEDS_BUILD=false
