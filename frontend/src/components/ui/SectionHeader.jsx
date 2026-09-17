@@ -6,7 +6,6 @@
  * @param {string} [props.subtitle]
  * @param {React.ReactNode} [props.action]   Right-aligned slot (usually a <Button>).
  * @param {'accent'|'info'|'success'|'purple'|'danger'|'neutral'} [props.accentColor='neutral']
- *   Legacy color-name values (gold|cyan|green|red|white) are still accepted as aliases.
  */
 const ACCENT_COLORS = {
   accent: 'text-accent',
@@ -15,12 +14,6 @@ const ACCENT_COLORS = {
   purple: 'text-purple',
   danger: 'text-danger',
   neutral: 'text-text',
-  // Legacy aliases — remove once no call site uses them
-  gold: 'text-accent',
-  cyan: 'text-info',
-  green: 'text-success',
-  red: 'text-danger',
-  white: 'text-text',
 };
 
 const BAR_COLORS = {
@@ -30,12 +23,6 @@ const BAR_COLORS = {
   purple: 'bg-purple',
   danger: 'bg-danger',
   neutral: 'bg-border-strong',
-  // Legacy aliases — remove once no call site uses them
-  gold: 'bg-accent',
-  cyan: 'bg-info',
-  green: 'bg-success',
-  red: 'bg-danger',
-  white: 'bg-border-strong',
 };
 
 const SectionHeader = ({ title, subtitle, action, accentColor = 'neutral' }) => (

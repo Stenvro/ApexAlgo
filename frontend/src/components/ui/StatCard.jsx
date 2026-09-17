@@ -5,7 +5,6 @@
  * @param {string} props.label                    Uppercase caption.
  * @param {React.ReactNode} props.value           The stat (rendered in .font-num).
  * @param {'accent'|'info'|'success'|'danger'|'purple'|'neutral'} [props.color='accent']
- *   Legacy color-name values (gold|cyan|green|red|white) are still accepted as aliases.
  * @param {string} [props.sub]                    Optional muted sub-line under the value.
  * @param {React.ReactNode} [props.icon]          Optional small icon, top-right.
  *
@@ -20,12 +19,6 @@ const COLORS = {
   danger: 'var(--color-danger)',
   purple: 'var(--color-purple)',
   neutral: 'var(--color-text)',
-  // Legacy aliases — remove once no call site uses them
-  gold: 'var(--color-accent)',
-  cyan: 'var(--color-info)',
-  green: 'var(--color-success)',
-  red: 'var(--color-danger)',
-  white: 'var(--color-text)',
 };
 
 const StatCard = ({ label, value, color = 'accent', sub, icon }) => {
