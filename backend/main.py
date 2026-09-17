@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
 enable_docs = os.getenv("ENABLE_DOCS", "0") == "1"
 app = FastAPI(
     title="ApexAlgo Engine API",
-    version="0.1.0",
+    version="2.1.0",
     swagger_ui_init_oauth={"clientId": "test"},
     lifespan=lifespan,
     docs_url="/docs" if enable_docs else None,

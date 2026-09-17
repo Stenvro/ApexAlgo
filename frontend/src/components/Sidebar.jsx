@@ -176,7 +176,7 @@ export default function Sidebar({ activeView, setActiveView, openCharts, closeCh
             )}
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-3xs font-num text-faint">v1.0.0A</span>
+            <span className="text-3xs font-num text-faint">v{__APP_VERSION__}</span>
             <button
               onClick={toggleTheme}
               title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}

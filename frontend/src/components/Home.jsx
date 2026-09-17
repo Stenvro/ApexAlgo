@@ -177,7 +177,7 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
           </div>
           <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight text-text mb-3">
             Apex<span className="text-accent">Algo</span>
-            <span className="ml-3 align-middle text-2xs font-num font-medium text-faint tracking-[0.25em] uppercase">v1.0.0A</span>
+            <span className="ml-3 align-middle text-2xs font-num font-medium text-faint tracking-[0.25em] uppercase">v{__APP_VERSION__}</span>
           </h1>
           <p className="text-muted text-sm max-w-2xl leading-relaxed">
             Self-hosted quantitative trading terminal. Design strategies visually,

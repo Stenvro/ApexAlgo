@@ -20,15 +20,15 @@ ApexAlgo is a full-stack algorithmic trading platform for building, backtesting,
 
 **Chart Engine** — TradingView-grade candles with per-bot overlays: indicator lines, historical/live trade markers and the engine's raw buy/sell "thoughts", all toggled per algorithm.
 
-![Chart engine with Golden Cross overlay on BTC/USDT 1d](docs/screenshots/chart.png)
+![Chart engine with Turtle Breakout overlay on BTC/USDC 1d](docs/screenshots/chart.png)
 
 **Strategy Builder** — the node graph that *is* the strategy: indicators → conditions → logic gates → order routing, with risk blocks (take profit / stop loss) attached to the entry.
 
 ![Visual strategy builder](docs/screenshots/builder.png)
 
-**Algorithms** — every bot card shows the engine's live phase (fetching → backtesting → monitoring), the last backtest result, why the engine stopped it, and one-click restart / start-all / stop-all.
+**Algorithms** — every bot card shows the engine's live phase (fetching → backtesting → monitoring), the backtest variant and data range with a jump to Analytics, why the engine stopped it, and one-click restart / start-all / stop-all.
 
-![Bot manager with runtime status and backtest tiles](docs/screenshots/bots.png)
+![Bot manager with runtime status per algorithm](docs/screenshots/bots.png)
 
 **Trade Analytics** — net PnL, win rate, profit factor, drawdown, equity curve, strategy vs buy & hold, breakdown per algorithm or pair, monthly PnL — all scoped by the period slider and filters.
 
