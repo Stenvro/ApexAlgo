@@ -32,10 +32,10 @@ function emit(type, message) {
 }
 
 const STYLES = {
-  success: { border: 'border-success/40', text: 'text-success', glow: 'shadow-glow-success' },
-  error: { border: 'border-danger/40', text: 'text-danger', glow: 'shadow-glow-danger' },
-  warn: { border: 'border-warn/40', text: 'text-warn', glow: '' },
-  info: { border: 'border-info/40', text: 'text-info', glow: '' },
+  success: { border: 'border-success/40', edge: 'border-l-success', text: 'text-success', glow: 'shadow-glow-success' },
+  error: { border: 'border-danger/40', edge: 'border-l-danger', text: 'text-danger', glow: 'shadow-glow-danger' },
+  warn: { border: 'border-warn/40', edge: 'border-l-warn', text: 'text-warn', glow: '' },
+  info: { border: 'border-info/40', edge: 'border-l-info', text: 'text-info', glow: '' },
 };
 
 const ICONS = {
@@ -82,7 +82,7 @@ const ToastItem = ({ item, onDismiss }) => {
       role={sticky ? 'alert' : 'status'}
       onMouseEnter={pauseTimer}
       onMouseLeave={startTimer}
-      className={`${exiting ? 'toast-exit' : 'toast-enter'} pointer-events-auto flex items-start gap-3 w-80 max-w-[calc(100vw-2rem)] bg-overlay/95 backdrop-blur-xl border ${s.border} ${s.glow} rounded-lg px-4 py-3 shadow-pop`}
+      className={`${exiting ? 'toast-exit' : 'toast-enter'} pointer-events-auto flex items-start gap-3 w-80 max-w-[calc(100vw-2rem)] bg-overlay border ${s.border} border-l-2 ${s.edge} ${s.glow} rounded-md px-4 py-3 shadow-pop`}
     >
       <svg className={`w-4 h-4 mt-0.5 shrink-0 ${s.text}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
         {ICONS[item.type] || ICONS.info}
