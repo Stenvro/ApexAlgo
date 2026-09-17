@@ -225,6 +225,20 @@ export default function App() {
     return () => window.removeEventListener('open-bot-chart', handler);
   });
 
+  // "View in Analytics" on a bot card: jump to the trades view filtered on
+  // that bot (+ mode). TradeManager reads the request once when it mounts or
+  // when a new one arrives.
+  const [analyticsRequest, setAnalyticsRequest] = useState(null);
+  useEffect(() => {
+    const handler = (e) => {
+      setAnalyticsRequest({ bot: e.detail?.bot || 'all', mode: e.detail?.mode || null, at: Date.now() });
+      setActiveView('trades');
+      if (window.innerWidth < 768) setSidebarOpen(false);
+    };
+    window.addEventListener('open-analytics', handler);
+    return () => window.removeEventListener('open-analytics', handler);
+  }, []);
+
   const closeChart = (chartId, e) => {
     e.stopPropagation();
     setOpenCharts(prev => prev.filter(c => c.id !== chartId));
@@ -330,7 +344,7 @@ export default function App() {
 
           {activeView === 'bots' && <BotManagerUI bots={allBots} refetchBots={refetchBots} backendOk={backendOk} />}
 
-          {activeView === 'trades' && <TradeManager setError={setError} bots={allBots} />}
+          {activeView === 'trades' && <TradeManager setError={setError} bots={allBots} request={analyticsRequest} />}
 
           {openCharts.map(chart => (
             activeView === chart.id && (

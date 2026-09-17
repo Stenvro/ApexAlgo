@@ -43,6 +43,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./frontend/src:/app/frontend/src
+      - ./examples:/app/examples:ro
     depends_on:
       backend:
         condition: service_healthy

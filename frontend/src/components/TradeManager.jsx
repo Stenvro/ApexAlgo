@@ -4,6 +4,7 @@ import PageShell from './ui/PageShell';
 import Button from './ui/Button';
 import { Select } from './ui/Input';
 import Badge from './ui/Badge';
+import ModeBadge from './ui/ModeBadge';
 import StatCard from './ui/StatCard';
 import EmptyState from './ui/EmptyState';
 import { Skeleton } from './ui/Skeleton';
@@ -70,13 +71,6 @@ const entryTimeOf = (p, exitTs, entryTsByPos) => {
 
 const pnlColor = (v) => (v >= 0 ? 'text-success' : 'text-danger');
 const pnlSign = (v) => (v >= 0 ? '+' : '');
-
-const MODE_BADGE_VARIANT = {
-    live: 'success',
-    paper: 'info',
-    backtest: 'neutral',
-    forward_test: 'purple',
-};
 
 // ─── Equity Curve SVG ────────────────────────────────────────────────────────
 
@@ -238,6 +232,15 @@ const rangeThumb = 'appearance-none bg-transparent pointer-events-none absolute 
  * Dual-thumb slider + date inputs + presets. `from`/`to` are ms or null (unbounded).
  * The slider snaps to whole UTC days across the span of all closed trades.
  */
+// Incremental poll merge: rows from the server replace same-id rows, new ids
+// are appended; the API returns newest first and the tables sort themselves.
+const mergeById = (prev, incoming) => {
+    if (incoming.length === 0) return prev;
+    const byId = new Map(prev.map(r => [r.id, r]));
+    incoming.forEach(r => byId.set(r.id, r));
+    return [...byId.values()];
+};
+
 const DateRangeControl = ({ bounds, from, to, onChange }) => {
     if (!bounds) return null;
     const minDay = startOfUtcDay(bounds.min);
@@ -318,7 +321,23 @@ const botCapital = (bot, modes) => {
 };
 const modesOf = (positions) => new Set(positions.map(p => p.mode).filter(Boolean));
 
-export default function TradeManager({ setError, bots = [] }) {
+// Mode filter values: 'real' = paper + live (money or a sandbox that mimics
+// it), 'all' = everything mixed together, otherwise a single engine mode.
+const REAL_MODES = new Set(['paper', 'live']);
+const modeMatches = (filter, mode) =>
+    filter === 'all' || (filter === 'real' ? REAL_MODES.has(mode) : mode === filter);
+// Default view: real money first, else the forward test, else the backtest —
+// never a sum across simulated and real trades unless explicitly chosen.
+const defaultModeFor = (positions) => {
+    const modes = modesOf(positions);
+    if (modes.has('live') || modes.has('paper')) return 'real';
+    if (modes.has('forward_test')) return 'forward_test';
+    return 'backtest';
+};
+const MODE_ORDER = ['live', 'paper', 'forward_test', 'backtest'];
+const sortModes = (modes) => [...modes].sort((a, b) => MODE_ORDER.indexOf(a) - MODE_ORDER.indexOf(b));
+
+export default function TradeManager({ setError, bots = [], request = null }) {
     const [positions, setPositions] = useState([]);
     const [orders, setOrders] = useState([]);
     const [loading, setLoading] = useState(true);
@@ -332,10 +351,20 @@ export default function TradeManager({ setError, bots = [] }) {
     const [busyAction, setBusyAction] = useState(false);
     const [closingId, setClosingId] = useState(null);
 
-    const [filterBot, setFilterBot] = useState('all');
+    const [filterBot, setFilterBot] = useState(request?.bot || 'all');
     const [filterSymbol, setFilterSymbol] = useState('all');
     const [filterExchange, setFilterExchange] = useState('all');
-    const [filterMode, setFilterMode] = useState('all');
+    // null = auto (resolved from the loaded positions, see defaultModeFor)
+    const [filterModeChoice, setFilterMode] = useState(request?.mode || null);
+    // A bot card's "View in Analytics" while this view is already mounted
+    const appliedRequestAt = useRef(request?.at || null);
+    useEffect(() => {
+        if (!request || request.at === appliedRequestAt.current) return;
+        appliedRequestAt.current = request.at;
+        setFilterBot(request.bot || 'all'); // eslint-disable-line react-hooks/set-state-in-effect -- external navigation request
+        setFilterMode(request.mode || null);
+        setCurrentPage(1);
+    }, [request]);
     const [filterInterval, setFilterInterval] = useState('all');
     // Analysis window (ms epoch, null = unbounded). Applies to closed trades and orders.
     const [dateFrom, setDateFrom] = useState(null);
@@ -361,36 +390,89 @@ export default function TradeManager({ setError, bots = [] }) {
         setPriceSyncing(false);
     }, []);
 
-    const fetchAllData = useCallback(async () => {
-        setLoading(true);
+    const positionsRef = useRef(positions);
+    const ordersRef = useRef(orders);
+    useEffect(() => {
+        positionsRef.current = positions;
+        ordersRef.current = orders;
+    }, [positions, orders]);
+
+    const [lastUpdated, setLastUpdated] = useState(null);
+    // Server-side window: the earliest backtest window of the bots on screen.
+    // Backtest rows dominate the volume, so this keeps the initial load small;
+    // open positions are always returned by the API regardless of the window
+    // and "Load full history" widens to everything.
+    const botsDataFrom = useMemo(() => {
+        let min = Infinity;
+        bots.forEach(b => {
+            const t = b.last_backtest_summary?.data_from ? new Date(b.last_backtest_summary.data_from).getTime() : NaN;
+            if (!Number.isNaN(t) && t < min) min = t;
+        });
+        return min === Infinity ? null : min;
+    }, [bots]);
+    const [fullHistory, setFullHistory] = useState(false);
+    const serverFrom = fullHistory ? null : botsDataFrom;
+    // Incremental polling: newest ids + last poll time (see /api/trades/positions)
+    const pollCursor = useRef({ posId: 0, ordId: 0, since: null, from: undefined });
+
+    const fetchAllData = useCallback(async ({ silent = false, signal } = {}) => {
+        if (!silent) setLoading(true);
+        const cur = pollCursor.current;
+        const incremental = silent && cur.from === serverFrom && (cur.posId > 0 || cur.ordId > 0);
+        const base = serverFrom !== null ? { from: new Date(serverFrom).toISOString() } : {};
+        const polledAt = new Date();
         try {
             const [posRes, ordRes] = await Promise.all([
-                apiClient.get('/api/trades/positions', { params: { limit: 0 } }),
-                apiClient.get('/api/trades/orders', { params: { limit: 0 } }),
+                apiClient.get('/api/trades/positions', { signal, params: incremental
+                    ? { ...base, limit: 0, since_id: cur.posId, since: cur.since }
+                    : { ...base, limit: 0 } }),
+                apiClient.get('/api/trades/orders', { signal, params: incremental
+                    ? { ...base, limit: 0, since_id: cur.ordId }
+                    : { ...base, limit: 0 } }),
             ]);
-            const pos = posRes.data || [];
-            const ord = ordRes.data || [];
+            const posNew = posRes.data || [];
+            const ordNew = ordRes.data || [];
+            let pos = posNew, ord = ordNew;
+            if (incremental) {
+                // Merge by id: changed/new rows replace, everything else stays
+                pos = mergeById(positionsRef.current, posNew);
+                ord = ordNew.length ? mergeById(ordersRef.current, ordNew) : ordersRef.current;
+            }
+            pollCursor.current = {
+                from: serverFrom,
+                posId: pos.reduce((m, p) => Math.max(m, p.id), 0),
+                ordId: ord.reduce((m, o) => Math.max(m, o.id), 0),
+                // 5 min margin against client/server clock skew — re-sent rows merge by id
+                since: new Date(polledAt.getTime() - 5 * 60 * 1000).toISOString(),
+            };
             setPositions(pos);
             setOrders(ord);
+            setLastUpdated(polledAt);
             if (setError) setError(null);
             fetchLivePrices(pos);
         } catch (err) {
-            if (setError) setError(err.response?.data?.detail || 'Failed to load analytics data.');
+            if (signal?.aborted) return;
+            if (!silent && setError) setError(err.response?.data?.detail || 'Failed to load analytics data.');
         }
-        setLoading(false);
+        if (!silent) setLoading(false);
         setHasLoadedOnce(true);
-    }, [setError, fetchLivePrices]);
+    }, [setError, fetchLivePrices, serverFrom]);
+
+    // While any bot runs, new fills can land at any candle close — keep the
+    // tables honest without the user hammering Sync.
+    const anyBotActive = bots.some(b => b.is_active);
+    useEffect(() => {
+        if (!anyBotActive) return undefined;
+        const controller = new AbortController();
+        const t = setInterval(() => fetchAllData({ silent: true, signal: controller.signal }), 30000);
+        return () => { controller.abort(); clearInterval(t); };
+    }, [anyBotActive, fetchAllData]);
 
     useEffect(() => {
         const controller = new AbortController();
-        fetchAllData(); // eslint-disable-line react-hooks/set-state-in-effect -- initial data load on mount
+        fetchAllData({ signal: controller.signal }); // eslint-disable-line react-hooks/set-state-in-effect -- initial data load on mount
         return () => controller.abort();
     }, [fetchAllData]);
-
-    const positionsRef = useRef(positions);
-    useEffect(() => {
-        positionsRef.current = positions;
-    }, [positions]);
 
     useEffect(() => {
         if (positions.length === 0) return;
@@ -407,12 +489,16 @@ export default function TradeManager({ setError, bots = [] }) {
         return map;
     }, [bots]);
 
+    const filterMode = useMemo(
+        () => filterModeChoice ?? defaultModeFor(positions),
+        [filterModeChoice, positions]);
+
     const applyFilters = useCallback((arr) =>
         arr
             .filter(x => filterBot === 'all' || x.bot_name === filterBot)
             .filter(x => filterSymbol === 'all' || x.symbol === filterSymbol)
             .filter(x => filterExchange === 'all' || (x.exchange || 'okx') === filterExchange)
-            .filter(x => filterMode === 'all' || x.mode === filterMode)
+            .filter(x => modeMatches(filterMode, x.mode))
             .filter(x => filterInterval === 'all' || tfByBot[x.bot_name] === filterInterval),
     [filterBot, filterSymbol, filterExchange, filterMode, filterInterval, tfByBot]);
 
@@ -472,11 +558,23 @@ export default function TradeManager({ setError, bots = [] }) {
         setBusyAction(false);
     };
 
-    const forceClosePosition = async (id) => {
-        const ok = await confirmDialog({
-            title: 'Force Close Position',
-            message: 'Close this position at the last known local market price? It will be added to your Historical Ledger.',
-            confirmText: 'Force Close',
+    const forceClosePosition = async (pos) => {
+        const id = pos.id;
+        const real = REAL_MODES.has(pos.mode);
+        const exch = (pos.exchange || 'okx').toUpperCase();
+        const cur = livePrices[pos.symbol];
+        // The backend places a real market order for paper/live positions;
+        // simulated modes are closed against the last local candle. Say which.
+        const ok = await confirmDialog(real ? {
+            title: pos.mode === 'live' ? 'Sell at market — real order' : 'Sell at market — sandbox order',
+            message: `Place a market SELL of ${formatCrypto(pos.amount)} ${pos.symbol} on ${exch} now${cur ? ` (last ~$${safeNum(cur)})` : ''}? `
+                + `Fills at whatever the book gives — even at a loss. This cannot be undone.`,
+            confirmText: 'Place market sell',
+            type: 'danger',
+        } : {
+            title: 'Close Simulated Position',
+            message: `Close this ${pos.mode === 'forward_test' ? 'forward-test' : pos.mode} position at the last known local market price? Nothing is sent to the exchange. It will be added to your Historical Ledger.`,
+            confirmText: 'Close',
             type: 'warning',
         });
         if (!ok) return;
@@ -563,19 +661,29 @@ export default function TradeManager({ setError, bots = [] }) {
         const winRate = closedPositions.length > 0 ? (wins.length / closedPositions.length) * 100 : 0;
         const profitFactor = grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0);
 
-        // Max drawdown — percentage of peak equity using backtest_capital as starting equity
+        // Max drawdown — percentage of peak equity using the pools in view as starting equity
         const sorted = [...closedPositions].sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at));
         // Look up backtest_capital from bot config (default $1000)
         const filteredBotNames = [...new Set(sorted.map(p => p.bot_name).filter(Boolean))];
         const viewModes = modesOf(sorted);
         const capitalPerBot = filteredBotNames.map(name => botCapital(bots.find(b => b.name === name), viewModes));
-        // Per-bot capital is a separate pool, so total deployed capital is the
-        // sum across the bots in view; a single bot is just its own pool.
-        // No trades in view → no capital deployed; never fall back to a phantom $1000.
-        const startingCapital = capitalPerBot.length > 0 ? Math.max(...capitalPerBot) : 0;
+        // Per-bot capital is a separate pool, so the capital in view is the sum
+        // across the bots in view — one base for both the return and the
+        // drawdown below. No trades in view → no capital deployed; never fall
+        // back to a phantom $1000.
         const totalCapital = capitalPerBot.reduce((a, b) => a + b, 0);
 
-        let equity = startingCapital, peakEq = startingCapital, maxDDpct = 0;
+        // Simulated and real trades never sum to one number: when the view
+        // mixes modes the tile shows one line per mode instead
+        const pnlByMode = {};
+        for (const p of closedPositions) {
+            if (!p.mode) continue;
+            pnlByMode[p.mode] = (pnlByMode[p.mode] || 0) + (p.profit_abs || 0);
+        }
+        const modes = sortModes(Object.keys(pnlByMode));
+        const mixed = modes.length > 1;
+
+        let equity = totalCapital, peakEq = totalCapital, maxDDpct = 0;
         for (const p of sorted) {
             equity += (p.profit_abs || 0);
             if (equity > peakEq) peakEq = equity;
@@ -625,6 +733,9 @@ export default function TradeManager({ setError, bots = [] }) {
             totalCapital,
             botCount: filteredBotNames.length,
             returnPct: totalCapital > 0 ? (netPnl / totalCapital) * 100 : 0,
+            modes,
+            mixed,
+            pnlByMode,
         };
     }, [closedPositions, activePositions, orders, entryTsByPos, bots]);
 
@@ -738,7 +849,7 @@ export default function TradeManager({ setError, bots = [] }) {
                 const dep = deployedByBot.get(b.name) || { value: 0, count: 0 };
                 return {
                     key: b.name, label: b.name, isActive: !!b.is_active, timeframe: s.timeframe,
-                    mode: s.api_execution ? 'live' : (b.is_sandbox ? 'paper' : 'backtest'),
+                    mode: b.execution_mode || (s.api_execution ? 'live' : 'forward_test'),
                     exchange: s.data_exchange || 'okx',
                     pool, entryPct, entryUsd, isFixed, maxPositions, cap,
                     exposurePct, exposureUsd: pool * (exposurePct / 100),
@@ -819,16 +930,28 @@ export default function TradeManager({ setError, bots = [] }) {
 
     // ── Buy & Hold comparison ─────────────────────────────────────────────────
 
+    // Backtest trades are benchmarked against holding over the full range the
+    // engine walked (`last_backtest_summary.buy_hold`, data_from → data_to):
+    // a strategy that sat flat before its first entry still gets charged for
+    // the move it missed. Real/forward trades have no such range — they are
+    // benchmarked from the first entry to now (or to the last exit in a
+    // bounded window). A mixed view is not comparable and says so.
     const buyAndHoldData = useMemo(() => {
+        const viewModes = modesOf([...activePositions, ...closedPositions]);
+        const onlyBacktest = viewModes.size > 0 && [...viewModes].every(m => m === 'backtest');
+        const onlyLive = viewModes.size > 0 && [...viewModes].every(m => m !== 'backtest');
+        const basis = onlyBacktest ? 'backtest' : (onlyLive ? 'live' : (viewModes.size === 0 ? 'none' : 'mixed'));
+
         const bySymbol = {};
         // Scan ALL filtered positions (open + closed) so the reference entry price
         // reflects the true first entry even when that position is still open
         for (const p of [...activePositions, ...closedPositions]) {
             if (!p.symbol || !p.created_at || !p.entry_price) continue;
             if (!bySymbol[p.symbol]) {
-                bySymbol[p.symbol] = { firstDate: new Date(p.created_at), firstPrice: p.entry_price, positions: [] };
+                bySymbol[p.symbol] = { firstDate: new Date(p.created_at), firstPrice: p.entry_price, positions: [], botNames: new Set() };
             }
             const s = bySymbol[p.symbol];
+            if (p.bot_name) s.botNames.add(p.bot_name);
             if (new Date(p.created_at) < s.firstDate) {
                 s.firstDate = new Date(p.created_at);
                 s.firstPrice = p.entry_price;
@@ -838,29 +961,66 @@ export default function TradeManager({ setError, bots = [] }) {
         for (const p of closedPositions) {
             if (bySymbol[p.symbol]) bySymbol[p.symbol].positions.push(p);
         }
-        return Object.entries(bySymbol)
+        // Engine buy & hold per symbol: the widest range across the bots that
+        // traded it (identical when one bot is in view, the common case)
+        const engineBh = (symbol, botNames) => {
+            let best = null;
+            for (const name of botNames) {
+                const sm = bots.find(b => b.name === name)?.settings?.last_backtest_summary;
+                const bh = sm?.buy_hold?.[symbol];
+                if (!bh || typeof bh.pct !== 'number') continue;
+                const from = sm.data_from ? new Date(sm.data_from).getTime() : NaN;
+                if (!best || (!Number.isNaN(from) && from < best.from)) best = { pct: bh.pct, from, to: sm.data_to ? new Date(sm.data_to).getTime() : NaN };
+            }
+            return best;
+        };
+        const rows = Object.entries(bySymbol)
             .filter(([, d]) => d.positions.length > 0)
             .map(([symbol, d]) => {
                 const strategyPnl = d.positions.reduce((s, p) => s + (p.profit_abs || 0), 0);
-                // Strategy % = total PnL / backtest_capital — same $1000 base as B&H comparison
+                // Strategy % = total PnL over the pools of the bots that traded
+                // this symbol — the same base the stats grid uses
                 const botNames = [...new Set(d.positions.map(p => p.bot_name).filter(Boolean))];
                 const symModes = modesOf(d.positions);
-                const botCapitals = botNames.map(name => botCapital(bots.find(b => b.name === name), symModes));
-                const capital = botCapitals.length > 0 ? Math.max(...botCapitals) : 1000;
+                const capital = botNames.reduce((a, name) => a + botCapital(bots.find(b => b.name === name), symModes), 0) || 1000;
                 const strategyPct = capital > 0 ? (strategyPnl / capital) * 100 : 0;
-                // With a bounded window, B&H ends at the last exit inside it instead of today's price
-                let curPrice = livePrices[symbol];
-                if (dateTo !== null) {
-                    const last = d.positions.reduce((acc, p) => (!acc || new Date(p.closed_at) > new Date(acc.closed_at)) ? p : acc, null);
-                    if (last?.entry_price > 0 && typeof last.profit_pct === 'number') curPrice = last.entry_price * (1 + last.profit_pct / 100);
+
+                let bhPct = null, range = null;
+                if (basis === 'backtest' && dateFrom === null && dateTo === null) {
+                    const bh = engineBh(symbol, d.botNames);
+                    if (bh) { bhPct = bh.pct; range = { from: bh.from, to: bh.to }; }
                 }
-                const bhPct = (curPrice && d.firstPrice > 0)
-                    ? ((curPrice - d.firstPrice) / d.firstPrice) * 100
-                    : null;
+                if (bhPct === null && basis !== 'mixed') {
+                    // With a bounded window, B&H ends at the last exit inside it instead of today's price
+                    let curPrice = livePrices[symbol];
+                    if (dateTo !== null) {
+                        const last = d.positions.reduce((acc, p) => (!acc || new Date(p.closed_at) > new Date(acc.closed_at)) ? p : acc, null);
+                        if (last?.entry_price > 0 && typeof last.profit_pct === 'number') curPrice = last.entry_price * (1 + last.profit_pct / 100);
+                    }
+                    if (curPrice && d.firstPrice > 0) bhPct = ((curPrice - d.firstPrice) / d.firstPrice) * 100;
+                }
                 const edge = bhPct !== null ? strategyPct - bhPct : null;
-                return { symbol, strategyPct, bhPct, edge, strategyPnl };
+                return { symbol, strategyPct, bhPct, edge, strategyPnl, capital, range };
             });
-    }, [closedPositions, activePositions, livePrices, bots, dateTo]);
+
+        // Equal-weight portfolio: the strategy's total return on the capital in
+        // view against holding an equal slice of every symbol it traded
+        const withBh = rows.filter(r => r.bhPct !== null);
+        let portfolio = null;
+        if (rows.length > 1 && withBh.length === rows.length) {
+            const capital = stats.totalCapital || rows.reduce((a, r) => a + r.capital, 0);
+            const strategyPct = capital > 0 ? (rows.reduce((a, r) => a + r.strategyPnl, 0) / capital) * 100 : 0;
+            const bhPct = rows.reduce((a, r) => a + r.bhPct, 0) / rows.length;
+            portfolio = { strategyPct, bhPct, edge: strategyPct - bhPct, symbols: rows.length };
+        }
+        let from = null, to = null;
+        for (const r of rows) {
+            if (!r.range) continue;
+            if (!Number.isNaN(r.range.from) && (from === null || r.range.from < from)) from = r.range.from;
+            if (!Number.isNaN(r.range.to) && (to === null || r.range.to > to)) to = r.range.to;
+        }
+        return { rows, portfolio, basis, range: from !== null ? { from, to } : null };
+    }, [closedPositions, activePositions, livePrices, bots, dateFrom, dateTo, stats.totalCapital]);
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -965,11 +1125,12 @@ export default function TradeManager({ setError, bots = [] }) {
                             {uniqueExchanges.map(ex => <option key={ex} value={ex}>{ex.toUpperCase()}</option>)}
                         </Select>
                         <Select label="Mode" value={filterMode} onChange={e => { setFilterMode(e.target.value); resetPage(); }} className="py-1.5! text-xs!">
-                            <option value="all">All Modes</option>
+                            <option value="real">Paper + Live (real)</option>
                             <option value="live">Live</option>
                             <option value="paper">Paper</option>
-                            <option value="backtest">Backtest</option>
                             <option value="forward_test">Forward Test</option>
+                            <option value="backtest">Backtest</option>
+                            <option value="all">All Modes (mixed)</option>
                         </Select>
                     </div>
                     <div className="flex items-center gap-2 pb-0.5">
@@ -977,11 +1138,23 @@ export default function TradeManager({ setError, bots = [] }) {
                             icon={<svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>}>
                             Export
                         </Button>
-                        <Button variant="secondary" size="sm" onClick={fetchAllData} loading={loading}>Sync</Button>
+                        {lastUpdated && (
+                            <span className="text-[10px] text-faint font-num whitespace-nowrap" title={anyBotActive ? 'Refreshes every 30 s while a bot is running' : 'Press Sync to refresh'}>
+                                updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{anyBotActive ? ' · auto' : ''}
+                            </span>
+                        )}
+                        <Button variant="secondary" size="sm" onClick={() => fetchAllData()} loading={loading}>Sync</Button>
                     </div>
                 </div>
                 <DateRangeControl bounds={dateBounds} from={dateFrom} to={dateTo}
                     onChange={(f, t) => { setDateFrom(f); setDateTo(t); resetPage(); }} />
+                {serverFrom !== null && (
+                    <div className="flex items-center gap-2 pt-2 text-[10px] text-faint font-num">
+                        <span>Loaded trades since {new Date(serverFrom).toISOString().slice(0, 10)} (earliest backtest window of your algorithms; open positions always included)</span>
+                        <button type="button" onClick={() => setFullHistory(true)}
+                            className="text-accent hover:underline font-bold" disabled={loading}>Load full history</button>
+                    </div>
+                )}
             </div>
 
             {/* ── STATS GRID ─────────────────────────────────────────────────── */}
@@ -991,13 +1164,41 @@ export default function TradeManager({ setError, bots = [] }) {
                     {Array.from({ length: 12 }).map((_, i) => <Skeleton key={i} className="h-[88px] w-full rounded-lg" />)}
                 </div>
             ) : (
+                <>
+                {stats.mixed && (
+                    <div role="status" className="flex flex-wrap items-center gap-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-[10px] text-text">
+                        <span className="font-bold uppercase tracking-wider text-warn">Mixed modes</span>
+                        <span className="text-muted">Net PnL is shown per mode — simulated and real trades are never added up.</span>
+                        <span className="flex items-center gap-1 ml-auto">
+                            {stats.modes.map(m => <ModeBadge key={m} mode={m} short className="text-[8px]!" />)}
+                        </span>
+                    </div>
+                )}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    <StatCard
-                        label="Net PNL"
-                        value={`${stats.netPnl >= 0 ? '+' : '-'}$${safeNum(Math.abs(stats.netPnl))}`}
-                        sub={stats.total > 0 ? `${stats.returnPct >= 0 ? '+' : ''}${safeNum(stats.returnPct, 1)}% on $${safeNum(stats.totalCapital, 0)}` : 'no closed trades'}
-                        color={stats.netPnl >= 0 ? 'green' : 'red'}
-                    />
+                    {stats.mixed ? (
+                        <StatCard
+                            label="Net PNL · mixed"
+                            value={
+                                <span className="flex flex-col gap-0.5 text-sm">
+                                    {stats.modes.map(m => (
+                                        <span key={m} className="flex items-center justify-between gap-2">
+                                            <ModeBadge mode={m} short className="text-[8px]!" />
+                                            <span className={`font-num ${pnlColor(stats.pnlByMode[m])}`}>{pnlSign(stats.pnlByMode[m])}${safeNum(Math.abs(stats.pnlByMode[m]))}</span>
+                                        </span>
+                                    ))}
+                                </span>
+                            }
+                            sub="pick one mode for a return %"
+                            color="white"
+                        />
+                    ) : (
+                        <StatCard
+                            label={`Net PNL${stats.modes.length === 1 ? ` · ${stats.modes[0] === 'forward_test' ? 'forward test' : stats.modes[0]}` : ''}`}
+                            value={`${stats.netPnl >= 0 ? '+' : '-'}$${safeNum(Math.abs(stats.netPnl))}`}
+                            sub={stats.total > 0 ? `${stats.returnPct >= 0 ? '+' : ''}${safeNum(stats.returnPct, 1)}% on $${safeNum(stats.totalCapital, 0)}` : 'no closed trades'}
+                            color={stats.netPnl >= 0 ? 'green' : 'red'}
+                        />
+                    )}
                     <StatCard
                         label="Starting Capital"
                         value={stats.botCount > 0 ? `$${safeNum(stats.totalCapital, 0)}` : '—'}
@@ -1071,6 +1272,7 @@ export default function TradeManager({ setError, bots = [] }) {
                         color={stats.total > 0 ? (stats.avgTrade >= 0 ? 'green' : 'red') : 'white'}
                     />
                 </div>
+                </>
             )}
 
             {/* ── EQUITY CURVE + BUY & HOLD ──────────────────────────────────── */}
@@ -1119,7 +1321,15 @@ export default function TradeManager({ setError, bots = [] }) {
                 <div className="terminal-card p-5 lg:w-[340px] shrink-0">
                     <div className="mb-4">
                         <h2 className="text-[11px] font-bold uppercase tracking-wider text-text">Strategy vs Buy & Hold</h2>
-                        <p className="text-[9px] text-muted mt-0.5 uppercase tracking-wider">Per symbol — from first entry to now</p>
+                        <p className="text-[9px] text-muted mt-0.5 uppercase tracking-wider">
+                            {buyAndHoldData.basis === 'backtest' && buyAndHoldData.range
+                                ? `Backtest range ${fmtShortDate(buyAndHoldData.range.from)} → ${fmtShortDate(buyAndHoldData.range.to)}`
+                                : buyAndHoldData.basis === 'backtest'
+                                    ? 'Per symbol — first entry to last exit'
+                                    : buyAndHoldData.basis === 'mixed'
+                                        ? 'Mixed modes — pick one mode to compare'
+                                        : `Per symbol — first entry to ${dateTo !== null ? 'last exit' : 'now'}`}
+                        </p>
                     </div>
 
                     {initialLoading ? (
@@ -1127,13 +1337,30 @@ export default function TradeManager({ setError, bots = [] }) {
                             <Skeleton className="h-20 w-full rounded-lg" />
                             <Skeleton className="h-20 w-full rounded-lg" />
                         </div>
-                    ) : buyAndHoldData.length === 0 ? (
+                    ) : buyAndHoldData.rows.length === 0 ? (
                         <div className="flex items-center justify-center h-32 text-muted text-[10px] text-center">
                             No closed trades to compare.<br />Close positions to see the comparison.
                         </div>
                     ) : (
                         <div className="space-y-3 max-h-[220px] overflow-y-auto custom-scrollbar pr-1">
-                            {buyAndHoldData.map(d => (
+                            {buyAndHoldData.portfolio && (() => {
+                                const p = buyAndHoldData.portfolio;
+                                return (
+                                    <div className="bg-accent/5 border border-accent/30 rounded-lg p-3">
+                                        <div className="flex items-center justify-between mb-1">
+                                            <span className="text-[10px] font-bold text-text">Portfolio <span className="text-muted font-normal">equal-weight · {p.symbols} symbols</span></span>
+                                            <span className={`text-[9px] font-bold font-num px-1.5 py-0.5 rounded ${p.edge >= 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
+                                                {p.edge >= 0 ? '↑' : '↓'} Edge: {pnlSign(p.edge)}{safeNum(p.edge, 1)}%
+                                            </span>
+                                        </div>
+                                        <div className="flex justify-between text-[9px] font-num">
+                                            <span className="text-muted uppercase font-bold">Strategy <span className={pnlColor(p.strategyPct)}>{pnlSign(p.strategyPct)}{safeNum(p.strategyPct, 1)}%</span></span>
+                                            <span className="text-muted uppercase font-bold">Buy & Hold <span className={pnlColor(p.bhPct)}>{pnlSign(p.bhPct)}{safeNum(p.bhPct, 1)}%</span></span>
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+                            {buyAndHoldData.rows.map(d => (
                                 <div key={d.symbol} className="bg-bg/50 border border-border rounded-lg p-3">
                                     <div className="flex items-center justify-between mb-2">
                                         <span className="text-[10px] font-bold text-text font-num">{d.symbol}</span>
@@ -1228,7 +1455,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                                     {breakdownView === 'bot' && <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${r.isActive ? 'bg-success animate-pulse' : 'bg-faint/40'}`} />}
                                                     <span className="truncate max-w-[220px]" title={r.label}>{r.label}</span>
                                                     {breakdownView === 'bot' && r.timeframe && <span className="text-[9px] font-num text-accent">{r.timeframe}</span>}
-                                                    {r.modes.map(m => <Badge key={m} variant={MODE_BADGE_VARIANT[m] || 'neutral'} className="text-[8px]!">{m}</Badge>)}
+                                                    {r.modes.map(m => <ModeBadge key={m} mode={m} short className="text-[8px]!" />)}
                                                 </div>
                                             </td>
                                             <td className="px-4 py-2.5 text-right font-num text-muted">{r.trades} <span className="text-faint">({r.wins}W)</span></td>
@@ -1327,7 +1554,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${r.isActive ? 'bg-success animate-pulse' : 'bg-faint/40'}`} />
                                                     <span className="truncate max-w-[220px]" title={r.label}>{r.label}</span>
                                                     {r.timeframe && <span className="text-[9px] font-num text-accent">{r.timeframe}</span>}
-                                                    <Badge variant={MODE_BADGE_VARIANT[r.mode] || 'neutral'} className="text-[8px]!">{r.mode}</Badge>
+                                                    <ModeBadge mode={r.mode} short className="text-[8px]!" />
                                                 </div>
                                             </td>
                                             <td className="px-4 py-2.5 text-right font-num font-bold text-text">${safeNum(r.pool, 0)}</td>
@@ -1421,7 +1648,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                         <tr key={pos.id} className="border-b border-border/40 hover:bg-text/[0.03] transition-colors">
                                             <td className="px-4 py-3 font-bold text-text">
                                                 <span className="align-middle">{pos.bot_name}</span>
-                                                <Badge variant={MODE_BADGE_VARIANT[pos.mode] || 'neutral'} className="ml-2 text-[8px]!">{pos.mode}</Badge>
+                                                <ModeBadge mode={pos.mode} short className="ml-2 text-[8px]!" />
                                             </td>
                                             <td className="px-4 py-3 text-accent font-bold uppercase text-[10px]">{pos.exchange || 'okx'}</td>
                                             <td className="px-4 py-3 font-bold text-text font-num">{pos.symbol}</td>
@@ -1437,10 +1664,13 @@ export default function TradeManager({ setError, bots = [] }) {
                                                 {hasPrice ? `${pnlSign(pnl.pct)}${safeNum(pnl.pct, 2)}%` : '—'}
                                             </td>
                                             <td className="px-4 py-3 text-right">
-                                                <div className="inline-flex items-center gap-2">
-                                                    <Button variant="secondary" size="sm" loading={closingId === pos.id} disabled={busyAction && closingId !== pos.id} onClick={() => forceClosePosition(pos.id)}>Close</Button>
-                                                    <Button variant="ghost" size="sm" disabled={busyAction} onClick={() => deleteHistoricalTrade(pos.id)} className="hover:text-danger!">Drop</Button>
-                                                </div>
+                                                {/* No "Drop" on an open row: deleting the record of a live
+                                                    position would orphan the coins on the exchange. Close it
+                                                    first; the closed row keeps the delete action. */}
+                                                <Button variant={REAL_MODES.has(pos.mode) ? 'danger' : 'secondary'} size="sm" loading={closingId === pos.id} disabled={busyAction && closingId !== pos.id} onClick={() => forceClosePosition(pos)}
+                                                    title={REAL_MODES.has(pos.mode) ? 'Places a market sell on the exchange' : 'Closes the simulated position at the last local price'}>
+                                                    {REAL_MODES.has(pos.mode) ? 'Sell at market' : 'Close'}
+                                                </Button>
                                             </td>
                                         </tr>
                                     );
@@ -1529,7 +1759,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                                 </td>
                                                 <td className="px-4 py-2.5 font-bold text-text">
                                                     <span className="align-middle">{pos.bot_name}</span>
-                                                    <Badge variant={MODE_BADGE_VARIANT[pos.mode] || 'neutral'} className="ml-1.5 text-[8px]!">{pos.mode}</Badge>
+                                                    <ModeBadge mode={pos.mode} short className="ml-1.5 text-[8px]!" />
                                                 </td>
                                                 <td className="px-4 py-2.5 text-accent font-bold uppercase text-[10px]">{pos.exchange || 'okx'}</td>
                                                 <td className="px-4 py-2.5 font-bold font-num text-text">{pos.symbol}</td>
@@ -1553,7 +1783,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                                 <td className="px-4 py-2.5 text-right font-num text-muted text-[10px]">
                                                     {posFees > 0 ? `-$${safeNum(posFees, 4)}` : '—'}
                                                 </td>
-                                                <td className="px-4 py-2.5 text-center opacity-0 group-hover:opacity-100 transition-opacity">
+                                                <td className="px-4 py-2.5 text-center opacity-60 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                                     <button onClick={() => deleteHistoricalTrade(pos.id)} className="text-muted hover:text-danger transition-colors font-bold text-xs" aria-label="Delete trade">✕</button>
                                                 </td>
                                             </tr>
@@ -1614,7 +1844,7 @@ export default function TradeManager({ setError, bots = [] }) {
                                             <td className="px-4 py-2.5 font-num text-muted text-[10px]">{new Date(order.timestamp).toLocaleString()}</td>
                                             <td className="px-4 py-2.5 font-bold text-text">
                                                 <span className="align-middle">{order.bot_name}</span>
-                                                <Badge variant={MODE_BADGE_VARIANT[order.mode] || 'neutral'} className="ml-1.5 text-[8px]!">{order.mode}</Badge>
+                                                <ModeBadge mode={order.mode} short className="ml-1.5 text-[8px]!" />
                                             </td>
                                             <td className="px-4 py-2.5 text-accent font-bold uppercase text-[10px]">{order.exchange || 'okx'}</td>
                                             <td className="px-4 py-2.5 font-bold font-num text-text">{order.symbol}</td>

@@ -75,8 +75,9 @@ Every file has full JSDoc at the top — read it before use.
 | Button | `default from './ui/Button'` | `variant: primary\|secondary\|ghost\|danger\|success`, `size: sm\|md\|lg`, `loading`, `disabled`, `fullWidth`, `icon` |
 | Input / Select / Textarea | `{ Input, Select, Textarea } from './ui/Input'` | `label`, `error`, `hint`, `mono` (+ native props) |
 | Badge | `default from './ui/Badge'` | `variant: success\|danger\|warn\|info\|accent\|purple\|neutral`, `dot`, `pulse` |
-| Toast | `{ toast } from './ui/Toast'` | `toast.success/error/info/warn('msg')`. Toaster is mounted in App — never mount again. |
-| ConfirmDialog | `{ confirmDialog } from './ui/ConfirmDialog'` | `await confirmDialog({ title, message, confirmText, type: 'danger'\|'warning'\|'info' })` → `boolean`. Host mounted in App. |
+| ModeBadge | `default from './ui/ModeBadge'` | `mode: live\|paper\|forward_test\|backtest`, `short`. **The only way to label a trading mode.** Live = accent (gold) + ● glyph, Paper = info, Forward test = purple, Backtest = neutral. Never `success`/`danger` for a mode — those mean profit/loss. Bots carry `execution_mode` from `/api/bots/summary`. |
+| Toast | `{ toast } from './ui/Toast'` | `toast.success/error/info/warn('msg')`. Multi-line messages render as lines. Errors are sticky (`role="alert"`, dismissed by the user); the rest auto-dismiss. Toaster is mounted in App — never mount again. |
+| ConfirmDialog | `{ confirmDialog } from './ui/ConfirmDialog'` | `await confirmDialog({ title, message, confirmText, type: 'danger'\|'warning'\|'info' })` → `boolean`. Add `secondaryText` for a three-way choice → `true \| 'secondary' \| false`. `message` keeps line breaks. Host mounted in App. |
 | Modal | `default from './ui/Modal'` | `config: { type, title, message, onConfirm, onCancel, confirmText, cancelText, busy }`, `customBody`. Esc + backdrop close built in. |
 | DataTable | `default from './ui/DataTable'` | `columns: [{key, label, align, render}]`, `data`, `emptyMessage`, `emptyState` (node), `maxHeight` (sticky header), `onRowClick` |
 | StatCard | `default from './ui/StatCard'` | `label`, `value`, `color: gold\|cyan\|green\|red\|purple\|white`, `sub`, `icon` |

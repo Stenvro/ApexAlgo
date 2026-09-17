@@ -6,6 +6,7 @@ import PageShell from './ui/PageShell';
 import SectionHeader from './ui/SectionHeader';
 import Button from './ui/Button';
 import Badge from './ui/Badge';
+import ModeBadge from './ui/ModeBadge';
 import EmptyState from './ui/EmptyState';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
@@ -149,6 +150,42 @@ function StopReason({ bot }) {
   );
 }
 
+const fmtDay = (iso) => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? '?' : d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: '2-digit' });
+};
+
+/* One slim line: how many configurations of this strategy have been
+   backtested, the range the last one walked, and a jump to Analytics — the
+   performance numbers themselves live there, not on the card */
+function BacktestResult({ bot }) {
+  const sm = bot.last_backtest_summary ?? bot.settings?.last_backtest_summary;
+  if (!sm || typeof sm.trades !== 'number') return null;
+  const variants = Number(sm.variants) || 0;
+  return (
+    <div className="px-5 py-2 border-b border-border bg-bg/40 flex items-center justify-between gap-3">
+      <div className="flex items-center gap-2 min-w-0 text-[9px] font-num text-muted"
+        title={variants > 0 ? `${variants} distinct configuration${variants === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.` : undefined}>
+        <span className="font-bold uppercase tracking-widest">Backtest{variants > 0 && <span className="text-faint"> #{variants}</span>}</span>
+        {sm.data_from && sm.data_to && (
+          <span className="truncate">{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>
+        )}
+      </div>
+      <button type="button"
+        onClick={() => window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: bot.name, mode: 'backtest' } }))}
+        className="text-[9px] font-bold uppercase tracking-wider text-info hover:text-text transition-colors shrink-0">
+        View in Analytics →
+      </button>
+    </div>
+  );
+}
+
+const runtimeKey = (rt) => {
+  if (!rt) return '';
+  const { updated_at: _u, last_tick_at: _t, ...rest } = rt;
+  return JSON.stringify(rest);
+};
+
 const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, openConsoles, clearSignals, toggleBotState, restartBot, handleExport, handleDuplicate, handleClearCacheClick, handleDeleteClick, updateBotConfig, toggleConsole }) {
   const isBacktestOn     = bot.settings?.backtest_on_start === true;
   const isApiExecutionOn = bot.settings?.api_execution === true;
@@ -161,9 +198,6 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
     : (bot.settings?.symbol ? [bot.settings.symbol] : []);
   const visiblePairs = assignedPairs.slice(0, 3);
   const extraPairs   = assignedPairs.length - visiblePairs.length;
-  // Distinct configs backtested so far (from the last backtest summary)
-  const variants     = Number((bot.last_backtest_summary ?? bot.settings?.last_backtest_summary)?.variants) || 0;
-
   return (
     <div
       className={`terminal-card flex flex-col overflow-hidden transition-all duration-300 hover:border-border-strong ${
@@ -178,10 +212,8 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
             {bot.is_active
               ? <Badge variant="success" dot pulse>Running</Badge>
               : <Badge variant="neutral" dot>Stopped</Badge>}
-            {isApiExecutionOn
-              ? <Badge variant="accent">Live</Badge>
-              : <Badge variant="info">Paper</Badge>}
-            {isBacktestOn && <Badge variant="purple">Backtest</Badge>}
+            <ModeBadge mode={bot.execution_mode || (isApiExecutionOn ? 'live' : 'forward_test')} />
+            {isBacktestOn && <Badge variant="neutral">+ Backtest</Badge>}
           </div>
 
           {/* Metrics row */}
@@ -194,12 +226,6 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
               <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Pairs</span>
               <span className="text-[11px] font-num font-bold text-text">{assignedPairs.length}</span>
             </div>
-            {variants > 0 && (
-              <div className="flex flex-col" title={`${variants} distinct configuration${variants === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.`}>
-                <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Variant</span>
-                <span className="text-[11px] font-num font-bold text-text">#{variants}</span>
-              </div>
-            )}
             <div className="flex flex-col min-w-0" title={assignedPairs.join(', ')}>
               <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Whitelist</span>
               <span className="flex items-center gap-1 flex-wrap">
@@ -238,6 +264,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
 
       <RuntimeStrip bot={bot} />
       <StopReason bot={bot} />
+      <BacktestResult bot={bot} />
 
       {/* ── Card Body ── */}
       <div className="px-5 py-4 flex-1 flex flex-col space-y-5">
@@ -252,18 +279,18 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
             <button
               disabled={bot.is_active}
               onClick={() => updateBotConfig(bot.id, bot, { settings: { api_execution: false } })}
-              title="Simulate orders locally without touching the exchange."
-              className={`flex-1 py-2 text-[9px] font-bold uppercase transition-all duration-200 disabled:opacity-50 ${!isApiExecutionOn ? 'bg-info/10 text-info' : 'text-muted hover:text-text hover:bg-raised'}`}
+              title="Forward test: simulate fills locally on live candles without touching the exchange."
+              className={`flex-1 py-2 text-[9px] font-bold uppercase transition-all duration-200 disabled:opacity-50 ${!isApiExecutionOn ? 'bg-purple/10 text-purple' : 'text-muted hover:text-text hover:bg-raised'}`}
             >
-              Paper Trade
+              Forward test
             </button>
             <button
               disabled={bot.is_active || !hasApiKey}
               onClick={() => updateBotConfig(bot.id, bot, { settings: { api_execution: true } })}
-              title={!hasApiKey ? 'Assign an API key to enable live/paper routing.' : 'Route orders through API key.'}
+              title={!hasApiKey ? 'Assign an API key to route orders (paper on a sandbox key, live otherwise).' : 'Route orders through the API key: paper on a sandbox key, live (real money) otherwise.'}
               className={`flex-1 py-2 text-[9px] font-bold uppercase transition-all duration-200 border-l border-border disabled:opacity-50 ${isApiExecutionOn ? 'bg-accent/10 text-accent' : 'text-muted hover:text-text hover:bg-raised'}`}
             >
-              Live Exchange
+              Exchange orders
             </button>
           </div>
         </div>
@@ -355,13 +382,16 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
   prev.bot.id === next.bot.id &&
   prev.bot.is_active === next.bot.is_active &&
   prev.bot.name === next.bot.name &&
+  prev.bot.execution_mode === next.bot.execution_mode &&
   prev.busyAction === next.busyAction &&
   (prev.togglingBot === prev.bot.id) === (next.togglingBot === next.bot.id) &&
   prev.openConsoles[prev.bot.id] === next.openConsoles[next.bot.id] &&
   prev.clearSignals[prev.bot.name] === next.clearSignals[next.bot.name] &&
-  JSON.stringify(prev.bot.runtime) === JSON.stringify(next.bot.runtime) &&
+  // Runtime timestamps tick on every poll but are never rendered — strip
+  // them so an idle live bot does not re-render its card every 15 s
+  runtimeKey(prev.bot.runtime) === runtimeKey(next.bot.runtime) &&
   JSON.stringify(prev.bot.settings) === JSON.stringify(next.bot.settings) &&
-  prev.bot.last_backtest_summary?.variants === next.bot.last_backtest_summary?.variants
+  JSON.stringify(prev.bot.last_backtest_summary) === JSON.stringify(next.bot.last_backtest_summary)
 );
 
 function ChevronIcon({ open }) {
@@ -375,6 +405,57 @@ function ChevronIcon({ open }) {
   );
 }
 
+const MODE_WORD = { live: 'Live', paper: 'Paper', forward_test: 'Forward test' };
+
+/**
+ * The stop endpoints refuse (409) while a bot holds open forward/paper/live
+ * positions. Turn that refusal into an explicit choice; resolves to the
+ * `close_positions` value to retry with, or null when the user cancels.
+ */
+async function askAboutOpenPositions(detail, { bulk = false } = {}) {
+  const positions = detail?.open_positions || [];
+  const real = positions.filter((p) => p.mode === 'live' || p.mode === 'paper').length;
+  const lines = positions.map((p) =>
+    `• ${bulk && p.bot_name ? `${p.bot_name} — ` : ''}${MODE_WORD[p.mode] || p.mode} ${p.symbol}: ${p.amount} @ ${p.entry_price}`,
+  );
+  const choice = await confirmDialog({
+    title: bulk ? 'Bots hold open positions' : 'Bot holds open positions',
+    message:
+      `${lines.join('\n')}\n\n` +
+      (real
+        ? `${real} of these ${real === 1 ? 'is a real position' : 'are real positions'} on the exchange. `
+        : '') +
+      'Close them at market now (even at a loss), or stop and leave them open? Open positions of a stopped bot are unmanaged: no stop-loss or take-profit will fire.',
+    confirmText: 'Close at market & stop',
+    secondaryText: 'Stop, leave open',
+    cancelText: 'Cancel',
+    type: real ? 'danger' : 'warning',
+  });
+  if (choice === true) return true;
+  if (choice === 'secondary') return false;
+  return null;
+}
+
+/** Retry a stop request with the user's choice after a 409; rethrows anything else. */
+async function postStop(url, { bulk = false } = {}) {
+  try {
+    return await apiClient.post(url, null);
+  } catch (err) {
+    if (err.response?.status !== 409 || !Array.isArray(err.response.data?.detail?.open_positions)) throw err;
+    const close = await askAboutOpenPositions(err.response.data.detail, { bulk });
+    if (close === null) return null;
+    return apiClient.post(url, null, { params: { close_positions: close } });
+  }
+}
+
+function describeStop(data) {
+  const closed = data?.closed_positions?.length || 0;
+  const open = data?.unmanaged_positions?.length || 0;
+  if (closed) return `${closed} position${closed === 1 ? '' : 's'} closed at market`;
+  if (open) return `${open} position${open === 1 ? '' : 's'} left open — unmanaged`;
+  return '';
+}
+
 export default function BotManagerUI({ bots = [], refetchBots, backendOk = true }) {
   const [openConsoles, setOpenConsoles] = useState({});
   const [busyAction, setBusyAction]     = useState(null);  // 'delete:ID' or 'wipe:name'
@@ -385,11 +466,21 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
   const toggleBotState = useCallback(async (botId, isCurrentlyActive) => {
     setTogglingBot(botId);
     try {
-      const endpoint = isCurrentlyActive ? `/api/bots/${botId}/stop` : `/api/bots/${botId}/start`;
-      await apiClient.post(endpoint);
-      refetchBots();
-      toast.success(isCurrentlyActive ? 'Bot stopped' : 'Engine started');
+      if (isCurrentlyActive) {
+        const res = await postStop(`/api/bots/${botId}/stop`);
+        if (res) {
+          refetchBots();
+          const extra = describeStop(res.data);
+          (extra.includes('unmanaged') ? toast.warn : toast.success)(extra ? `Bot stopped — ${extra}` : 'Bot stopped');
+        }
+      } else {
+        await apiClient.post(`/api/bots/${botId}/start`);
+        refetchBots();
+        toast.success('Engine started');
+      }
     } catch (err) {
+      // A failed market close still stops the bot; make sure the card reflects that
+      refetchBots();
       toast.error(humanizeApiError(err, 'Failed to toggle bot state.'));
     }
     setTogglingBot(null);
@@ -422,27 +513,31 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
   }, [refetchBots]);
 
   const stopAll = useCallback(async () => {
-    const liveCount = bots.filter(b => b.is_active && b.settings?.api_execution).length;
+    // Open positions are handled by the server's 409 → explicit-choice flow in postStop
     const ok = await confirmDialog({
       title: 'Stop all bots',
-      message: liveCount
-        ? `${liveCount} bot${liveCount === 1 ? ' is' : 's are'} routing live orders. Stopping leaves any open positions unmanaged (no SL/TP) until restarted. Continue?`
-        : 'Stop every running bot? Startups in progress are aborted.',
+      message: 'Stop every running bot? Startups in progress are aborted.',
       confirmText: 'Stop all',
-      type: liveCount ? 'danger' : 'warning',
+      type: 'warning',
     });
     if (!ok) return;
     setBulkBusy('stop');
     try {
-      const res = await apiClient.post('/api/bots/bulk/stop', null);
-      refetchBots();
-      const n = res.data?.stopped?.length || 0;
-      toast.success(n ? `${n} bot${n === 1 ? '' : 's'} stopped` : 'No running bots');
+      const res = await postStop('/api/bots/bulk/stop', { bulk: true });
+      if (res) {
+        refetchBots();
+        const n = res.data?.stopped?.length || 0;
+        const extra = describeStop(res.data);
+        (extra.includes('unmanaged') ? toast.warn : toast.success)(
+          n ? `${n} bot${n === 1 ? '' : 's'} stopped${extra ? ` — ${extra}` : ''}` : 'No running bots',
+        );
+      }
     } catch (err) {
+      refetchBots();
       toast.error(humanizeApiError(err, 'Failed to stop bots.'));
     }
     setBulkBusy(null);
-  }, [bots, refetchBots]);
+  }, [refetchBots]);
 
   const handleDeleteClick = useCallback(async (botId, botName) => {
     if (busyAction) return;

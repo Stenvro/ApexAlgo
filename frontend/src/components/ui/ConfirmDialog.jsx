@@ -12,6 +12,9 @@
  *   });
  *   if (ok) { ... }
  *
+ * Pass `secondaryText` for a three-way choice: the promise then resolves to
+ * `true` (confirm), `'secondary'`, or `false` (cancel / Esc / backdrop).
+ *
  * Also reachable without import via window event:
  *   window.dispatchEvent(new CustomEvent('apex-confirm', {
  *     detail: { title, message, confirmText, cancelText, type, resolve }
@@ -59,7 +62,9 @@ export const ConfirmDialogHost = () => {
         message: request.message || '',
         confirmText: request.confirmText || 'Confirm',
         cancelText: request.cancelText || 'Cancel',
+        secondaryText: request.secondaryText,
         onConfirm: () => finish(true),
+        onSecondary: request.secondaryText ? () => finish('secondary') : undefined,
         onCancel: () => finish(false),
       }}
     />

@@ -94,7 +94,8 @@ _SPECS: tuple[IndicatorSpec, ...] = (
                   outputs=("Long", "Short", "AF", "Reversal"),
                   params=(Param("af0", "AF Step", 0.02), Param("af", "AF Max", 0.2))),
     IndicatorSpec("ichimoku", "Ichimoku Cloud", TREND, "overlay",
-                  outputs=("Conversion (Tenkan)", "Base (Kijun)", "Span A", "Span B", "Chikou"),
+                  # pandas_ta column order is ISA, ISB, ITS, IKS, ICS — labels must match positions
+                  outputs=("Span A (Senkou A)", "Span B (Senkou B)", "Conversion (Tenkan)", "Base (Kijun)", "Chikou"),
                   params=(Param("tenkan", "Tenkan", 9), Param("kijun", "Kijun", 26), Param("senkou", "Senkou", 52)),
                   source=SOURCE_ICHIMOKU, disabled_outputs=(4,)),
     IndicatorSpec("vortex", "Vortex Indicator", TREND, "oscillator",

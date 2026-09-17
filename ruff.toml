@@ -1,0 +1,13 @@
+# Lint only — the codebase uses compact one-line `if x: return` style, so
+# formatting/line-length rules are intentionally not enforced.
+target-version = "py311"
+line-length = 200
+extend-exclude = ["apexalgo_venv", "frontend", "data", "install"]
+
+[lint]
+select = ["E", "F", "W", "B006", "B008"]
+ignore = ["E501", "E701", "E702", "E731", "E741", "E402", "E712", "B008"]
+
+[lint.per-file-ignores]
+"tests/conftest.py" = ["E402"]
+"backend/main.py" = ["F401"]  # model imports register tables for create_all()

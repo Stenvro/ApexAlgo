@@ -22,7 +22,7 @@ The engine evaluates the whole graph once per **closed candle**, per pair. Knowi
 | **Evaluation moment** | On the close of each candle. `offset: 0` on a price node means *the candle that just closed*, not a still-forming candle. |
 | **Entry fill** | At the close price of the signal candle, plus `slippage` %. Fee is charged on the notional. |
 | **Direction** | Long only. `BUY` opens, `SELL` closes. There is no shorting and no leverage. |
-| **Positions per pair** | **Exactly one open position per pair at a time.** A BUY signal while a position is open on that pair is ignored. `max_positions` caps how many pairs can be open at once (`global`) or is applied per pair (`per_pair`, effectively 1). |
+| **Positions per pair** | **Pyramiding up to `max_positions`.** A BUY signal while a position is already open on that pair opens another layer until the limit is reached (`per_pair` = per symbol, `global` = across all pairs of the bot). Each layer has its own SL/TP levels (anchored to its own entry) and is exited independently; a strategy **SELL signal flattens every open layer on that pair**. A layer opened on a candle is not exit-checked until the next candle. `max_positions: 1` gives the classic one-position-per-pair behaviour. Backtest and live apply the same rule. |
 | **Re-entry** | The moment a position closes, the next candle whose entry condition is true opens a new one. A *state* condition (e.g. `RSI < 30`) that stays true for 10 candles will therefore re-enter immediately after every exit — see §4.2. |
 | **Exit checks** | Every candle while a position is open, in this order: **stop-losses** (against the candle low) → **take-profits** (against high/low) → **strategy SELL signal** (at close). Only one group fires per candle; a hit stop-loss suppresses take-profits on the same candle. |
 | **Trailing anchor** | Trailing levels use the highest high reached **before** the current candle, so one candle cannot both raise the trail and trigger it against its own low. |
@@ -333,8 +333,8 @@ Output exactly **one** valid JSON document in a fenced code block. Use only meth
 | `symbol` | string | Primary symbol (first in whitelist) |
 | `symbols` | string[] | All pairs; one quote currency per bot |
 | `timeframe` | string | Must be supported by `data_exchange` (§5.3) |
-| `max_positions` | int ≥ 1 | Open positions allowed; with `global`, across all pairs |
-| `max_positions_scope` | `per_pair` / `global` | Scope of the limit |
+| `max_positions` | int ≥ 1 | Open positions (layers) allowed; > 1 enables pyramiding on repeated BUY signals (§2) |
+| `max_positions_scope` | `per_pair` / `global` | `per_pair` = limit per symbol, `global` = limit across all pairs of the bot |
 | `cooldown_trades` / `cooldown_candles` | int | Max new entries per window (0 = off) |
 | `max_drawdown` | % | Peak-to-trough on mark-to-market equity, checked after the backtest and after every closed live position. 0 = off |
 | `drawdown_action` | `close_all` / `block_entries` | `close_all`: close everything and stop (a backtest breach prevents go-live). `block_entries`: skip new entries until drawdown < half the limit, or — once flat — until `drawdown_cooldown_days` passed; then the peak resets. Exits keep working. Simulated in the backtest too |

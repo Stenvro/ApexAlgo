@@ -6,6 +6,7 @@
  * @param {boolean} [props.dot=false]     Leading status dot.
  * @param {boolean} [props.pulse=false]   Animate the dot (live/running states).
  * @param {string} [props.className]
+ * @param {string} [props.title]      Native tooltip.
  *
  * Usage:
  *   <Badge variant="success" dot pulse>Live</Badge>
@@ -21,8 +22,9 @@ const VARIANTS = {
   neutral: 'bg-raised text-muted border-border',
 };
 
-const Badge = ({ variant = 'neutral', dot = false, pulse = false, className = '', children }) => (
+const Badge = ({ variant = 'neutral', dot = false, pulse = false, className = '', title, children }) => (
   <span
+    title={title}
     className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-bold uppercase tracking-wider whitespace-nowrap ${VARIANTS[variant] || VARIANTS.neutral} ${className}`}
   >
     {dot && (

@@ -1,4 +1,7 @@
+import { useEffect, useMemo, useState } from 'react';
+import { apiClient } from '../api/client';
 import Badge from './ui/Badge';
+import ModeBadge from './ui/ModeBadge';
 import Button from './ui/Button';
 import EmptyState from './ui/EmptyState';
 import ExampleLoader from './ExampleLoader';
@@ -13,6 +16,44 @@ import ExampleLoader from './ExampleLoader';
 
 const openBuilder = (bot) =>
   window.dispatchEvent(new CustomEvent('open-builder', bot ? { detail: bot } : undefined));
+const openAnalytics = (mode) =>
+  window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: 'all', mode } }));
+
+const REAL_MODES = new Set(['paper', 'live']);
+const fmtUsd = (n) => `$${Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+
+/* Everything the operator should look at before walking away: broken keys,
+   engine auto-stops, and real positions nobody is managing any more. */
+function AttentionStrip({ items }) {
+  if (items.length === 0) return null;
+  return (
+    <section className="mb-8 fade-in-delay-4" aria-label="Needs attention">
+      <div className="terminal-card overflow-hidden border-warn/40">
+        <div className="px-5 py-2.5 border-b border-warn/30 bg-warn/[0.06] flex items-center gap-2">
+          <svg className="w-3.5 h-3.5 text-warn shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M12 3l9 16H3l9-16z" />
+          </svg>
+          <h2 className="text-[10px] font-bold uppercase tracking-[0.2em] text-warn">Needs attention · {items.length}</h2>
+        </div>
+        <ul className="divide-y divide-border/50">
+          {items.map((it) => (
+            <li key={it.key}>
+              <button
+                type="button"
+                onClick={it.onClick}
+                className="w-full flex items-center gap-3 px-5 py-2.5 text-left hover:bg-text/[0.03] transition-colors group"
+              >
+                <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 w-24 ${it.tone === 'danger' ? 'text-danger' : 'text-warn'}`}>{it.kind}</span>
+                <span className="text-xs text-text flex-1 min-w-0 truncate">{it.text}</span>
+                <span className="text-[10px] text-faint shrink-0 group-hover:text-muted transition-colors">{it.action} →</span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
 
 const StatTile = ({ label, value, sub, accent, icon, onClick, delay }) => (
   <button
@@ -45,15 +86,81 @@ const StatTile = ({ label, value, sub, accent, icon, onClick, delay }) => (
 );
 
 export default function Home({ setActiveView, bots = [], backendOk = true, refetchBots }) {
+  // Real-money state lives in positions and keys, not in the bots summary.
+  const [openPositions, setOpenPositions] = useState([]);
+  const [keys, setKeys] = useState(null);
+  const activeCount = bots.filter((b) => b.is_active).length;
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.get('/api/trades/positions', { params: { status: 'open', limit: 5000 } })
+      .then((r) => { if (!cancelled) setOpenPositions(Array.isArray(r.data) ? r.data : []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [activeCount, backendOk]);
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.get('/api/keys')
+      .then((r) => { if (!cancelled) setKeys(Array.isArray(r.data) ? r.data : []); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const realOpen = useMemo(() => openPositions.filter((p) => REAL_MODES.has(p.mode)), [openPositions]);
+  const exposure = useMemo(() => ({
+    live: realOpen.filter((p) => p.mode === 'live').reduce((s, p) => s + (p.entry_price || 0) * (p.amount || 0), 0),
+    paper: realOpen.filter((p) => p.mode === 'paper').reduce((s, p) => s + (p.entry_price || 0) * (p.amount || 0), 0),
+  }), [realOpen]);
+
+  const attention = useMemo(() => {
+    const items = [];
+    const byName = new Map(bots.map((b) => [b.name, b]));
+    for (const k of keys || []) {
+      if (!k.is_active) {
+        items.push({
+          key: `key:${k.name}`, kind: 'Key broken', tone: 'danger',
+          text: `${k.name} (${String(k.exchange).toUpperCase()}) — ${k.error_msg || 'exchange rejected the credentials'}${k.bots?.length ? ` · used by ${k.bots.map((b) => b.name).join(', ')}` : ''}`,
+          action: 'Settings', onClick: () => setActiveView('settings'),
+        });
+      }
+    }
+    const unmanaged = new Map();
+    for (const p of realOpen) {
+      const bot = byName.get(p.bot_name);
+      if (bot && bot.is_active) continue;
+      const cur = unmanaged.get(p.bot_name) || { count: 0, notional: 0, mode: p.mode, missing: !bot };
+      cur.count += 1;
+      cur.notional += (p.entry_price || 0) * (p.amount || 0);
+      unmanaged.set(p.bot_name, cur);
+    }
+    for (const [name, u] of unmanaged) {
+      items.push({
+        key: `unmanaged:${name}`, kind: 'Unmanaged', tone: 'danger',
+        text: `${u.count} open ${u.mode} position${u.count === 1 ? '' : 's'} (~${fmtUsd(u.notional)} at entry) on ${u.missing ? 'deleted bot' : 'stopped bot'} ${name} — no stop-loss or take-profit is being evaluated`,
+        action: 'Analytics', onClick: () => openAnalytics(u.mode),
+      });
+    }
+    for (const b of bots) {
+      if (!b.is_active && b.settings?.last_stop_reason) {
+        items.push({
+          key: `stop:${b.name}`, kind: 'Engine stop', tone: 'warn',
+          text: `${b.name} — ${b.settings.last_stop_reason}`,
+          action: 'Bots', onClick: () => setActiveView('bots'),
+        });
+      }
+    }
+    return items;
+  }, [bots, keys, realOpen, setActiveView]);
+
   const activeBots = bots.filter((b) => b.is_active);
   const startingBots = activeBots.filter((b) => ['starting', 'fetching', 'backtesting'].includes(b.runtime?.phase)).length;
   const haltedBots = bots.filter((b) => !b.is_active && b.settings?.last_stop_reason).length;
-  const liveBots = bots.filter((b) => b.settings?.api_execution);
-  const runningLive = bots.filter((b) => b.is_active && b.settings?.api_execution).length;
-  const runningPaper = bots.filter((b) => b.is_active && !b.settings?.api_execution).length;
-  const executionSub = (runningLive || runningPaper)
-    ? [runningLive ? `${runningLive} live` : null, runningPaper ? `${runningPaper} paper` : null].filter(Boolean).join(' · ') + ' running'
-    : (liveBots.length ? 'configured, none running' : 'no live execution configured');
+  const liveBots = bots.filter((b) => b.execution_mode === 'live');
+  const runningLive = bots.filter((b) => b.is_active && b.execution_mode === 'live').length;
+  const runningPaper = bots.filter((b) => b.is_active && b.execution_mode === 'paper').length;
+  const runningForward = bots.filter((b) => b.is_active && b.execution_mode === 'forward_test').length;
+  const executionSub = (runningLive || runningPaper || runningForward)
+    ? [runningLive ? `${runningLive} live` : null, runningPaper ? `${runningPaper} paper` : null, runningForward ? `${runningForward} forward test` : null].filter(Boolean).join(' · ') + ' running'
+    : (liveBots.length ? 'live configured, none running' : 'no live execution configured');
   const recentBots = [...bots]
     .sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''))
     .slice(0, 5);
@@ -134,14 +241,18 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
           />
           <StatTile
             delay={4}
-            label="Analytics"
-            value="P&L"
-            sub="equity curve & drawdown"
+            label="Open exposure"
+            value={fmtUsd(exposure.live)}
+            sub={realOpen.length
+              ? `${realOpen.filter((p) => p.mode === 'live').length} live · ${realOpen.filter((p) => p.mode === 'paper').length} paper (${fmtUsd(exposure.paper)}) at entry`
+              : 'no real positions open'}
             accent="var(--color-info)"
-            onClick={() => setActiveView('trades')}
+            onClick={() => openAnalytics(realOpen.length ? 'real' : undefined)}
             icon={<svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>}
           />
         </div>
+
+        <AttentionStrip items={attention} />
 
         {/* Recent strategies */}
         <section className="fade-in-delay-5">
@@ -188,9 +299,7 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
                           </p>
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
-                          {bot.settings?.api_execution
-                            ? <Badge variant="danger">Live</Badge>
-                            : <Badge variant="neutral">Sim</Badge>}
+                          <ModeBadge mode={bot.execution_mode} />
                           {bot.is_active
                             ? <Badge variant="success" dot pulse>Running</Badge>
                             : <Badge variant="neutral">Stopped</Badge>}

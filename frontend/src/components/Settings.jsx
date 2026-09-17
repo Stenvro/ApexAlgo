@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { apiClient } from '../api/client';
 import { humanizeApiError } from '../api/errors';
 import PageShell from './ui/PageShell';
@@ -217,14 +217,21 @@ export default function Settings() {
   };
 
   const handleDeleteClick = async (k) => {
-    const running = (k.bots || []).filter(b => b.is_active);
+    const linked = k.bots || [];
+    if (linked.length) {
+      // The server refuses (409) while any bot references the key — a keyless
+      // live bot could no longer send exits for its real positions
+      await confirmDialog({
+        title: 'Key is in use',
+        message: `'${k.name}' is linked to ${linked.length} bot${linked.length === 1 ? '' : 's'}: ${linked.map(b => b.name + (b.is_active ? ' (running)' : '')).join(', ')}.\n\nSwitch those bots to another key in the builder, or delete them, before removing this key.`,
+        confirmText: 'OK',
+        type: 'info',
+      });
+      return;
+    }
     const ok = await confirmDialog({
       title: 'Delete Connection',
-      message: running.length
-        ? `'${k.name}' is used by ${running.length} running bot${running.length === 1 ? '' : 's'} (${running.map(b => b.name).join(', ')}). They will lose exchange access on their next candle. Delete anyway?`
-        : k.bots?.length
-          ? `'${k.name}' is linked to ${k.bots.length} bot${k.bots.length === 1 ? '' : 's'}. They fall back to forward-test mode until you assign another key. Delete?`
-          : `Permanently delete the key '${k.name}'?`,
+      message: `Permanently delete the key '${k.name}'?`,
       confirmText: 'Delete Key',
       type: 'danger',
     });
@@ -286,7 +293,11 @@ export default function Settings() {
     return () => clearInterval(t);
   }, [openBalanceKeys, loadWallet]);
 
+  // One token per opened swap form: a retry of the same intent (network hiccup,
+  // double click) returns the first result instead of a second market order
+  const swapTokenRef = useRef(null);
   const openSwapModal = async (kName) => {
+    swapTokenRef.current = null;
     setSwapModal(kName);
     if (!balances[kName]) {
       try {
@@ -308,16 +319,53 @@ export default function Settings() {
     setSwapAmount(wb[swapFrom].free);
   };
 
+  // Best-effort public last price for the confirm line; null when unavailable
+  const quoteSwap = async (exchange, from, to) => {
+    for (const [symbol, invert] of [[`${to}/${from}`, false], [`${from}/${to}`, true]]) {
+      try {
+        const { data } = await apiClient.get(`/api/data/market-info/${encodeURIComponent(symbol)}`, { params: { exchange } });
+        const last = Number(data?.last);
+        if (last > 0) return { symbol, last, toPerFrom: invert ? last : 1 / last };
+      } catch { /* try the other direction */ }
+    }
+    return null;
+  };
+
   const executeSwap = async (e) => {
     e.preventDefault();
-    setLoading(true);
     const currentWallet = swapModal;
+    const amount = parseFloat(swapAmount);
+    if (!(amount > 0)) { toast.warn('Enter an amount greater than zero.'); return; }
+    const from = swapFrom.trim().toUpperCase();
+    const to = swapTo.trim().toUpperCase();
+    const key = keys.find(k => k.name === currentWallet);
+
+    setLoading(true);
+    const q = await quoteSwap(key?.exchange, from, to);
+    setLoading(false);
+    const fromQty = amountType === 'from' ? amount : (q ? amount / q.toPerFrom : null);
+    const toQty = amountType === 'from' ? (q ? amount * q.toPerFrom : null) : amount;
+    const fmt = (v) => (v == null ? '?' : Number(v).toLocaleString(undefined, { maximumFractionDigits: 6 }));
+    const ok = await confirmDialog({
+      title: key?.is_sandbox ? 'Execute sandbox market swap' : 'Execute real market swap',
+      message:
+        `Sell ~${fmt(fromQty)} ${from} → receive ~${fmt(toQty)} ${to}` +
+        (q ? ` at last ~${fmt(q.last)} (${q.symbol})` : ' (no live quote available — the fill price is whatever the market gives)') +
+        `\n\nMarket order on ${key?.exchange?.toUpperCase() || 'the exchange'} via '${currentWallet}'. This is irreversible.`,
+      confirmText: 'Place market order',
+      type: 'danger',
+    });
+    if (!ok) return;
+
+    setLoading(true);
+    if (!swapTokenRef.current) swapTokenRef.current = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     try {
       await apiClient.post(`/api/keys/${encodeURIComponent(currentWallet)}/swap`, {
-        from_asset: swapFrom,
-        to_asset: swapTo,
-        amount: parseFloat(swapAmount),
+        from_asset: from,
+        to_asset: to,
+        amount,
         amount_type: amountType,
+        idempotency_key: swapTokenRef.current,
       });
       setSwapModal(null);
       toast.success('Market order executed. Updating balance…');

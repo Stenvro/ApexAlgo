@@ -4,10 +4,12 @@ import 'reactflow/dist/style.css';
 import { BotConfigNode, WhitelistNode, BacktestNode, ApiKeyNode, IndicatorNode, ConditionNode, LogicNode, StopLossNode, TakeProfitNode, ActionNode, PriceDataNode } from './CustomNodes';
 import { apiClient } from '../../api/client';
 import { loadIndicators } from './indicatorConfig';
+import { DEFAULT_PAIR, parsePairs } from './pairs';
 import { humanizeApiError } from '../../api/errors';
 import { getToken } from '../../theme';
 import Button from '../ui/Button';
 import { toast } from '../ui/Toast';
+import { confirmDialog } from '../ui/ConfirmDialog';
 
 const nodeTypes = {
   botConfig: BotConfigNode,
@@ -85,7 +87,7 @@ function rebuildLayoutFromSettings(settings, updateNodeData, deleteNode) {
     const ctxX = 50 + SIZE.config.w + GAP + 20;
     let ctxY = 50;
 
-    const pairs = settings.symbols?.join(', ') || settings.symbol || 'BTC/USDC';
+    const pairs = settings.symbols?.join(', ') || settings.symbol || DEFAULT_PAIR;
     nodes.push({ id: 'rebuilt_whitelist', type: 'whitelist', position: { x: ctxX, y: ctxY },
         data: { onChange: updateNodeData, onDelete: deleteNode, pairs } });
     ctxY += SIZE.whitelist.h + GAP + 20;
@@ -226,6 +228,19 @@ function rebuildLayoutFromSettings(settings, updateNodeData, deleteNode) {
     return { nodes, edges };
 }
 
+// Stable fingerprint of what Save would persist: node identity, position and
+// user-editable data (runtime keys pushed in by effects are ignored), plus
+// edge topology. Used to decide whether closing would lose work.
+const TRANSIENT_DATA_KEYS = new Set(['onChange', 'onDelete', 'availableKeys', 'knownSymbols', 'liveContext', 'supportedTimeframes']);
+const graphSnapshot = (nodes, edges) => JSON.stringify({
+    nodes: nodes.map(n => ({
+        id: n.id, type: n.type,
+        x: Math.round(n.position?.x || 0), y: Math.round(n.position?.y || 0),
+        data: Object.fromEntries(Object.entries(n.data || {}).filter(([k]) => !TRANSIENT_DATA_KEYS.has(k))),
+    })),
+    edges: edges.map(e => [e.source, e.sourceHandle || null, e.target, e.targetHandle || null]),
+});
+
 const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   const reactFlowWrapper = useRef(null);
   const [nodes, setNodes, onNodesChange] = useNodesState([]);
@@ -236,6 +251,8 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   const [saving, setSaving] = useState(false);
   const [toolboxOpen, setToolboxOpen] = useState(false);
   const [supportedTimeframes, setSupportedTimeframes] = useState(null);
+  // { exchange, symbols, known } for the routing block's exchange — whitelist validation
+  const [knownSymbols, setKnownSymbols] = useState(null);
 
   const initRef = useRef(false);
 
@@ -295,7 +312,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
     } else {
         setNodes([
             { id: getId(), type: 'botConfig', position: { x: 50, y: 50 }, data: { onChange: updateNodeData, onDelete: deleteNode, botName: editingBot ? editingBot.name : 'Apex Strategy Alpha', timeframe: editingBot?.settings?.timeframe || '1m', executionMode: 'paper', maxPositions: 1, maxPositionsScope: 'per_pair', cooldownTrades: 0, cooldownCandles: 0 } },
-            { id: getId(), type: 'whitelist', position: { x: 470, y: 50 }, data: { onChange: updateNodeData, onDelete: deleteNode, pairs: editingBot?.settings?.symbols?.join(', ') || editingBot?.settings?.symbol || 'BTC/USDC' } },
+            { id: getId(), type: 'whitelist', position: { x: 470, y: 50 }, data: { onChange: updateNodeData, onDelete: deleteNode, pairs: editingBot?.settings?.symbols?.join(', ') || editingBot?.settings?.symbol || DEFAULT_PAIR } },
             { id: getId(), type: 'backtest', position: { x: 470, y: 320 }, data: { onChange: updateNodeData, onDelete: deleteNode, runOnStart: true, capital: 1000, lookback: 150 } },
             { id: getId(), type: 'apiKey', position: { x: 470, y: 610 }, data: { onChange: updateNodeData, onDelete: deleteNode, apiKeyName: null, dataExchange: 'okx' } }
         ]);
@@ -327,6 +344,11 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
       apiClient.get(`/api/data/timeframes/${exchange}`).then(res => {
           setSupportedTimeframes(res.data.timeframes);
       }).catch(() => setSupportedTimeframes(null));
+      let cancelled = false;
+      apiClient.get(`/api/data/symbols/${exchange}`).then(res => {
+          if (!cancelled) setKnownSymbols({ exchange, symbols: res.data.symbols || [], known: !!res.data.known });
+      }).catch(() => { if (!cancelled) setKnownSymbols({ exchange, symbols: [], known: false }); });
+      return () => { cancelled = true; };
   }, [activeApiKeyName, activeDataExchange, availableKeys]);
 
   // Pass supported timeframes to config node
@@ -337,6 +359,60 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
           return n;
       }));
   }, [supportedTimeframes, setNodes]);
+
+  // Pass the exchange's market list to the whitelist block
+  useEffect(() => {
+      if (!initRef.current || knownSymbols === null) return;
+      setNodes(nds => nds.map(n => {
+          if (n.type === 'whitelist') return { ...n, data: { ...n.data, knownSymbols } };
+          return n;
+      }));
+  }, [knownSymbols, setNodes]);
+
+  // Go-live context for the config block: which key (if any) orders would go
+  // through and the modelled entry fee. Derived from primitives so the effect
+  // only fires when one of them actually changes.
+  const activeKeyRecord = activeApiKeyName ? availableKeys?.find(k => k.name === activeApiKeyName) : null;
+  const liveKeyName = activeKeyRecord?.name || null;
+  const liveKeyExchange = activeKeyRecord?.exchange || null;
+  const liveKeySandbox = !!activeKeyRecord?.is_sandbox;
+  const entryActionNode = nodes.find(n => n.type === 'action' && n.data.actionType === 'buy');
+  const entryFee = entryActionNode ? (entryActionNode.data.fee === '' || entryActionNode.data.fee === undefined ? 0.1 : Number(entryActionNode.data.fee)) : null;
+  useEffect(() => {
+      if (!initRef.current) return;
+      const liveContext = { keyName: liveKeyName, exchange: liveKeyExchange, isSandbox: liveKeySandbox, entryFee };
+      setNodes(nds => nds.map(n => {
+          if (n.type !== 'botConfig') return n;
+          const cur = n.data.liveContext;
+          if (cur && cur.keyName === liveContext.keyName && cur.exchange === liveContext.exchange && cur.isSandbox === liveContext.isSandbox && cur.entryFee === liveContext.entryFee) return n;
+          return { ...n, data: { ...n.data, liveContext } };
+      }));
+  }, [liveKeyName, liveKeyExchange, liveKeySandbox, entryFee, setNodes]);
+
+  // Esc asks to close (same dirty-check as the buttons); a browser reload with
+  // unsaved work gets the native "leave page?" prompt.
+  const requestCloseRef = useRef(null);
+  requestCloseRef.current = requestClose;
+  useEffect(() => {
+      const onKey = (e) => {
+          if (e.key !== 'Escape' || e.defaultPrevented) return;
+          const t = e.target;
+          if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+          if (document.querySelector('[data-apex-modal]')) return;
+          requestCloseRef.current?.();
+      };
+      const onUnload = (e) => {
+          if (baselineRef.current !== null && graphSnapshot(nodesRef.current, edgesRef.current) !== baselineRef.current) {
+              e.preventDefault();
+              e.returnValue = '';
+          }
+      };
+      window.addEventListener('keydown', onKey);
+      window.addEventListener('beforeunload', onUnload);
+      return () => { window.removeEventListener('keydown', onKey); window.removeEventListener('beforeunload', onUnload); };
+  }, []);
+  const nodesRef = useRef(nodes); nodesRef.current = nodes;
+  const edgesRef = useRef(edges); edgesRef.current = edges;
 
   const onConnect = useCallback((params) => setEdges((eds) => addEdge({ ...params, animated: true, style: { stroke: 'var(--color-muted)', strokeWidth: 2 } }, eds)), [setEdges]);
   const onDragOver = useCallback((event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; }, []);
@@ -364,7 +440,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
       if (type === 'condition') { defaultData.operator = '>'; defaultData.rightValue = ''; }
       if (type === 'logic') defaultData.logicType = 'and';
       if (type === 'botConfig') { defaultData.botName = 'My Bot'; defaultData.timeframe = '1m'; defaultData.executionMode = 'paper'; defaultData.maxPositions = 1; defaultData.maxPositionsScope = 'per_pair'; defaultData.cooldownTrades = 0; defaultData.cooldownCandles = 0; }
-      if (type === 'whitelist') defaultData.pairs = 'BTC/USDT';
+      if (type === 'whitelist') defaultData.pairs = DEFAULT_PAIR;
       if (type === 'backtest') { defaultData.runOnStart = true; defaultData.capital = 1000; defaultData.lookback = 150; }
       if (type === 'stopLoss' || type === 'takeProfit') {
           defaultData.triggerType = 'percentage'; defaultData.triggerValue = '';
@@ -415,8 +491,52 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
       if (window.innerWidth < 768) setToolboxOpen(false);
   };
 
-  const showError = (msg) => {
-      toast.error(msg || 'Compile error.');
+  // Validation issues stay on the canvas until fixed or dismissed; the toast
+  // is just the first ping. Node ids quoted as "Node 'x'" get a danger ring.
+  const [issues, setIssues] = useState(null);
+  const showError = (msg, warnings = []) => {
+      const text = msg || 'Compile error.';
+      const errors = text.split('\n').map(t => t.trim()).filter(Boolean);
+      const nodeIds = new Set();
+      for (const line of [...errors, ...warnings]) {
+          const m = /Node '([^']+)'/.exec(line);
+          if (m) nodeIds.add(m[1]);
+      }
+      setIssues({ errors, warnings, nodeIds });
+      toast.error(text);
+  };
+  const flaggedNodes = issues?.nodeIds?.size
+      ? nodes.map(n => (issues.nodeIds.has(n.id) ? { ...n, className: `${n.className || ''} apex-node-invalid`.trim() } : n))
+      : nodes;
+  const focusNode = (id) => {
+      const n = nodes.find(x => x.id === id);
+      if (n && reactFlowInstance) reactFlowInstance.setCenter(n.position.x + 150, n.position.y + 80, { zoom: 1, duration: 300 });
+  };
+
+  // Dirty-check: the baseline is the graph as first laid out (or last saved).
+  const baselineRef = useRef(null);
+  useEffect(() => {
+      if (baselineRef.current === null && initRef.current && nodes.length > 0) {
+          baselineRef.current = graphSnapshot(nodes, edges);
+      }
+  }, [nodes, edges]);
+  const isDirty = () => baselineRef.current !== null && graphSnapshot(nodes, edges) !== baselineRef.current;
+
+  const requestClose = async () => {
+      if (saving) return;
+      if (!isDirty()) return closeBuilder();
+      const choice = await confirmDialog({
+          type: 'warning',
+          title: 'Unsaved changes',
+          message: editingBot
+              ? `"${editingBot.name}" has changes that are not saved. Save & close keeps them; Discard throws them away and the bot stays as it was.`
+              : 'This strategy has not been saved yet. Save & close keeps it; Discard throws the whole draft away.',
+          confirmText: 'Save & close',
+          secondaryText: 'Discard',
+          cancelText: 'Keep editing',
+      });
+      if (choice === true) await handleSaveAndCompile();
+      else if (choice === 'secondary') closeBuilder();
   };
 
   const handleSaveAndCompile = async () => {
@@ -433,8 +553,15 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         if (!configNode) return showError("Missing 'Main Configuration' block.");
         if (!whitelistNode) return showError("Missing 'Asset Whitelist' block.");
 
-        const symbolsList = whitelistNode.data.pairs.split(',').map(s => s.trim()).filter(s => s.length > 0);
+        const symbolsList = parsePairs(whitelistNode.data.pairs);
         if (symbolsList.length === 0) return showError("Whitelist must contain at least one pair.");
+        if (knownSymbols?.known && knownSymbols.exchange === dataExchange) {
+            const listed = new Set(knownSymbols.symbols);
+            const unknown = symbolsList.filter(sym => !listed.has(sym));
+            if (unknown.length) return showError(`Not listed on ${dataExchange.toUpperCase()}: ${unknown.join(', ')}. Fix the whitelist before saving.`);
+        }
+        const wantsExchange = configNode.data.executionMode === 'exchange';
+        if (wantsExchange && !apiKeyRecord) return showError("Exchange orders need an API key — select one in the Exchange Routing block or switch Execution back to forward test.");
 
         // Strip non-serialisable function refs and runtime keys before persisting
         const uiNodesSafe = nodes.map(n => {
@@ -442,6 +569,8 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
             delete safeNode.data.onChange;
             delete safeNode.data.onDelete;
             delete safeNode.data.availableKeys;
+            delete safeNode.data.knownSymbols;
+            delete safeNode.data.liveContext;
             return safeNode;
         });
 
@@ -463,7 +592,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
                 drawdown_cooldown_days: configNode.data.drawdownCooldownDays === "" || configNode.data.drawdownCooldownDays === undefined ? 7 : configNode.data.drawdownCooldownDays,
                 live_allocation_pct: configNode.data.liveAllocationPct === "" || configNode.data.liveAllocationPct === undefined ? 100 : configNode.data.liveAllocationPct,
                 max_order_value: configNode.data.maxOrderValue || 0,
-                api_execution: configNode.data.executionMode === 'exchange',
+                api_execution: wantsExchange,
                 backtest_on_start: backtestNode ? backtestNode.data.runOnStart : false,
                 backtest_capital: backtestNode ? (backtestNode.data.capital || 1000) : 1000,
                 backtest_lookback: backtestNode ? (backtestNode.data.lookback || 150) : 150,
@@ -604,17 +733,19 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
 
         const hasLogic = !!payload.settings.entry_node;
 
-        if (editingBot) {
-            await apiClient.put(`/api/bots/${editingBot.id}`, { name: payload.name, settings: payload.settings });
-        } else {
-            await apiClient.post('/api/bots/', payload);
-        }
+        const res = editingBot
+            ? await apiClient.put(`/api/bots/${editingBot.id}`, { name: payload.name, settings: payload.settings })
+            : await apiClient.post('/api/bots/', payload);
+        const savedWarnings = Array.isArray(res?.data?.validation_warnings) ? res.data.validation_warnings : [];
+        setIssues(null);
+        if (savedWarnings.length) toast.warn(savedWarnings.join('\n'));
 
         if (hasLogic) {
             toast.success(editingBot ? 'Algorithm configuration updated.' : 'Algorithm successfully compiled & deployed.');
         } else {
             toast.warn('Draft saved without logic — the engine will ignore it until you connect an Entry signal.');
         }
+        baselineRef.current = graphSnapshot(nodes, edges);
         closeBuilder();
 
     } catch (err) {
@@ -658,7 +789,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   ];
 
   return (
-    <div className="flex w-full h-[100dvh] bg-bg absolute inset-0 z-[100] fade-in flex-col md:flex-row">
+    <div className="flex w-full h-[100dvh] bg-bg absolute inset-0 z-[100] fade-in flex-col md:flex-row" role="dialog" aria-modal="true" aria-label={editingBot ? `Edit strategy ${editingBot.name}` : 'New strategy'}>
 
       {/* Mobile header */}
       <div className="md:hidden flex h-14 bg-raised/80 backdrop-blur-xl border-b border-border items-center justify-between px-4 shrink-0 z-50">
@@ -667,7 +798,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
               Toolbox
           </Button>
           <div className="flex gap-2 items-center">
-              <Button variant="ghost" size="sm" onClick={closeBuilder} disabled={saving}>Close</Button>
+              <Button variant="ghost" size="sm" onClick={requestClose} disabled={saving}>Close</Button>
               <Button variant="primary" size="sm" onClick={handleSaveAndCompile} loading={saving}>Save</Button>
           </div>
       </div>
@@ -704,7 +835,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         </div>
 
         <div className="hidden md:flex p-5 border-t border-border gap-3 bg-bg/50 shrink-0">
-             <Button variant="secondary" fullWidth onClick={closeBuilder} disabled={saving}>Close</Button>
+             <Button variant="secondary" fullWidth onClick={requestClose} disabled={saving}>Close</Button>
              <Button variant="primary" fullWidth onClick={handleSaveAndCompile} loading={saving}>{editingBot ? 'Update' : 'Save Bot'}</Button>
         </div>
       </div>
@@ -724,7 +855,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
                 />
             </div>
         )}
-        {nodes.length > 0 && !hasStrategyNodes && (
+        {nodes.length > 0 && !hasStrategyNodes && !issues && (
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 pointer-events-none px-4 w-full max-w-md">
             <div className="bg-raised/90 backdrop-blur-xl border border-border rounded-lg px-4 py-3 shadow-card text-center fade-in">
               <p className="text-[11px] text-text-secondary leading-relaxed">
@@ -734,8 +865,36 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
             </div>
           </div>
         )}
+        {issues && issues.errors.length > 0 && (
+          <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 px-4 w-full max-w-lg" role="alert">
+            <div className="bg-raised/95 backdrop-blur-xl border border-danger/50 rounded-lg shadow-card fade-in overflow-hidden">
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-danger/30 bg-danger/[0.06]">
+                <svg className="w-3.5 h-3.5 text-danger shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M12 3l9 16H3l9-16z" />
+                </svg>
+                <span className="text-[10px] font-bold uppercase tracking-wider text-danger flex-1">Not saved — {issues.errors.length} issue{issues.errors.length === 1 ? '' : 's'} to fix</span>
+                <button type="button" onClick={() => setIssues(null)} aria-label="Dismiss validation issues" className="text-faint hover:text-text p-1 -mr-1 transition-colors">
+                  <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>
+              </div>
+              <ul className="max-h-40 overflow-y-auto custom-scrollbar divide-y divide-border/50">
+                {issues.errors.map((line, i) => {
+                  const m = /Node '([^']+)'/.exec(line);
+                  return (
+                    <li key={i} className="px-4 py-2 text-[11px] text-text leading-snug flex items-start gap-2">
+                      <span className="flex-1">{line}</span>
+                      {m && nodes.some(n => n.id === m[1]) && (
+                        <button type="button" onClick={() => focusNode(m[1])} className="text-[10px] text-info hover:underline shrink-0">show</button>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          </div>
+        )}
         <ReactFlow
-          nodes={nodes}
+          nodes={flaggedNodes}
           edges={edges}
           nodeTypes={nodeTypes}
           onNodesChange={onNodesChange}

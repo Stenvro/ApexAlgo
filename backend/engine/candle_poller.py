@@ -9,7 +9,7 @@ from itertools import pairwise
 from sqlalchemy.orm import Session
 
 from backend.core.database import SessionLocal
-from backend.core.exchange_registry import build_exchange, get_exchange_timeframes
+from backend.core.exchange_registry import build_exchange
 from backend.core.events import event_bus
 from backend.models.bots import BotConfig
 from backend.models.candles import Candle
@@ -266,8 +266,8 @@ class CandlePoller:
         # Validate timeframe before attempting fetch
         try:
             exchange.load_markets()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("load_markets failed for %s (timeframe check skipped): %s", exchange_name, e)
         if exchange.timeframes and timeframe not in exchange.timeframes:
             supported = ', '.join(sorted(exchange.timeframes.keys()))
             logger.warning(
@@ -523,8 +523,8 @@ class CandlePoller:
 
         try:
             await asyncio.to_thread(_load_markets)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("load_markets failed for %s (timeframe check skipped): %s", exchange_name, e)
         if exchange.timeframes and timeframe not in exchange.timeframes:
             logger.warning("Poll skipped: %s does not support timeframe '%s'.", exchange_name, timeframe)
             return

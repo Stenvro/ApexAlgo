@@ -13,8 +13,9 @@
  *     detail: { type: 'success'|'error'|'info'|'warn', message: '...' }
  *   }));
  *
- * Toasts stack bottom-right, auto-dismiss after 4.5s (errors 7s),
- * pause on hover, dismiss on click of the X.
+ * Toasts stack bottom-right and auto-dismiss after 4.5s (pause on hover,
+ * dismiss on click of the X). Errors stay until dismissed — a validation
+ * message you have to act on should not vanish while you read it.
  */
 import { useEffect, useRef, useState } from 'react';
 
@@ -49,7 +50,8 @@ let nextId = 1;
 const ToastItem = ({ item, onDismiss }) => {
   const [exiting, setExiting] = useState(false);
   const timerRef = useRef(null);
-  const remainingRef = useRef(item.type === 'error' ? 7000 : 4500);
+  const sticky = item.type === 'error';
+  const remainingRef = useRef(4500);
   const startedRef = useRef(0);
 
   const close = () => {
@@ -58,6 +60,7 @@ const ToastItem = ({ item, onDismiss }) => {
   };
 
   const startTimer = () => {
+    if (sticky) return;
     startedRef.current = Date.now();
     timerRef.current = setTimeout(close, remainingRef.current);
   };
@@ -76,7 +79,7 @@ const ToastItem = ({ item, onDismiss }) => {
 
   return (
     <div
-      role="status"
+      role={sticky ? 'alert' : 'status'}
       onMouseEnter={pauseTimer}
       onMouseLeave={startTimer}
       className={`${exiting ? 'toast-exit' : 'toast-enter'} pointer-events-auto flex items-start gap-3 w-80 max-w-[calc(100vw-2rem)] bg-overlay/95 backdrop-blur-xl border ${s.border} ${s.glow} rounded-lg px-4 py-3 shadow-pop`}
@@ -84,7 +87,7 @@ const ToastItem = ({ item, onDismiss }) => {
       <svg className={`w-4 h-4 mt-0.5 shrink-0 ${s.text}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
         {ICONS[item.type] || ICONS.info}
       </svg>
-      <p className="flex-1 text-xs text-text leading-relaxed break-words">{item.message}</p>
+      <p className="flex-1 text-xs text-text leading-relaxed break-words whitespace-pre-line">{item.message}</p>
       <button
         onClick={close}
         aria-label="Dismiss"

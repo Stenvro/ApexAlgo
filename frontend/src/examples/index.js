@@ -1,12 +1,13 @@
 /**
- * Bundled example strategies — mirrors of the files in the repo's `examples/`
- * directory. Each entry is a ready-to-POST payload for `/api/bots/import`.
+ * Bundled example strategies — imported straight from the repo's `examples/`
+ * directory (single source of truth; the Docker image copies it to
+ * /app/examples). Each entry is a ready-to-POST payload for `/api/bots/import`.
  * All three were backtested in the engine on Binance BTC/ETH(/SOL) USDC,
  * Dec 2023 – Sep 2026; see STRATEGY_CONTEXT.md §4.9 for the numbers.
  */
-import supertrendTrend from './Supertrend_Trend_1d.apex.json';
-import donchianBreakout from './Donchian_Breakout_1d.apex.json';
-import emaCross from './EMA_Cross_4h.apex.json';
+import supertrendTrend from '../../../examples/Supertrend_Trend_1d.apex.json';
+import donchianBreakout from '../../../examples/Donchian_Breakout_1d.apex.json';
+import emaCross from '../../../examples/EMA_Cross_4h.apex.json';
 
 export const EXAMPLE_BOTS = [
   {

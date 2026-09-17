@@ -25,6 +25,7 @@ export function humanizeApiError(err, fallback = 'Something went wrong — pleas
 
   const detail = data?.detail;
   if (typeof detail === 'string' && detail.trim()) return detail;
+  if (typeof detail?.message === 'string' && detail.message.trim()) return detail.message;
   if (detail && Array.isArray(detail.validation_errors) && detail.validation_errors.length > 0) {
     return detail.validation_errors.join('\n');
   }

@@ -1,8 +1,11 @@
 import logging
+import os
+import threading
 import time
-from fastapi import APIRouter, Body, Depends, HTTPException
+from typing import Literal, Optional
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import ccxt
 
@@ -10,8 +13,8 @@ from backend.core.database import get_db
 from backend.models.exchange_keys import ExchangeKey
 from backend.models.bots import BotConfig
 from backend.core.security import verify_api_key
-from backend.core.encryption import encrypt_data, decrypt_data
-from backend.core.exchange_registry import build_exchange, build_exchange_from_key, SUPPORTED_EXCHANGES
+from backend.core.encryption import encrypt_data
+from backend.core.exchange_registry import build_exchange, get_authenticated_exchange, invalidate_authenticated_exchange, SUPPORTED_EXCHANGES
 
 logger = logging.getLogger("apexalgo.keys")
 
@@ -108,6 +111,7 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
             db.add(new_key)
 
         db.commit()
+        invalidate_authenticated_exchange(req.name)  # replaced credentials must not linger in the registry
         return {"message": f"Exchange key '{req.name}' verified and saved securely."}
     except Exception as e:
         logger.error("Database error saving key '%s': %s", req.name, e)
@@ -139,7 +143,9 @@ def get_exchange_keys_status(db: Session = Depends(get_db)):
         latency_ms = None
         started = time.monotonic()
         try:
-            test_exchange = build_exchange_from_key(k)
+            # Status polls every few seconds: reuse the registry instance
+            # instead of decrypting + instantiating every exchange per call
+            test_exchange = get_authenticated_exchange(k, load_markets=False)
             test_exchange.fetch_balance()
             is_active = True
             latency_ms = int((time.monotonic() - started) * 1000)
@@ -172,7 +178,7 @@ def get_key_balance(key_name: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"Key '{key_name}' not found.")
 
     try:
-        exchange = build_exchange_from_key(key_record)
+        exchange = get_authenticated_exchange(key_record, load_markets=False)
         balance_data = exchange.fetch_balance()
 
         active_balances = {}
@@ -236,42 +242,107 @@ def delete_exchange_keys(key_name: str, db: Session = Depends(get_db)):
     if not key_record:
         raise HTTPException(status_code=404, detail=f"Key '{key_name}' not found.")
 
+    # A bot that references this key would silently lose the ability to send
+    # exits for its real positions (the engine downgrades a keyless live bot to
+    # forward test). Refuse while any bot still points at it.
+    linked = [
+        {"name": b_name, "is_active": bool(b_active), "live": bool((b_settings or {}).get("api_execution"))}
+        for b_name, b_active, b_settings in db.query(BotConfig.name, BotConfig.is_active, BotConfig.settings).all()
+        if (b_settings or {}).get("api_key_name") == key_name
+    ]
+    if linked:
+        names = ", ".join(f"'{b['name']}'" + (" (running)" if b["is_active"] else "") for b in linked)
+        raise HTTPException(status_code=409, detail={
+            "message": f"Key '{key_name}' is used by {len(linked)} bot(s): {names}. Switch those bots to another key or delete them first.",
+            "bots": linked,
+        })
+
     db.delete(key_record)
     db.commit()
+    invalidate_authenticated_exchange(key_name)
     return {"message": f"Key '{key_name}' deleted successfully."}
 
+SWAP_MAX_NOTIONAL = float(os.environ.get("SWAP_MAX_NOTIONAL", "5000"))  # in the market's quote currency
+_SWAP_TOKEN_TTL = 600.0
+_swap_results: dict = {}  # idempotency_key -> (monotonic ts, response payload)
+_swap_lock = threading.Lock()
+
+
+class SwapRequest(BaseModel):
+    from_asset: str = Field(pattern=r"^[A-Z0-9]{2,10}$")
+    to_asset: str = Field(pattern=r"^[A-Z0-9]{2,10}$")
+    amount: float = Field(gt=0)
+    amount_type: Literal["from", "to"] = "from"
+    # Client-generated per attempt; a retry with the same token returns the
+    # first result instead of placing a second market order
+    idempotency_key: Optional[str] = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+def _remember_swap(token: Optional[str], payload):
+    if not token:
+        return payload
+    with _swap_lock:
+        now = time.monotonic()
+        for k in [k for k, (ts, _) in _swap_results.items() if now - ts > _SWAP_TOKEN_TTL]:
+            _swap_results.pop(k, None)
+        _swap_results[token] = (now, payload)
+    return payload
+
+
 @router.post("/{name}/swap")
-def execute_quick_swap(name: str, payload: dict = Body(...), db: Session = Depends(get_db)):
+def execute_quick_swap(name: str, payload: SwapRequest, db: Session = Depends(get_db)):
     # Sync endpoint: FastAPI runs it in the threadpool, so the blocking
     # ccxt calls and sleep below don't stall the event loop.
+    if payload.idempotency_key:
+        with _swap_lock:
+            hit = _swap_results.get(payload.idempotency_key)
+        if hit:
+            return hit[1]
     try:
         key_record = db.query(ExchangeKey).filter(ExchangeKey.name == name).first()
         if not key_record:
             return JSONResponse(status_code=404, content={"detail": f"API Wallet '{name}' not found"})
 
-        exchange = build_exchange_from_key(key_record)
+        exchange = get_authenticated_exchange(key_record)
 
-        from_asset = payload.get('from_asset', '').upper()
-        to_asset = payload.get('to_asset', '').upper()
-        amount = float(payload.get('amount', 0))
+        from_asset = payload.from_asset
+        to_asset = payload.to_asset
+        amount = payload.amount
+        if from_asset == to_asset:
+            return JSONResponse(status_code=400, content={"detail": "From and to asset must differ."})
 
         exchange.load_markets()
         symbol_buy = f"{to_asset}/{from_asset}"
         symbol_sell = f"{from_asset}/{to_asset}"
 
         if symbol_buy in exchange.markets:
+            symbol, side = symbol_buy, "buy"
             ticker = exchange.fetch_ticker(symbol_buy)
-            raw_amount = (amount / ticker['last']) if payload.get('amount_type') == 'from' else amount
-            trade_amount = float(exchange.amount_to_precision(symbol_buy, raw_amount))
-            order = exchange.create_market_buy_order(symbol_buy, trade_amount)
-
+            raw_amount = (amount / ticker['last']) if payload.amount_type == 'from' else amount
         elif symbol_sell in exchange.markets:
+            symbol, side = symbol_sell, "sell"
             ticker = exchange.fetch_ticker(symbol_sell)
-            raw_amount = amount if payload.get('amount_type') == 'from' else (amount / ticker['last'])
-            trade_amount = float(exchange.amount_to_precision(symbol_sell, raw_amount))
-            order = exchange.create_market_sell_order(symbol_sell, trade_amount)
+            raw_amount = amount if payload.amount_type == 'from' else (amount / ticker['last'])
         else:
             return JSONResponse(status_code=400, content={"detail": f"Trading pair {from_asset}/{to_asset} not supported on this environment."})
+
+        last = float(ticker.get('last') or 0)
+        if last <= 0:
+            return JSONResponse(status_code=400, content={"detail": f"No last price available for {symbol}; refusing to place a market order blind."})
+        trade_amount = float(exchange.amount_to_precision(symbol, raw_amount))
+        if trade_amount <= 0:
+            return JSONResponse(status_code=400, content={"detail": "Amount rounds to zero at exchange precision."})
+        notional = trade_amount * last
+        quote = symbol.split('/')[1]
+        if notional > SWAP_MAX_NOTIONAL:
+            return JSONResponse(status_code=400, content={
+                "detail": f"Swap of ~{notional:,.2f} {quote} exceeds the safety cap of {SWAP_MAX_NOTIONAL:,.0f} {quote} per swap "
+                          f"(SWAP_MAX_NOTIONAL). Split it into smaller swaps."})
+
+        if side == "buy":
+            order = exchange.create_market_buy_order(symbol, trade_amount)
+        else:
+            order = exchange.create_market_sell_order(symbol, trade_amount)
 
         # Wait briefly then re-fetch to detect orders stuck due to zero liquidity on testnet
         time.sleep(1.0)
@@ -283,7 +354,7 @@ def execute_quick_swap(name: str, payload: dict = Body(...), db: Session = Depen
             exchange.cancel_order(order['id'], order['symbol'])
             return JSONResponse(status_code=400, content={"detail": f"Order stuck. No volume for {order['symbol']} on the Sandbox. Order auto-canceled to prevent stuck balance."})
 
-        return {"status": "success", "order": fetched_order}
+        return _remember_swap(payload.idempotency_key, {"status": "success", "order": fetched_order})
 
     except ccxt.ExchangeError as e:
         error_msg = str(e)
@@ -292,7 +363,7 @@ def execute_quick_swap(name: str, payload: dict = Body(...), db: Session = Depen
         return JSONResponse(status_code=400, content={"detail": "Exchange rejected the order. Please check your assets and try again."})
     except ccxt.InsufficientFunds:
         return JSONResponse(status_code=400, content={"detail": "Insufficient funds in your account to cover this swap amount."})
-    except ccxt.InvalidOrder as e:
+    except ccxt.InvalidOrder:
         return JSONResponse(status_code=400, content={"detail": "Order size too small or invalid for this exchange."})
     except Exception as e:
         logger.error("Swap error for wallet '%s': %s", name, e, exc_info=True)

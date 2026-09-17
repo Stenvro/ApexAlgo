@@ -20,6 +20,7 @@ class NodeEvaluator:
         self.entry_trigger = settings.get("entry_node")
         self._resolve_cache = {}
         self._nan_masks = {}
+        self._resolving = set()
 
     def _calculate_indicators(self):
         """Calculates all indicators on the DataFrame using pandas_ta."""
@@ -127,6 +128,17 @@ class NodeEvaluator:
         if node_id in self._resolve_cache:
             return self._resolve_cache[node_id]
 
+        # A cyclic graph (only reachable via an unvalidated import) must not recurse forever
+        if node_id in self._resolving:
+            logger.warning("resolve_node: cycle detected at node '%s'; treating as False", node_id)
+            return pd.Series(False, index=self.df.index)
+        self._resolving.add(node_id)
+        try:
+            return self._resolve_node_inner(node_id)
+        finally:
+            self._resolving.discard(node_id)
+
+    def _resolve_node_inner(self, node_id: str) -> pd.Series:
         nodes = self.settings.get("nodes", {})
         node = nodes.get(node_id)
         if not node:
@@ -157,11 +169,11 @@ class NodeEvaluator:
             elif op == "decreasing":
                 result = left_s < left_s.shift(1)
             elif op == "increasing_for":
-                n = int(self.resolve_operand(node.get("right")).iloc[-1]) if node.get("right") is not None else 2
+                n = self._streak_length(node.get("right"))
                 inc = (left_s > left_s.shift(1)).astype(int)
                 result = (inc.rolling(window=n, min_periods=n).sum() == n)
             elif op == "decreasing_for":
-                n = int(self.resolve_operand(node.get("right")).iloc[-1]) if node.get("right") is not None else 2
+                n = self._streak_length(node.get("right"))
                 dec = (left_s < left_s.shift(1)).astype(int)
                 result = (dec.rolling(window=n, min_periods=n).sum() == n)
             else:
@@ -220,6 +232,19 @@ class NodeEvaluator:
             self._nan_masks[node_id] = nan_mask
         self._resolve_cache[node_id] = result
         return result
+
+    @staticmethod
+    def _streak_length(operand) -> int:
+        """Window for increasing_for/decreasing_for: a numeric literal, clamped
+        to >= 1. A series (node ref) is not a length — fall back to 2 rather than
+        peeking at its last value (which would be a look-ahead)."""
+        if operand is None or isinstance(operand, bool):
+            return 2
+        try:
+            n = int(float(operand))
+        except (ValueError, TypeError):
+            return 2
+        return max(1, n)
 
     def resolve_operand(self, operand) -> pd.Series:
         if isinstance(operand, (int, float)):

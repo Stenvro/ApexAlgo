@@ -342,3 +342,11 @@ textarea:focus-visible {
     opacity: 1;
   }
 }
+
+/* Builder: node named in a validation error */
+.react-flow__node.apex-node-invalid > * {
+  outline: 2px solid var(--color-danger);
+  outline-offset: 3px;
+  border-radius: 10px;
+  box-shadow: 0 0 0 6px color-mix(in srgb, var(--color-danger) 15%, transparent);
+}

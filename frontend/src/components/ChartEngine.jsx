@@ -64,6 +64,8 @@ function ChartEngine({ dataset, openDataVault }) {
   const lastCandleRef = useRef(null);  
   const isCrosshairActive = useRef(false);
   const lastSignalIdRef = useRef(0);
+  // Incremental order/position polling (see /api/trades/positions `since_id`)
+  const tradeCursorRef = useRef({ ordId: 0, posId: 0, since: null });
   const lastDbTimeRef = useRef(null);   // newest CLOSED candle time from the DB
   const formingCandleRef = useRef(null); // synthetic in-progress bar (ticker-fed)
    
@@ -192,37 +194,55 @@ function ChartEngine({ dataset, openDataVault }) {
     } catch (e) { console.error("Error setting up configs", e); } 
   }; 
 
-  const pollData = async () => {
+  const pollData = async (signal) => {
     try {
       const safeSymbol = dataset.symbol.replace('/', '-');
       const sigParams = { symbol: dataset.symbol, timeframe: dataset.timeframe, limit: 200000 };
       if (lastSignalIdRef.current > 0) sigParams.since_id = lastSignalIdRef.current;
+      const cur = tradeCursorRef.current;
+      const incremental = cur.since !== null;
+      const ordParams = { symbol: safeSymbol, limit: 50000, ...(incremental ? { since_id: cur.ordId } : {}) };
+      const posParams = { symbol: safeSymbol, limit: 50000, ...(incremental ? { since_id: cur.posId, since: cur.since } : {}) };
+      // 5 min margin against client/server clock skew — re-sent rows merge by id
+      const polledAt = new Date(Date.now() - 5 * 60 * 1000).toISOString();
 
       const [sigRes, ordRes, posRes] = await Promise.all([
-          apiClient.get(`/api/bots/signals`, { params: sigParams }),
-          apiClient.get(`/api/trades/orders`, { params: { symbol: safeSymbol, limit: 50000 } }),
-          apiClient.get(`/api/trades/positions`, { params: { symbol: safeSymbol, limit: 50000 } })
+          apiClient.get(`/api/bots/signals`, { params: sigParams, signal }),
+          apiClient.get(`/api/trades/orders`, { params: ordParams, signal }),
+          apiClient.get(`/api/trades/positions`, { params: posParams, signal })
       ]);
+      if (signal?.aborted) return;
 
       const newSigs = sigRes.data || [];
       if (newSigs.length > 0) {
           const maxId = Math.max(...newSigs.map(s => s.id));
           if (lastSignalIdRef.current > 0) {
-              // Incremental: merge new signals into existing
-              setSignals(prev => [...prev, ...newSigs]);
+              // Incremental: merge new signals into existing, never the same id twice
+              setSignals(prev => {
+                  const seen = new Set(prev.map(s => s.id));
+                  return [...prev, ...newSigs.filter(s => !seen.has(s.id))];
+              });
           } else {
               // Initial full load
               setSignals(newSigs);
           }
           lastSignalIdRef.current = maxId;
       }
-      setOrders(prev => {
-          const next = ordRes.data || [];
-          if (prev.length === next.length && prev.length > 0 && prev[prev.length-1].id === next[next.length-1].id) return prev;
-          return next;
-      });
-      setPositions(posRes.data || []);
-    } catch (e) { console.error("Data Fetch Error:", e); }
+      const mergeById = (prev, incoming) => {
+          if (incoming.length === 0) return prev;
+          const byId = new Map(prev.map(r => [r.id, r]));
+          incoming.forEach(r => byId.set(r.id, r));
+          return [...byId.values()];
+      };
+      const ordNew = ordRes.data || [];
+      const posNew = posRes.data || [];
+      let maxOrd = cur.ordId, maxPos = cur.posId;
+      ordNew.forEach(o => { if (o.id > maxOrd) maxOrd = o.id; });
+      posNew.forEach(p => { if (p.id > maxPos) maxPos = p.id; });
+      setOrders(prev => incremental ? mergeById(prev, ordNew) : ordNew);
+      setPositions(prev => incremental ? mergeById(prev, posNew) : posNew);
+      tradeCursorRef.current = { ordId: maxOrd, posId: maxPos, since: polledAt };
+    } catch (e) { if (!signal?.aborted) console.error("Data Fetch Error:", e); }
   }; 
 
   const applyInitialDataToChart = (rawData) => { 
@@ -303,7 +323,8 @@ function ChartEngine({ dataset, openDataVault }) {
 
     fetchMarketInfo();
     initBotConfigs();
-    pollData();
+    tradeCursorRef.current = { ordId: 0, posId: 0, since: null };
+    pollData(signal);
 
     // 10s matches the server-side market-info TTL cache and drives the
     // ticker-fed forming candle
@@ -376,7 +397,7 @@ function ChartEngine({ dataset, openDataVault }) {
 
     initChart();
     const pollInterval = setInterval(updateLatestCandles, 5000);
-    const signalInterval = setInterval(pollData, 15000);
+    const signalInterval = setInterval(() => pollData(signal), 15000);
 
     return () => {
       abortController.abort();

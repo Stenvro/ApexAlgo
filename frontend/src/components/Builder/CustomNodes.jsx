@@ -1,6 +1,7 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
 import { useIndicators } from './indicatorConfig';
+import { DEFAULT_PAIR, parsePairs } from './pairs';
 
 // All known timeframes with display labels
 const ALL_TIMEFRAMES = [
@@ -27,7 +28,7 @@ export const BotConfigNode = ({ id, data }) => (
   <div className="bg-raised/90 backdrop-blur-xl border border-purple rounded-xl shadow-lg w-[340px]">
     <div className="bg-purple/10 px-3 py-2 border-b border-purple/30 flex justify-between items-center">
       <span className="font-bold text-purple text-[11px] uppercase tracking-wider">MAIN CONFIGURATION</span>
-      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove main configuration block" title="Remove block">✕</button>}
     </div>
     <div className="p-4 bg-bg/80 rounded-b space-y-4">
       <div>
@@ -59,8 +60,8 @@ export const BotConfigNode = ({ id, data }) => (
       <div className="pt-2 border-t border-border">
         <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Position Limit Scope</label>
         <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-purple outline-none" value={data.maxPositionsScope !== undefined ? data.maxPositionsScope : "per_pair"} onChange={(e) => data.onChange(id, 'maxPositionsScope', e.target.value)}>
-          <option value="per_pair">Per Pair (e.g. 1x BTC, 1x ETH)</option>
-          <option value="global">Global (Total across wallet)</option>
+          <option value="per_pair">Per Pair (up to N layers on each symbol)</option>
+          <option value="global">Global (up to N open positions in total)</option>
         </select>
       </div>
 
@@ -107,40 +108,114 @@ export const BotConfigNode = ({ id, data }) => (
         <input type="number" step="1" min="1" max="100" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.liveAllocationPct !== undefined ? data.liveAllocationPct : 100} onChange={(e) => data.onChange(id, 'liveAllocationPct', e.target.value === "" ? "" : parseFloat(e.target.value))} />
         <span className="text-[9px] text-muted block mt-1">Share of the exchange wallet (quote balance + open positions) this bot may deploy. Split it between bots that share one API key. Entry size % applies to what is still undeployed.</span>
       </div>
-      <div className="pt-2 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Live Execution Mode</label>
-        <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-purple outline-none" value={data.executionMode !== undefined ? data.executionMode : "paper"} onChange={(e) => data.onChange(id, 'executionMode', e.target.value)}>
-          <option value="paper">Paper Trading (Simulated Execution)</option>
-          <option value="exchange">Live Exchange (Requires API Key)</option>
-        </select>
-      </div>
+      <ExecutionModeSection id={id} data={data} />
     </div>
   </div>
 );
 
-export const WhitelistNode = ({ id, data }) => (
-  <div className="bg-raised/90 backdrop-blur-xl border border-warn rounded-xl shadow-lg min-w-[260px]">
-    <div className="bg-warn/10 px-3 py-2 border-b border-warn/30 flex justify-between items-center">
-      <span className="font-bold text-warn text-[11px] uppercase tracking-wider">ASSET WHITELIST</span>
-      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+// Execution mode + go-live checklist. `data.liveContext` is pushed in by the
+// builder: { keyName, exchange, isSandbox, entryFee } — null key = no
+// exchange orders possible, so the "exchange" option is disabled rather than
+// silently saving a bot that would fall back to forward test at start.
+const ExecutionModeSection = ({ id, data }) => {
+  const ctx = data.liveContext || {};
+  const hasKey = !!ctx.keyName;
+  const mode = data.executionMode !== undefined ? data.executionMode : 'paper';
+  const wantsExchange = mode === 'exchange';
+  const isLiveMoney = wantsExchange && hasKey && !ctx.isSandbox;
+  const cap = Number(data.maxOrderValue) || 0;
+  const fee = Number(ctx.entryFee);
+  const checks = [
+    { ok: hasKey, label: hasKey ? `Key "${ctx.keyName}" on ${String(ctx.exchange || '').toUpperCase()} (${ctx.isSandbox ? 'sandbox → paper' : 'real → live'})` : 'Select an API key in the Exchange Routing block' },
+    { ok: cap > 0, label: cap > 0 ? `Max order value $${cap} caps every order` : 'Set Max Order Value USD above (required for live orders)' },
+    { ok: fee > 0, label: fee > 0 ? `Entry fee ${fee}% modelled` : 'Entry fee is 0% — the backtest ignores what the exchange will charge' },
+  ];
+  return (
+    <div className={`pt-2 border-t ${isLiveMoney ? 'border-accent/40' : 'border-border'}`}>
+      <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Execution</label>
+      <select
+        className={`w-full bg-inset border text-xs rounded-md p-2 nodrag outline-none ${isLiveMoney ? 'border-accent text-accent focus:border-accent' : 'border-border text-text focus:border-purple'}`}
+        value={mode}
+        onChange={(e) => data.onChange(id, 'executionMode', e.target.value)}
+      >
+        <option value="paper">Forward test — simulated fills, no orders sent</option>
+        <option value="exchange" disabled={!hasKey}>
+          {hasKey ? (ctx.isSandbox ? 'Exchange orders — paper (sandbox key)' : 'Exchange orders — LIVE, real money') : 'Exchange orders — select an API key first'}
+        </option>
+      </select>
+      {wantsExchange && hasKey ? (
+        <ul className="mt-2 space-y-1">
+          {checks.map((c, i) => (
+            <li key={i} className={`flex items-start gap-1.5 text-[9px] ${c.ok ? 'text-muted' : 'text-danger'}`}>
+              <span aria-hidden="true" className="shrink-0">{c.ok ? '✓' : '✕'}</span>
+              <span>{c.label}</span>
+            </li>
+          ))}
+          {isLiveMoney && <li className="text-[9px] text-accent font-bold pt-0.5">Every entry this bot takes is a real market order on {String(ctx.exchange || '').toUpperCase()}.</li>}
+        </ul>
+      ) : wantsExchange ? (
+        <span className="text-[9px] text-danger block mt-1">Exchange orders are selected but no API key is set — the bot would start in forward test. Select a key in the Exchange Routing block or switch to forward test.</span>
+      ) : (
+        <span className="text-[9px] text-muted block mt-1">{hasKey ? 'Fills are simulated on live candles with the configured fee and slippage; nothing reaches the exchange.' : 'Without an API key the bot can only forward test.'}</span>
+      )}
     </div>
-    <div className="p-4 bg-bg/80 rounded-b">
-      <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Tradeable Pairs (Comma Separated)</label>
-      <textarea 
-        className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-warn outline-none min-h-[60px] resize-none font-num"
-        placeholder="BTC/USDT, ETH/USDT, SOL/USDT"
-        value={data.pairs !== undefined ? data.pairs : "BTC/USDT"}
-        onChange={(e) => data.onChange(id, 'pairs', e.target.value)}
-      />
+  );
+};
+
+export const WhitelistNode = ({ id, data }) => {
+  const pairs = parsePairs(data.pairs !== undefined ? data.pairs : DEFAULT_PAIR);
+  // { exchange, symbols: string[], known: bool } pushed in by the builder;
+  // `known` false = exchange unreachable, so nothing can be flagged
+  const market = data.knownSymbols;
+  const listed = market?.known ? new Set(market.symbols) : null;
+  const unknown = listed ? pairs.filter(p => !listed.has(p)) : [];
+  const exch = String(market?.exchange || '').toUpperCase();
+  return (
+    <div className={`bg-raised/90 backdrop-blur-xl border rounded-xl shadow-lg min-w-[260px] max-w-[340px] ${unknown.length ? 'border-danger' : 'border-warn'}`}>
+      <div className="bg-warn/10 px-3 py-2 border-b border-warn/30 flex justify-between items-center">
+        <span className="font-bold text-warn text-[11px] uppercase tracking-wider">ASSET WHITELIST</span>
+        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove whitelist block">✕</button>}
+      </div>
+      <div className="p-4 bg-bg/80 rounded-b space-y-2">
+        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Tradeable Pairs (Comma Separated)</label>
+        <textarea
+          className={`w-full bg-inset border text-text text-xs rounded-md p-2 nodrag outline-none min-h-[60px] resize-none font-num ${unknown.length ? 'border-danger focus:border-danger' : 'border-border focus:border-warn'}`}
+          placeholder="BTC/USDT, ETH/USDT, SOL/USDT"
+          value={data.pairs !== undefined ? data.pairs : DEFAULT_PAIR}
+          onChange={(e) => data.onChange(id, 'pairs', e.target.value)}
+          onBlur={(e) => data.onChange(id, 'pairs', parsePairs(e.target.value).join(', '))}
+          aria-invalid={unknown.length > 0}
+        />
+        {pairs.length > 0 && (
+          <div className="flex flex-wrap gap-1">
+            {pairs.map(p => {
+              const bad = listed && !listed.has(p);
+              return (
+                <span key={p} title={bad ? `${p} is not listed on ${exch}` : (listed ? `Listed on ${exch}` : undefined)}
+                  className={`px-1.5 py-0.5 rounded text-[9px] font-num font-bold border ${bad ? 'border-danger/50 bg-danger/10 text-danger' : 'border-border bg-inset text-text'}`}>
+                  {bad ? '✕ ' : ''}{p}
+                </span>
+              );
+            })}
+          </div>
+        )}
+        <span className={`text-[9px] block ${unknown.length ? 'text-danger' : 'text-muted'}`}>
+          {unknown.length
+            ? `${unknown.join(', ')} not listed on ${exch} — the bot cannot start with these.`
+            : listed
+              ? `${pairs.length} pair${pairs.length === 1 ? '' : 's'} · all listed on ${exch}`
+              : (market ? `Could not load ${exch} markets — pairs are checked when the bot starts.` : 'Checked against the exchange in the routing block.')}
+        </span>
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 export const BacktestNode = ({ id, data }) => (
   <div className="bg-raised/90 backdrop-blur-xl border border-accent rounded-xl shadow-lg min-w-[280px]">
     <div className="bg-accent/10 px-3 py-2 border-b border-accent/30 flex justify-between items-center">
       <span className="font-bold text-accent text-[11px] uppercase tracking-wider">BACKTEST ENGINE</span>
-      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove backtest block" title="Remove block">✕</button>}
     </div>
     <div className="p-4 bg-bg/80 rounded-b space-y-4">
       <label className="flex items-center cursor-pointer nodrag">
@@ -180,7 +255,7 @@ export const ApiKeyNode = ({ id, data }) => {
     <div className="bg-raised/90 backdrop-blur-xl border border-info rounded-xl shadow-lg min-w-[260px]">
       <div className="bg-info/10 px-3 py-2 border-b border-info/30 flex justify-between items-center">
         <span className="font-bold text-info text-[11px] uppercase tracking-wider">EXCHANGE ROUTING</span>
-        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove exchange routing block" title="Remove block">✕</button>}
       </div>
       <div className="p-4 bg-bg/80 rounded-b space-y-3">
         <div>
@@ -238,7 +313,7 @@ export const IndicatorNode = ({ id, data }) => {
   <div className="bg-raised/90 backdrop-blur-xl border border-border rounded-xl shadow-lg min-w-[250px] hover:border-accent transition-all duration-200 relative">
     <div className="bg-overlay px-3 py-2 flex justify-between items-center">
       <span className="font-bold text-text text-[11px] uppercase tracking-wider">TECHNICAL INDICATOR</span>
-      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove indicator block" title="Remove block">✕</button>}
     </div>
     <div className="p-4 space-y-3 bg-bg/80 rounded-b">
       
@@ -296,7 +371,7 @@ export const PriceDataNode = ({ id, data }) => (
   <div className="bg-raised/90 backdrop-blur-xl border border-border rounded-xl shadow-lg min-w-[220px] hover:border-accent transition-all duration-200 relative">
     <div className="bg-overlay/60 px-3 py-2 border-b border-border/50 flex justify-between items-center">
       <span className="font-bold text-text text-[11px] uppercase tracking-wider">PRICE DATA</span>
-      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove price data block" title="Remove block">✕</button>}
     </div>
     <div className="p-4 space-y-3 bg-bg/80 rounded-b">
       <div>
@@ -329,7 +404,7 @@ export const ConditionNode = ({ id, data }) => (
     
     <div className="bg-overlay/60 px-3 py-2 border-b border-border/50 flex justify-between items-center">
       <span className="font-bold text-text text-[11px] uppercase tracking-wider">DATA CONDITION</span>
-      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+      {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove condition block" title="Remove block">✕</button>}
     </div>
     
     <div className="p-4 bg-bg/80 rounded-b flex flex-col space-y-4">
@@ -375,7 +450,7 @@ export const LogicNode = ({ id, data }) => {
       )}
       <div className="bg-success/10 px-3 py-2 border-b border-success/30 flex justify-between items-center">
         <span className="font-bold text-success text-[11px] uppercase tracking-wider">LOGIC GATE</span>
-        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove logic gate block" title="Remove block">✕</button>}
       </div>
       <div className="p-4 bg-bg/80 rounded-b">
         <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag font-bold text-center focus:border-success outline-none" value={data.logicType !== undefined ? data.logicType : "and"} onChange={(e) => data.onChange(id, 'logicType', e.target.value)}>
@@ -405,7 +480,7 @@ export const StopLossNode = ({ id, data }) => (
       <span className="font-bold text-danger text-[11px] uppercase tracking-wider">STOP LOSS (RISK)</span>
       <div className="flex space-x-3 items-center">
         <span className="text-[9px] text-muted font-num">&larr; IN</span>
-        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove stop loss block" title="Remove block">✕</button>}
       </div>
     </div>
     <div className="p-4 bg-bg/80 rounded-b space-y-4">
@@ -444,7 +519,7 @@ export const TakeProfitNode = ({ id, data }) => (
       <span className="font-bold text-success text-[11px] uppercase tracking-wider">TAKE PROFIT (TARGET)</span>
       <div className="flex space-x-3 items-center">
         <span className="text-[9px] text-muted font-num">&larr; IN</span>
-        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove take profit block" title="Remove block">✕</button>}
       </div>
     </div>
     <div className="p-4 bg-bg/80 rounded-b space-y-4">
@@ -488,7 +563,7 @@ export const ActionNode = ({ id, data }) => {
       
       <div className="px-3 py-2 font-bold text-[11px] uppercase tracking-wider border-b flex justify-between items-center" style={{ backgroundColor: `color-mix(in srgb, ${color} 6%, transparent)`, color: color, borderColor: `color-mix(in srgb, ${color} 19%, transparent)` }}>
         <span>{isBuy ? 'ORDER ROUTING: LONG ENTRY' : 'ORDER ROUTING: CLOSE POSITION'}</span>
-        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors">✕</button>}
+        {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove action block" title="Remove block">✕</button>}
       </div>
       
       <div className="p-4 bg-bg/80 rounded-b space-y-4">

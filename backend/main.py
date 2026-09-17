@@ -13,7 +13,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 
-from backend.core.database import engine, Base, run_migrations
+from backend.core.database import engine, Base, run_migrations, run_startup_sweeps
 from backend.core.security import verify_api_key
 
 # Ensure SQLAlchemy knows about all models before calling create_all()
@@ -37,6 +37,7 @@ from backend.core.exchange_registry import build_exchange
 # Create database tables and run migrations for existing DBs
 Base.metadata.create_all(bind=engine)
 run_migrations()
+run_startup_sweeps()
 
 # Lifespan context manager for background tasks
 @asynccontextmanager
@@ -46,8 +47,17 @@ async def lifespan(app: FastAPI):
     yield
     candle_poller.stop()
     bot_manager.stop()
-    await poll_task
-    await bot_task
+    # Startup threads (backfill/backtest) and candle handlers are fire-and-
+    # forget tasks; cancel them and give everything 10 s to unwind so a
+    # reload never hangs on a long backtest or a stuck exchange call
+    pending = [poll_task, bot_task, *bot_manager._bg_tasks, *candle_poller._poll_tasks]
+    for task in bot_manager._bg_tasks | set(candle_poller._poll_tasks):
+        task.cancel()
+    try:
+        await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=10)
+    except asyncio.TimeoutError:
+        logging.getLogger("apexalgo.main").warning(
+            "Shutdown: %d background task(s) still running after 10 s — exiting anyway", sum(1 for t in pending if not t.done()))
 
 # Initialize FastAPI application with the lifespan manager
 enable_docs = os.getenv("ENABLE_DOCS", "0") == "1"
