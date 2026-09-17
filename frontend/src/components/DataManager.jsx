@@ -108,7 +108,7 @@ export default function DataManager({ openChart }) {
       const keys = new Set();
       botsRes.data.filter(b => b.is_active).forEach(b => {
         const s = b.settings || {};
-        const ex = (s.data_exchange || 'okx').toLowerCase();
+        const ex = (b.exchange || s.data_exchange || 'okx').toLowerCase();
         const tf = s.timeframe;
         const syms = s.symbols?.length ? s.symbols : (s.symbol ? [s.symbol] : []);
         syms.forEach(sym => keys.add(`${ex}|${sym}|${tf}`));

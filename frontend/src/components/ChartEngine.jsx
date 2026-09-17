@@ -150,9 +150,13 @@ function ChartEngine({ dataset, openDataVault }) {
     try { 
       const botRes = await apiClient.get('/api/bots/'); 
        
+      // A bot only belongs on this chart when exchange, pair AND interval all
+      // match — its candles (and therefore its signals) come from that exact dataset.
+      const chartExchange = (dataset.exchange || 'okx').toLowerCase();
       const validBots = botRes.data.filter(b => {
           const hasSymbol = (b.settings?.symbols && b.settings.symbols.includes(dataset.symbol)) || b.settings?.symbol === dataset.symbol;
-          return hasSymbol && b.settings?.timeframe === dataset.timeframe;
+          const botExchange = (b.exchange || b.settings?.data_exchange || 'okx').toLowerCase();
+          return hasSymbol && b.settings?.timeframe === dataset.timeframe && botExchange === chartExchange;
       });
        
       setBotConfigs(prev => { 
@@ -196,7 +200,7 @@ function ChartEngine({ dataset, openDataVault }) {
   const pollData = async (signal) => {
     try {
       const safeSymbol = dataset.symbol.replace('/', '-');
-      const sigParams = { symbol: dataset.symbol, timeframe: dataset.timeframe, limit: 200000 };
+      const sigParams = { symbol: dataset.symbol, timeframe: dataset.timeframe, exchange: dataset.exchange || 'okx', limit: 200000 };
       if (lastSignalIdRef.current > 0) sigParams.since_id = lastSignalIdRef.current;
       const cur = tradeCursorRef.current;
       const incremental = cur.since !== null;

@@ -199,7 +199,7 @@ export default function App() {
       : (bot.settings?.symbol ? [bot.settings.symbol] : []);
 
     const timeframe = bot.settings?.timeframe || "15m";
-    const exchange = (bot.settings?.data_exchange || 'okx').toLowerCase();
+    const exchange = (bot.exchange || bot.settings?.data_exchange || 'okx').toLowerCase();
     let updatedCharts = [...openCharts];
     let lastOpenedChartId = "";
 

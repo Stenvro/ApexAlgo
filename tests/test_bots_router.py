@@ -340,3 +340,38 @@ def test_positions_and_orders_window_and_incremental_poll(db, client, running_bo
     assert r.json() == []
     max_order = max(o["id"] for o in client.get("/api/trades/orders", headers=HEADERS).json())
     assert client.get("/api/trades/orders", params={"since_id": max_order}, headers=HEADERS).json() == []
+
+
+def test_chart_signals_and_bot_exchange_are_scoped_per_exchange(db, client):
+    """The same pair + interval on another exchange is a different dataset:
+    an OKX bot's signals must never land on a Binance chart. The chart scopes
+    on the *candle* exchange — the key's exchange when orders are routed,
+    else data_exchange."""
+    from datetime import datetime, timezone
+    from backend.models.signals import Signal
+
+    db.add(ExchangeKey(name="okx-key", exchange="okx", api_key="x", api_secret="y", passphrase="", is_sandbox=True))
+    for name, data_exchange, api_exec, key in (("bin-bot", "binance", False, None),
+                                                ("okx-bot", "okx", False, None),
+                                                ("routed-okx", "binance", True, "okx-key"),   # key wins
+                                                ("key-off", "binance", False, "okx-key")):    # not routing → data_exchange
+        s = _settings()
+        s["data_exchange"], s["api_execution"], s["api_key_name"] = data_exchange, api_exec, key
+        db.add(BotConfig(name=name, is_active=False, is_sandbox=False, strategy="node_graph", settings=s))
+        db.add(Signal(symbol=SYMBOL, timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc), bot_name=name,
+                      name="TRADE_TRIGGER", action="buy", value=1.0))
+    db.commit()
+
+    by_name = {b["name"]: b["exchange"] for b in client.get("/api/bots/", headers=HEADERS).json()}
+    assert by_name == {"bin-bot": "binance", "okx-bot": "okx", "routed-okx": "okx", "key-off": "binance"}
+    summary = {b["name"]: b["exchange"] for b in client.get("/api/bots/summary", headers=HEADERS).json()}
+    assert summary == by_name
+
+    def bots_on(exchange):
+        r = client.get("/api/bots/signals", params={"symbol": SYMBOL, "timeframe": TF, "exchange": exchange}, headers=HEADERS)
+        assert r.status_code == 200
+        return sorted({s["bot_name"] for s in r.json()})
+
+    assert bots_on("binance") == ["bin-bot", "key-off"]
+    assert bots_on("OKX") == ["okx-bot", "routed-okx"]
+    assert bots_on("kraken") == []
