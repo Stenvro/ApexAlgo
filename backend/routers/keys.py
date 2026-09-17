@@ -14,7 +14,7 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.models.bots import BotConfig
 from backend.core.security import verify_api_key
 from backend.core.encryption import encrypt_data
-from backend.core.exchange_registry import build_exchange, build_exchange_from_key, SUPPORTED_EXCHANGES
+from backend.core.exchange_registry import build_exchange, get_authenticated_exchange, invalidate_authenticated_exchange, SUPPORTED_EXCHANGES
 
 logger = logging.getLogger("apexalgo.keys")
 
@@ -111,6 +111,7 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
             db.add(new_key)
 
         db.commit()
+        invalidate_authenticated_exchange(req.name)  # replaced credentials must not linger in the registry
         return {"message": f"Exchange key '{req.name}' verified and saved securely."}
     except Exception as e:
         logger.error("Database error saving key '%s': %s", req.name, e)
@@ -142,7 +143,9 @@ def get_exchange_keys_status(db: Session = Depends(get_db)):
         latency_ms = None
         started = time.monotonic()
         try:
-            test_exchange = build_exchange_from_key(k)
+            # Status polls every few seconds: reuse the registry instance
+            # instead of decrypting + instantiating every exchange per call
+            test_exchange = get_authenticated_exchange(k, load_markets=False)
             test_exchange.fetch_balance()
             is_active = True
             latency_ms = int((time.monotonic() - started) * 1000)
@@ -175,7 +178,7 @@ def get_key_balance(key_name: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail=f"Key '{key_name}' not found.")
 
     try:
-        exchange = build_exchange_from_key(key_record)
+        exchange = get_authenticated_exchange(key_record, load_markets=False)
         balance_data = exchange.fetch_balance()
 
         active_balances = {}
@@ -256,6 +259,7 @@ def delete_exchange_keys(key_name: str, db: Session = Depends(get_db)):
 
     db.delete(key_record)
     db.commit()
+    invalidate_authenticated_exchange(key_name)
     return {"message": f"Key '{key_name}' deleted successfully."}
 
 SWAP_MAX_NOTIONAL = float(os.environ.get("SWAP_MAX_NOTIONAL", "5000"))  # in the market's quote currency
@@ -299,7 +303,7 @@ def execute_quick_swap(name: str, payload: SwapRequest, db: Session = Depends(ge
         if not key_record:
             return JSONResponse(status_code=404, content={"detail": f"API Wallet '{name}' not found"})
 
-        exchange = build_exchange_from_key(key_record)
+        exchange = get_authenticated_exchange(key_record)
 
         from_asset = payload.from_asset
         to_asset = payload.to_asset

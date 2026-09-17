@@ -2,7 +2,7 @@ import logging
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func as sql_func, text
+from sqlalchemy import func as sql_func, or_, text
 import io
 import csv
 import math
@@ -16,7 +16,7 @@ from backend.models.candles import Candle
 from backend.models.bots import BotConfig
 from backend.models.exchange_keys import ExchangeKey
 from backend.core.security import verify_api_key
-from backend.core.exchange_registry import build_exchange_from_key
+from backend.core.exchange_registry import get_authenticated_exchange
 from backend.engine.bot_manager import bot_manager
 
 logger = logging.getLogger("apexalgo.trades")
@@ -53,8 +53,34 @@ router = APIRouter(
     dependencies=[Depends(verify_api_key)]
 )
 
+def _parse_ts(value, name):
+    """ISO-8601 query param → naive UTC datetime (DB rows are naive UTC)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"'{name}' must be an ISO-8601 datetime")
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
 @router.get("/positions")
-def get_positions(symbol: str = None, mode: str = None, status: str = None, limit: int = Query(default=5000, le=50000), db: Session = Depends(get_db)):
+def get_positions(
+    symbol: str = None, mode: str = None, status: str = None,
+    from_: str = Query(default=None, alias="from"), to: str = None,
+    since_id: int = Query(default=0, ge=0), since: str = None,
+    limit: int = Query(default=5000, le=50000), db: Session = Depends(get_db),
+):
+    """Positions, newest first.
+
+    `from`/`to` window `created_at`; open positions are always returned so a
+    windowed view can never hide live exposure. `since_id` + `since` make a
+    poll incremental: rows created after `since_id`, rows closed at or after
+    `since`, and every open row (its state may have changed) — the client
+    merges by id."""
+    dt_from, dt_to, dt_since = _parse_ts(from_, "from"), _parse_ts(to, "to"), _parse_ts(since, "since")
     query = db.query(
         Position.id, Position.exchange, Position.bot_name, Position.symbol,
         Position.mode, Position.status, Position.side, Position.entry_price,
@@ -66,6 +92,17 @@ def get_positions(symbol: str = None, mode: str = None, status: str = None, limi
         query = query.filter(Position.symbol == formatted_symbol)
     if mode: query = query.filter(Position.mode == mode)
     if status: query = query.filter(Position.status == status)
+    if dt_from is not None:
+        query = query.filter(or_(Position.created_at >= dt_from, Position.status == "open"))
+    if dt_to is not None:
+        query = query.filter(or_(Position.created_at <= dt_to, Position.status == "open"))
+    if since_id or dt_since is not None:
+        changed = [Position.status == "open"]
+        if since_id:
+            changed.append(Position.id > since_id)
+        if dt_since is not None:
+            changed.append(Position.closed_at >= dt_since)
+        query = query.filter(or_(*changed))
     query = query.order_by(Position.created_at.desc())
     query = query.limit(limit if limit > 0 else 50000)
     return [
@@ -78,7 +115,15 @@ def get_positions(symbol: str = None, mode: str = None, status: str = None, limi
     ]
 
 @router.get("/orders")
-def get_orders(symbol: str = None, mode: str = None, limit: int = Query(default=10000, le=50000), db: Session = Depends(get_db)):
+def get_orders(
+    symbol: str = None, mode: str = None,
+    from_: str = Query(default=None, alias="from"), to: str = None,
+    since_id: int = Query(default=0, ge=0),
+    limit: int = Query(default=10000, le=50000), db: Session = Depends(get_db),
+):
+    """Orders, newest first. `from`/`to` window `timestamp`; `since_id`
+    returns only rows with a higher id (orders are append-only)."""
+    dt_from, dt_to = _parse_ts(from_, "from"), _parse_ts(to, "to")
     query = db.query(
         Order.id, Order.position_id, Order.exchange, Order.bot_name,
         Order.mode, Order.symbol, Order.side, Order.order_type,
@@ -88,6 +133,9 @@ def get_orders(symbol: str = None, mode: str = None, limit: int = Query(default=
         formatted_symbol = symbol.replace('-', '/').upper()
         query = query.filter(Order.symbol == formatted_symbol)
     if mode: query = query.filter(Order.mode == mode)
+    if dt_from is not None: query = query.filter(Order.timestamp >= dt_from)
+    if dt_to is not None: query = query.filter(Order.timestamp <= dt_to)
+    if since_id: query = query.filter(Order.id > since_id)
     query = query.order_by(Order.timestamp.desc())
     query = query.limit(limit if limit > 0 else 50000)
     return [
@@ -261,7 +309,7 @@ def _execute_live_close(pos: Position, db: Session):
     close_side = "sell" if pos.side == "long" else "buy"
 
     try:
-        exchange = build_exchange_from_key(key_record)
+        exchange = get_authenticated_exchange(key_record)
         close_qty = float(exchange.amount_to_precision(ccxt_symbol, pos.amount))
         if close_qty <= 0:
             raise HTTPException(status_code=400, detail="Position amount rounds to zero at exchange precision; cannot place a close order.")

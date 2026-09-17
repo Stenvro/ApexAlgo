@@ -2,7 +2,7 @@
 (plan item 1.6). Runs through FastAPI's TestClient without the lifespan, so no
 poller or engine thread is started; the exchange is the ``ExchangeMock`` from
 the live-tick tests, wired into ``close_position_now`` via
-``build_exchange_from_key``."""
+``get_authenticated_exchange``."""
 import os
 
 import pytest
@@ -79,7 +79,7 @@ def test_stop_with_open_real_positions_is_refused_until_decided(db, client, runn
 def test_stop_close_positions_true_closes_at_market_then_stops(db, client, running_bot, monkeypatch):
     bot = running_bot(positions=[("live", SYMBOL, 0.5), ("forward_test", SYMBOL, 2.0)])
     mock = ExchangeMock(average=110.0)
-    monkeypatch.setattr(trades_router, "build_exchange_from_key", lambda key: mock)
+    monkeypatch.setattr(trades_router, "get_authenticated_exchange", lambda key, **kw: mock)
     r = client.post(f"/api/bots/{bot.id}/stop", params={"close_positions": "true"}, headers=HEADERS)
     assert r.status_code == 200, r.text
     assert len(r.json()["closed_positions"]) == 2
@@ -106,9 +106,9 @@ def test_stop_close_positions_false_leaves_them_unmanaged_with_warning(db, clien
 def test_stop_reports_failed_close_but_bot_is_stopped(db, client, running_bot, monkeypatch):
     bot = running_bot(positions=[("live", SYMBOL, 0.5)])
 
-    def boom(key):
+    def boom(key, **kw):
         raise RuntimeError("exchange down")
-    monkeypatch.setattr(trades_router, "build_exchange_from_key", boom)
+    monkeypatch.setattr(trades_router, "get_authenticated_exchange", boom)
     r = client.post(f"/api/bots/{bot.id}/stop", params={"close_positions": "true"}, headers=HEADERS)
     assert r.status_code >= 400, r.text
     detail = r.json()["detail"]
@@ -221,7 +221,7 @@ def test_swap_caps_notional_and_is_idempotent(db, client, running_bot, monkeypat
     from backend.routers import keys as keys_router
     running_bot()
     ex = _SwapExchange(last=100.0)
-    monkeypatch.setattr(keys_router, "build_exchange_from_key", lambda key: ex)
+    monkeypatch.setattr(keys_router, "get_authenticated_exchange", lambda key, **kw: ex)
     monkeypatch.setattr(keys_router.time, "sleep", lambda s: None)
 
     # 60 BTC × 100 = 6000 USDT > cap
@@ -302,3 +302,41 @@ def test_symbols_endpoint_lists_active_spot_markets_and_degrades_to_unknown(clie
     r = client.get("/api/data/symbols/kraken", headers=HEADERS)
     assert r.status_code == 200 and r.json() == {"exchange": "kraken", "symbols": [], "known": False}
     assert client.get("/api/data/symbols/nope", headers=HEADERS).status_code == 400
+
+
+def test_positions_and_orders_window_and_incremental_poll(db, client, running_bot):
+    """Plan 4.3: `from`/`to` bound the payload server-side without ever hiding
+    open exposure; `since_id`/`since` return only what changed since the last
+    poll (new rows, rows closed since, and every open row)."""
+    from datetime import datetime, timedelta
+    bot = running_bot(positions=[("live", SYMBOL, 0.5)])
+    open_id = db.query(Position.id).filter(Position.bot_name == bot.name).scalar()
+    t0 = datetime(2020, 1, 1)  # well before the 2023 fixture candles
+    old = Position(exchange=EXCHANGE, bot_name=bot.name, symbol=SYMBOL, mode="backtest", status="closed",
+                   side="long", entry_price=1.0, amount=1.0, profit_abs=0.0, created_at=t0, closed_at=t0 + timedelta(hours=1))
+    db.add(old)
+    db.add(Order(exchange=EXCHANGE, bot_name=bot.name, mode="backtest", symbol=SYMBOL, side="buy", order_type="market",
+                 price=1.0, amount=1.0, fee=0.0, status="filled", timestamp=t0, exchange_order_id="old"))
+    db.commit()
+
+    # Window after the old trade: the open live position is still returned
+    r = client.get("/api/trades/positions", params={"from": "2022-01-01T00:00:00Z"}, headers=HEADERS)
+    assert [p["id"] for p in r.json()] == [open_id]
+    r = client.get("/api/trades/orders", params={"from": "2022-01-01T00:00:00Z"}, headers=HEADERS)
+    seed_ts = db.query(Order.timestamp).filter(Order.exchange_order_id == "seed").scalar()
+    assert [o["timestamp"] for o in r.json()] == [seed_ts.isoformat()]
+    assert client.get("/api/trades/positions", params={"from": "yesterday"}, headers=HEADERS).status_code == 400
+
+    # Incremental poll: nothing new → only the open row; after it closes with
+    # closed_at >= since it is reported again
+    max_id = max(p["id"] for p in client.get("/api/trades/positions", headers=HEADERS).json())
+    r = client.get("/api/trades/positions", params={"since_id": max_id, "since": "2030-01-01T00:00:00Z"}, headers=HEADERS)
+    assert [p["id"] for p in r.json()] == [open_id]
+    db.query(Position).filter(Position.id == open_id).update({"status": "closed", "closed_at": datetime(2031, 1, 1)})
+    db.commit()
+    r = client.get("/api/trades/positions", params={"since_id": max_id, "since": "2030-01-01T00:00:00Z"}, headers=HEADERS)
+    assert [(p["id"], p["status"]) for p in r.json()] == [(open_id, "closed")]
+    r = client.get("/api/trades/positions", params={"since_id": max_id, "since": "2032-01-01T00:00:00Z"}, headers=HEADERS)
+    assert r.json() == []
+    max_order = max(o["id"] for o in client.get("/api/trades/orders", headers=HEADERS).json())
+    assert client.get("/api/trades/orders", params={"since_id": max_order}, headers=HEADERS).json() == []
