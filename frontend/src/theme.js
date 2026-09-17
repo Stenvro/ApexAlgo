@@ -6,7 +6,8 @@
  * block overrides every token. Switching themes is therefore just
  * toggling the `light` class on <html>.
  *
- * - getTheme()  -> 'dark' | 'light'   (persisted in localStorage `apex_theme`)
+ * - getTheme()  -> 'dark' | 'light'   (localStorage `apex_theme` wins; otherwise
+ *                  prefers-color-scheme, falling back to dark)
  * - setTheme(t) -> applies class + persists + dispatches `apex-theme-changed`
  * - initTheme() -> call once before first render to avoid a flash
  * - getToken(n) -> resolved CSS token value, e.g. getToken('success') === '#2ebd85'.
@@ -18,9 +19,19 @@ const STORAGE_KEY = 'apex_theme';
 export function getTheme() {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
-    return stored === 'light' ? 'light' : 'dark';
+    if (stored === 'light' || stored === 'dark') return stored;
+    return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
   } catch {
     return 'dark';
+  }
+}
+
+function hasStoredTheme() {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    return stored === 'light' || stored === 'dark';
+  } catch {
+    return false;
   }
 }
 
@@ -45,6 +56,17 @@ export function setTheme(theme) {
 
 export function initTheme() {
   applyTheme(getTheme());
+
+  // Follow OS preference changes as long as the user has no explicit choice
+  // stored. Dispatch apex-theme-changed so canvas consumers (ChartEngine,
+  // Builder) re-read their tokens, exactly like a manual toggle.
+  const media = window.matchMedia?.('(prefers-color-scheme: light)');
+  media?.addEventListener?.('change', () => {
+    if (hasStoredTheme()) return;
+    const next = getTheme();
+    applyTheme(next);
+    window.dispatchEvent(new CustomEvent('apex-theme-changed', { detail: { theme: next } }));
+  });
 }
 
 /** Read a resolved `--color-*` token (trimmed), e.g. getToken('accent'). */

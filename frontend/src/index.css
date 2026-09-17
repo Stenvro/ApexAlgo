@@ -31,25 +31,48 @@
   --color-muted: var(--apx-muted);           /* labels, captions */
   --color-faint: var(--apx-faint);           /* least important */
 
-  /* Brand + semantic */
-  --color-accent: var(--apx-accent);         /* gold — text/border/icon accent, focus */
+  /* Brand + semantic.
+     accent = interaction/chrome green (buttons, focus, active nav);
+     success = market green, ONLY for PnL / up-state — never for chrome. */
+  --color-accent: var(--apx-accent);         /* mint — text/border/icon accent, focus */
   --color-accent-hover: var(--apx-accent-hover);
-  --color-accent-fill: var(--apx-accent-fill); /* gold surfaces carrying accent-ink text */
+  --color-accent-fill: var(--apx-accent-fill); /* mint surfaces carrying accent-ink text */
   --color-accent-fill-hover: var(--apx-accent-fill-hover);
   --color-accent-ink: var(--apx-accent-ink); /* text on accent-fill backgrounds */
   --color-danger: var(--apx-danger);
   --color-danger-hover: var(--apx-danger-hover);
+  --color-danger-ink: var(--apx-danger-ink);   /* text on solid danger fills */
   --color-success: var(--apx-success);
   --color-success-hover: var(--apx-success-hover);
+  --color-success-ink: var(--apx-success-ink); /* text on solid success fills */
   --color-warn: var(--apx-warn);
   --color-info: var(--apx-info);
   --color-purple: var(--apx-purple);
 
-  /* Radii */
-  --radius-sm: 0.375rem;
-  --radius-md: 0.5rem;
-  --radius-lg: 0.75rem;
-  --radius-xl: 1rem;
+  /* Type ramp — data-dense: xs (11px) is the workhorse table/body size,
+     3xs/2xs are micro-labels and captions. */
+  --text-3xs: 0.5625rem;
+  --text-3xs--line-height: 0.875rem;
+  --text-2xs: 0.625rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.6875rem;
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.4rem;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.65rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 1.9rem;
+
+  /* Radii — tight, terminal-style */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.75rem;
 
   /* Shadows / glows */
   --shadow-card: var(--apx-shadow-card);
@@ -62,55 +85,60 @@
 
 /* ── DARK THEME (default) — runtime values for every token ──── */
 :root {
-  --apx-bg: #080a0f;
-  --apx-surface: #0e1118;
-  --apx-raised: #12151c;
-  --apx-overlay: #171b24;
-  --apx-inset: #05070b;
+  --apx-bg: #06080a;
+  --apx-surface: #0b0e12;
+  --apx-raised: #10141a;
+  --apx-overlay: #161b23;
+  --apx-inset: #030507;
 
-  --apx-border: #202532;
-  --apx-border-strong: #2b3545;
+  --apx-border: #1c222c;
+  --apx-border-strong: #2b3441;
 
-  --apx-text: #eaecef;
-  --apx-text-secondary: #b7bdc6;
-  --apx-muted: #848e9c;
-  --apx-faint: #5e6673;
+  --apx-text: #e6edf3;
+  --apx-text-secondary: #b0bac5;
+  --apx-muted: #7d8896;
+  --apx-faint: #566170;
 
-  --apx-accent: #fcd535;
-  --apx-accent-hover: #e5c02a;
-  --apx-accent-fill: #fcd535;
-  --apx-accent-fill-hover: #e5c02a;
-  --apx-accent-ink: #080a0f;
-  --apx-danger: #f6465d;
-  --apx-danger-hover: #d93c51;
-  --apx-success: #2ebd85;
-  --apx-success-hover: #27a374;
+  /* accent = pale interaction mint; deliberately lighter/cooler than
+     --apx-success (deep market green) so "selected" never reads "profitable" */
+  --apx-accent: #3ddba9;
+  --apx-accent-hover: #2fc494;
+  --apx-accent-fill: #2fe6a8;
+  --apx-accent-fill-hover: #25d097;
+  --apx-accent-ink: #04120c;
+  --apx-danger: #ea3943;
+  --apx-danger-hover: #d32f39;
+  --apx-danger-ink: #ffffff;
+  --apx-success: #16c784;
+  --apx-success-hover: #10b276;
+  --apx-success-ink: #ffffff;
   --apx-warn: #f0b90b;
   --apx-info: #0ea5e9;
   --apx-purple: #8b5cf6;
 
-  --apx-shadow-card: 0 4px 24px rgba(0, 0, 0, 0.3);
-  --apx-shadow-pop: 0 12px 48px rgba(0, 0, 0, 0.55);
-  --apx-glow-accent: 0 0 24px rgba(252, 213, 53, 0.18);
-  --apx-glow-accent-sm: 0 0 15px rgba(252, 213, 53, 0.15);
-  --apx-glow-danger: 0 0 24px rgba(246, 70, 93, 0.18);
-  --apx-glow-success: 0 0 24px rgba(46, 189, 133, 0.18);
+  --apx-shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.02), 0 2px 8px rgba(0, 0, 0, 0.35);
+  --apx-shadow-pop: 0 8px 32px rgba(0, 0, 0, 0.55);
+  --apx-glow-accent: 0 0 16px rgba(47, 230, 168, 0.10);
+  --apx-glow-accent-sm: 0 0 10px rgba(47, 230, 168, 0.08);
+  --apx-glow-danger: 0 0 16px rgba(234, 57, 67, 0.10);
+  --apx-glow-success: 0 0 16px rgba(22, 199, 132, 0.10);
 }
 
 /* ── Non-utility theme helpers (dark defaults) ─────────────────
    Used by handwritten CSS below; every value here must have a
    counterpart in the html.light block. */
 :root {
-  --grid-line: rgba(255, 255, 255, 0.025);       /* page grid lines */
-  --card-glass: rgba(18, 21, 28, 0.9);           /* terminal-card glass fill */
-  --scrollbar-thumb: #232937;
-  --scrollbar-thumb-hover: #3a4356;
-  --selection-bg: rgba(252, 213, 53, 0.28);
-  --focus-ring: rgba(252, 213, 53, 0.7);
-  --glow-panel-gold: 0 0 60px rgba(252, 213, 53, 0.08);
-  --glow-panel-cyan: 0 0 40px rgba(14, 165, 233, 0.06);
-  --glow-panel-green: 0 0 40px rgba(46, 189, 133, 0.06);
-  --glow-panel-purple: 0 0 40px rgba(139, 92, 246, 0.06);
+  --grid-line: rgba(140, 255, 210, 0.02);        /* page grid lines — faint matrix tint */
+  --card-glass: var(--apx-raised);               /* terminal-card fill (solid, crisp) */
+  --scrollbar-thumb: #222a34;
+  --scrollbar-thumb-hover: #354052;
+  --selection-bg: rgba(47, 230, 168, 0.25);
+  --focus-ring: rgba(61, 219, 169, 0.8);
+  --backdrop: rgba(3, 5, 7, 0.7);                /* modal / drawer scrim */
+  --glow-panel-gold: 0 0 24px rgba(47, 230, 168, 0.04);
+  --glow-panel-cyan: 0 0 24px rgba(14, 165, 233, 0.03);
+  --glow-panel-green: 0 0 24px rgba(22, 199, 132, 0.03);
+  --glow-panel-purple: 0 0 24px rgba(139, 92, 246, 0.03);
 }
 
 /* ============================================================
@@ -119,56 +147,59 @@
    ============================================================ */
 html.light {
   /* Surfaces (lightest -> darkest wells) */
-  --apx-bg: #f6f7f9;
+  --apx-bg: #f5f7f8;
   --apx-surface: #ffffff;
   --apx-raised: #ffffff;
-  --apx-overlay: #eef0f4;
-  --apx-inset: #e9ebef;
+  --apx-overlay: #edf1f3;
+  --apx-inset: #e7ebee;
 
   /* Borders */
-  --apx-border: #d7dce3;
-  --apx-border-strong: #b9c0cc;
+  --apx-border: #d5dce1;
+  --apx-border-strong: #b6c0c9;
 
   /* Text */
-  --apx-text: #171a20;
-  --apx-text-secondary: #3f4653;
-  --apx-muted: #5f6875;   /* >=4.5:1 on --apx-bg for small text */
-  --apx-faint: #9aa1ad;
+  --apx-text: #14181d;
+  --apx-text-secondary: #3d4750;
+  --apx-muted: #5b6673;   /* >=4.5:1 on --apx-bg for small text */
+  --apx-faint: #97a1ac;
 
   /* Brand + semantic — accent text darkens for contrast on white;
-     accent-fill stays gold because it carries dark ink text */
-  --apx-accent: #c99400;
-  --apx-accent-hover: #a87b00;
-  --apx-accent-fill: #fcd535;
-  --apx-accent-fill-hover: #f0c518;
-  --apx-accent-ink: #171a20;
-  --apx-danger: #e13d5b;
-  --apx-danger-hover: #c73450;
-  --apx-success: #14855f;
-  --apx-success-hover: #0f6e4f;
+     accent-fill stays vivid because it carries dark ink text */
+  --apx-accent: #0b7a58;
+  --apx-accent-hover: #096247;
+  --apx-accent-fill: #12ce8f;
+  --apx-accent-fill-hover: #0fbd83;
+  --apx-accent-ink: #062017;
+  --apx-danger: #d63340;
+  --apx-danger-hover: #bd2b37;
+  --apx-danger-ink: #ffffff;
+  --apx-success: #0f9d63;
+  --apx-success-hover: #0c8352;
+  --apx-success-ink: #ffffff;
   --apx-warn: #b45309;
-  --apx-info: #0284c7;
+  --apx-info: #0273b3;
   --apx-purple: #7c3aed;
 
   /* Shadows — soft elevation, no glows in light mode */
-  --apx-shadow-card: 0 1px 2px rgba(23, 26, 32, 0.05), 0 4px 16px rgba(23, 26, 32, 0.07);
-  --apx-shadow-pop: 0 4px 12px rgba(23, 26, 32, 0.10), 0 18px 44px rgba(23, 26, 32, 0.16);
-  --apx-glow-accent: 0 1px 3px rgba(23, 26, 32, 0.10), 0 4px 12px rgba(23, 26, 32, 0.10);
-  --apx-glow-accent-sm: 0 1px 2px rgba(23, 26, 32, 0.08), 0 2px 8px rgba(23, 26, 32, 0.08);
-  --apx-glow-danger: 0 1px 3px rgba(225, 61, 91, 0.18), 0 4px 12px rgba(23, 26, 32, 0.08);
-  --apx-glow-success: 0 1px 3px rgba(20, 133, 95, 0.18), 0 4px 12px rgba(23, 26, 32, 0.08);
+  --apx-shadow-card: 0 1px 2px rgba(20, 24, 29, 0.05), 0 2px 10px rgba(20, 24, 29, 0.06);
+  --apx-shadow-pop: 0 4px 12px rgba(20, 24, 29, 0.10), 0 18px 44px rgba(20, 24, 29, 0.16);
+  --apx-glow-accent: 0 1px 3px rgba(20, 24, 29, 0.10), 0 4px 12px rgba(20, 24, 29, 0.10);
+  --apx-glow-accent-sm: 0 1px 2px rgba(20, 24, 29, 0.08), 0 2px 8px rgba(20, 24, 29, 0.08);
+  --apx-glow-danger: 0 1px 3px rgba(214, 51, 64, 0.18), 0 4px 12px rgba(20, 24, 29, 0.08);
+  --apx-glow-success: 0 1px 3px rgba(15, 157, 99, 0.18), 0 4px 12px rgba(20, 24, 29, 0.08);
 
   /* Handwritten-CSS helpers */
-  --grid-line: rgba(23, 26, 32, 0.045);
-  --card-glass: rgba(255, 255, 255, 0.88);
+  --grid-line: rgba(20, 24, 29, 0.04);
+  --card-glass: var(--apx-raised);
   --scrollbar-thumb: #c3cad4;
   --scrollbar-thumb-hover: #a8b1bd;
-  --selection-bg: rgba(201, 148, 0, 0.22);
-  --focus-ring: rgba(161, 118, 0, 0.85);
-  --glow-panel-gold: 0 2px 24px rgba(23, 26, 32, 0.06);
-  --glow-panel-cyan: 0 2px 24px rgba(23, 26, 32, 0.06);
-  --glow-panel-green: 0 2px 24px rgba(23, 26, 32, 0.06);
-  --glow-panel-purple: 0 2px 24px rgba(23, 26, 32, 0.06);
+  --selection-bg: rgba(11, 122, 88, 0.2);
+  --focus-ring: rgba(9, 98, 71, 0.85);
+  --backdrop: rgba(20, 24, 29, 0.45);
+  --glow-panel-gold: 0 2px 20px rgba(20, 24, 29, 0.05);
+  --glow-panel-cyan: 0 2px 20px rgba(20, 24, 29, 0.05);
+  --glow-panel-green: 0 2px 20px rgba(20, 24, 29, 0.05);
+  --glow-panel-purple: 0 2px 20px rgba(20, 24, 29, 0.05);
 }
 
 .color-scheme-dark {
@@ -244,7 +275,7 @@ textarea:focus-visible {
   background-image:
     linear-gradient(var(--grid-line) 1px, transparent 1px),
     linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-  background-size: 40px 40px;
+  background-size: 32px 32px;
   background-position: center center;
 }
 
@@ -256,18 +287,23 @@ textarea:focus-visible {
   background-image:
     linear-gradient(var(--grid-line) 1px, transparent 1px),
     linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-  background-size: 40px 40px;
+  background-size: 32px 32px;
   background-position: center center;
 }
 
-/* Terminal-style card */
+/* Terminal-style card — solid fill, crisp 1px border, flat elevation */
 .terminal-card {
   background: var(--card-glass);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-card);
+}
+
+/* Modal / drawer scrim (tokenized; replaces ad-hoc bg-black/60) */
+.backdrop {
+  background: var(--backdrop);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
 }
 
 /* ── ReactFlow chrome — themed via tokens so both modes match ── */
