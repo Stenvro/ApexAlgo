@@ -266,8 +266,8 @@ class CandlePoller:
         # Validate timeframe before attempting fetch
         try:
             exchange.load_markets()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("load_markets failed for %s (timeframe check skipped): %s", exchange_name, e)
         if exchange.timeframes and timeframe not in exchange.timeframes:
             supported = ', '.join(sorted(exchange.timeframes.keys()))
             logger.warning(
@@ -523,8 +523,8 @@ class CandlePoller:
 
         try:
             await asyncio.to_thread(_load_markets)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("load_markets failed for %s (timeframe check skipped): %s", exchange_name, e)
         if exchange.timeframes and timeframe not in exchange.timeframes:
             logger.warning("Poll skipped: %s does not support timeframe '%s'.", exchange_name, timeframe)
             return
