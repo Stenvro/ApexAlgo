@@ -24,7 +24,7 @@ const LazyFallback = ({ label }) => (
         <Skeleton className="h-6 w-24" />
       </div>
     </div>
-    <span className="text-muted text-[10px] uppercase tracking-[0.2em]">{label}</span>
+    <span className="text-muted text-2xs uppercase tracking-[0.2em]">{label}</span>
   </div>
 );
 
@@ -289,14 +289,14 @@ export default function App() {
 
       <button
         aria-label="Open sidebar"
-        className={`fixed top-3 left-4 z-[90] p-2 bg-raised/80 backdrop-blur-xl border border-border hover:border-accent rounded-md shadow-lg text-muted hover:text-accent transition-all duration-300 ${sidebarOpen ? 'opacity-0 pointer-events-none -translate-x-10' : 'opacity-100 translate-x-0'}`}
+        className={`fixed top-3 left-4 z-[90] p-2 bg-raised border border-border hover:border-accent rounded-md shadow-card text-muted hover:text-accent transition-all duration-300 ${sidebarOpen ? 'opacity-0 pointer-events-none -translate-x-10' : 'opacity-100 translate-x-0'}`}
         onClick={() => setSidebarOpenUser(true)}
       >
         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
       </button>
 
       {sidebarOpen && (
-         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[70] md:hidden fade-in" onClick={() => setSidebarOpen(false)}></div>
+         <div className="fixed inset-0 backdrop z-[70] md:hidden fade-in" onClick={() => setSidebarOpen(false)}></div>
       )}
 
       <Sidebar
@@ -315,7 +315,7 @@ export default function App() {
       <div className={`flex-1 flex flex-col h-full overflow-hidden relative transition-all duration-300 ease-in-out ${sidebarOpen ? 'md:ml-64' : 'ml-0'}`}>
 
         {HEADER_TITLES[activeView] && (
-          <header className="h-14 bg-raised/80 backdrop-blur-xl border-b border-border flex items-center justify-between px-4 md:px-6 shrink-0 relative">
+          <header className="h-12 bg-raised border-b border-border flex items-center justify-between px-4 md:px-6 shrink-0 relative">
             <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-accent/20 to-transparent" />
             <div className={`transition-all duration-300 ${!sidebarOpen ? 'ml-12' : 'ml-0'}`}>
               <h2 className="text-xs md:text-sm font-semibold text-text tracking-[0.15em] uppercase">

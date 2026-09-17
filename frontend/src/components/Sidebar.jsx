@@ -50,7 +50,7 @@ export default function Sidebar({ activeView, setActiveView, openCharts, closeCh
   const toggleTheme = () => setTheme(theme === 'dark' ? 'light' : 'dark');
 
   return (
-    <aside className={`fixed inset-y-0 left-0 z-[80] w-64 bg-raised/95 backdrop-blur-xl border-r border-border flex flex-col shadow-2xl transform transition-transform duration-300 ease-in-out ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+    <aside className={`fixed inset-y-0 left-0 z-[80] w-64 bg-raised border-r border-border flex flex-col shadow-2xl transform transition-transform duration-300 ease-in-out ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
 
       {/* Wordmark */}
       <div
@@ -66,7 +66,6 @@ export default function Sidebar({ activeView, setActiveView, openCharts, closeCh
           }
         }}
       >
-        <div className="absolute -top-8 -left-8 w-32 h-32 rounded-full blur-[60px] bg-accent/5 pointer-events-none" />
         <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-accent/20 to-transparent" />
         <div className="relative flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-md bg-accent/10 border border-accent/30 flex items-center justify-center shrink-0 group-hover:shadow-glow-accent transition-shadow duration-300">
@@ -78,7 +77,7 @@ export default function Sidebar({ activeView, setActiveView, openCharts, closeCh
             <h1 className="text-base font-bold tracking-[0.2em] text-text leading-none">
               APEX<span className="text-accent">ALGO</span>
             </h1>
-            <p className="text-faint text-[9px] mt-1 uppercase tracking-wider font-num">Engine Core</p>
+            <p className="text-faint text-3xs mt-1 uppercase tracking-wider font-num">Engine Core</p>
           </div>
         </div>
         <button
@@ -91,7 +90,7 @@ export default function Sidebar({ activeView, setActiveView, openCharts, closeCh
       </div>
 
       <nav className="flex-1 p-3 space-y-1 overflow-y-auto pb-24 md:pb-3">
-        <p className="px-3 pt-1 pb-2 text-[9px] font-bold text-faint uppercase tracking-[0.2em]">Terminal</p>
+        <p className="px-3 pt-1 pb-2 text-3xs font-bold text-faint uppercase tracking-[0.2em]">Terminal</p>
 
         {NAV_ITEMS.map(item => {
           const active = activeView === item.key;
@@ -117,7 +116,7 @@ export default function Sidebar({ activeView, setActiveView, openCharts, closeCh
         {runningBots && runningBots.length > 0 && (
           <div className="pt-5 pb-2 px-3 flex items-center border-t border-border/50 mt-4">
             <span className="w-1.5 h-1.5 bg-success rounded-full mr-2 animate-pulse shadow-[0_0_12px_var(--color-success)]"></span>
-            <span className="text-[9px] font-bold text-faint uppercase tracking-[0.2em]">Live Engines</span>
+            <span className="text-3xs font-bold text-faint uppercase tracking-[0.2em]">Live Engines</span>
           </div>
         )}
 
@@ -134,7 +133,7 @@ export default function Sidebar({ activeView, setActiveView, openCharts, closeCh
 
         {openCharts.length > 0 && (
           <div className="pt-5 pb-2 px-3 border-t border-border/50 mt-4">
-            <span className="text-[9px] font-bold text-faint uppercase tracking-[0.2em]">Active Charts</span>
+            <span className="text-3xs font-bold text-faint uppercase tracking-[0.2em]">Active Charts</span>
           </div>
         )}
 
@@ -145,9 +144,9 @@ export default function Sidebar({ activeView, setActiveView, openCharts, closeCh
               : 'text-muted hover:bg-overlay/40 hover:text-text border-transparent hover:border-border/50'
           }`}>
             <button className="flex-1 flex items-center gap-1.5 text-left truncate py-1.5 md:py-0" onClick={() => setActiveView(chart.id)}>
-              <span className="truncate">{chart.symbol}</span>
-              <span className="text-[9px] text-info border border-info/30 bg-info/5 px-1.5 py-0.5 rounded font-bold uppercase shrink-0">{(chart.exchange || 'okx').toUpperCase()}</span>
-              <span className="text-[9px] text-accent border border-accent/30 bg-accent/5 px-1.5 py-0.5 rounded font-num shrink-0">{chart.timeframe}</span>
+              <span className="truncate font-num">{chart.symbol}</span>
+              <span className="text-3xs text-info border border-info/30 bg-info/5 px-1.5 py-0.5 rounded-sm font-bold uppercase shrink-0">{(chart.exchange || 'okx').toUpperCase()}</span>
+              <span className="text-3xs text-accent border border-accent/30 bg-accent/5 px-1.5 py-0.5 rounded-sm font-num shrink-0">{chart.timeframe}</span>
             </button>
             <button
               onClick={(e) => closeChart(chart.id, e)}
@@ -167,17 +166,17 @@ export default function Sidebar({ activeView, setActiveView, openCharts, closeCh
             {backendOk ? (
               <>
                 <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse shadow-[0_0_8px_var(--color-success)]" />
-                <span className="text-[9px] font-bold text-muted uppercase tracking-widest">Online</span>
+                <span className="text-3xs font-bold text-muted uppercase tracking-widest">Online</span>
               </>
             ) : (
               <>
                 <span className="w-1.5 h-1.5 rounded-full bg-warn animate-pulse" />
-                <span className="text-[9px] font-bold text-warn uppercase tracking-widest">Reconnecting…</span>
+                <span className="text-3xs font-bold text-warn uppercase tracking-widest">Reconnecting…</span>
               </>
             )}
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="text-[9px] font-num text-faint">v1.0.0A</span>
+            <span className="text-3xs font-num text-faint">v1.0.0A</span>
             <button
               onClick={toggleTheme}
               title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}

@@ -33,7 +33,7 @@ function AttentionStrip({ items }) {
           <svg className="w-3.5 h-3.5 text-warn shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M12 3l9 16H3l9-16z" />
           </svg>
-          <h2 className="text-[10px] font-bold uppercase tracking-[0.2em] text-warn">Needs attention · {items.length}</h2>
+          <h2 className="text-2xs font-bold uppercase tracking-[0.2em] text-warn">Needs attention · {items.length}</h2>
         </div>
         <ul className="divide-y divide-border/50">
           {items.map((it) => (
@@ -41,11 +41,11 @@ function AttentionStrip({ items }) {
               <button
                 type="button"
                 onClick={it.onClick}
-                className="w-full flex items-center gap-3 px-5 py-2.5 text-left hover:bg-text/[0.03] transition-colors group"
+                className="w-full flex items-center gap-3 px-5 py-2.5 text-left hover:bg-overlay/50 transition-colors group"
               >
-                <span className={`text-[9px] font-bold uppercase tracking-wider shrink-0 w-24 ${it.tone === 'danger' ? 'text-danger' : 'text-warn'}`}>{it.kind}</span>
+                <span className={`text-3xs font-bold uppercase tracking-wider shrink-0 w-24 ${it.tone === 'danger' ? 'text-danger' : 'text-warn'}`}>{it.kind}</span>
                 <span className="text-xs text-text flex-1 min-w-0 truncate">{it.text}</span>
-                <span className="text-[10px] text-faint shrink-0 group-hover:text-muted transition-colors">{it.action} →</span>
+                <span className="text-2xs text-faint shrink-0 group-hover:text-muted transition-colors">{it.action} →</span>
               </button>
             </li>
           ))}
@@ -58,12 +58,8 @@ function AttentionStrip({ items }) {
 const StatTile = ({ label, value, sub, accent, icon, onClick, delay }) => (
   <button
     onClick={onClick}
-    className={`terminal-card relative text-left p-5 group transition-all duration-300 hover:border-border-strong hover:-translate-y-0.5 overflow-hidden fade-in-delay-${delay}`}
+    className={`terminal-card relative text-left p-4 group transition-all duration-300 hover:border-border-strong hover:-translate-y-0.5 overflow-hidden fade-in-delay-${delay}`}
   >
-    <div
-      className="pointer-events-none absolute -top-10 -right-10 w-28 h-28 rounded-full blur-3xl opacity-[0.08] group-hover:opacity-[0.14] transition-opacity duration-300"
-      style={{ background: accent }}
-    />
     <div className="flex items-start justify-between mb-4">
       <span
         className="w-9 h-9 rounded-md border flex items-center justify-center transition-transform duration-300 group-hover:scale-105"
@@ -80,8 +76,8 @@ const StatTile = ({ label, value, sub, accent, icon, onClick, delay }) => (
       </svg>
     </div>
     <p className="text-2xl font-num font-bold text-text leading-none mb-1.5">{value}</p>
-    <p className="text-[10px] font-bold uppercase tracking-widest text-muted">{label}</p>
-    {sub && <p className="text-[10px] text-faint mt-1">{sub}</p>}
+    <p className="text-2xs font-bold uppercase tracking-widest text-muted">{label}</p>
+    {sub && <p className="text-2xs text-faint mt-1">{sub}</p>}
   </button>
 );
 
@@ -167,11 +163,7 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
 
   return (
     <div className="w-full min-h-full relative overflow-y-auto overflow-x-hidden bg-bg grid-background">
-      {/* Ambient glows */}
-      <div className="absolute top-0 left-1/3 w-[500px] h-[500px] bg-accent/[0.04] rounded-full blur-[130px] pointer-events-none" />
-      <div className="absolute bottom-0 right-0 w-[400px] h-[400px] bg-info/[0.04] rounded-full blur-[130px] pointer-events-none" />
-
-      <div className="relative z-10 max-w-5xl mx-auto px-5 md:px-8 pt-20 md:pt-14 pb-10">
+      <div className="relative z-10 max-w-5xl mx-auto px-4 md:px-8 pt-20 md:pt-12 pb-10">
 
         {/* Hero */}
         <header className="mb-10 fade-in">
@@ -183,11 +175,11 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
               <Badge variant="accent">{activeBots.length} running</Badge>
             )}
           </div>
-          <h1 className="text-4xl md:text-5xl font-extrabold tracking-tight text-text mb-3">
+          <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight text-text mb-3">
             Apex<span className="text-accent">Algo</span>
-            <span className="ml-3 align-middle text-[10px] font-num font-medium text-faint tracking-[0.25em] uppercase">v1.0.0A</span>
+            <span className="ml-3 align-middle text-2xs font-num font-medium text-faint tracking-[0.25em] uppercase">v1.0.0A</span>
           </h1>
-          <p className="text-muted text-sm md:text-base max-w-2xl leading-relaxed">
+          <p className="text-muted text-sm max-w-2xl leading-relaxed">
             Self-hosted quantitative trading terminal. Design strategies visually,
             backtest locally against real market data, and deploy to live exchanges.
           </p>
@@ -287,12 +279,12 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
                     <li key={bot.id}>
                       <button
                         onClick={() => openBuilder(bot)}
-                        className="w-full flex items-center gap-4 px-5 py-3.5 text-left hover:bg-text/[0.03] transition-colors group"
+                        className="w-full flex items-center gap-4 px-5 py-3.5 text-left hover:bg-overlay/50 transition-colors group"
                       >
                         <span className={`w-2 h-2 rounded-full shrink-0 ${bot.is_active ? 'bg-success shadow-[0_0_8px_var(--color-success)] animate-pulse' : 'bg-faint/40'}`} />
                         <div className="flex-1 min-w-0">
                           <p className="text-sm font-semibold text-text truncate group-hover:text-text transition-colors">{bot.name}</p>
-                          <p className="text-[10px] text-faint font-num truncate mt-0.5">
+                          <p className="text-2xs text-faint font-num truncate mt-0.5">
                             {symbols.slice(0, 3).join(' · ') || 'no pairs'}
                             {symbols.length > 3 && ` +${symbols.length - 3}`}
                             {bot.settings?.timeframe && `  ·  ${bot.settings.timeframe}`}
@@ -317,7 +309,7 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
         </section>
 
         {/* Footer status line */}
-        <div className="mt-10 flex items-center gap-6 text-[9px] font-num uppercase tracking-widest fade-in-delay-6">
+        <div className="mt-10 flex items-center gap-6 text-3xs font-num uppercase tracking-widest fade-in-delay-6">
           {backendOk ? (
             <>
               <span className="flex items-center gap-1.5 text-faint"><span className="w-1 h-1 rounded-full bg-success" /> Engine core</span>
