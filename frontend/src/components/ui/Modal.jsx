@@ -72,10 +72,10 @@ const Modal = ({ config, customBody }) => {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="apex-modal-title" data-apex-modal="">
       <div
-        className="absolute inset-0 bg-black/70 backdrop-blur-md backdrop-enter"
+        className="absolute inset-0 backdrop backdrop-enter"
         onClick={busy ? undefined : config.onCancel}
       />
-      <div ref={panelRef} tabIndex={-1} className="relative outline-none modal-enter bg-overlay/95 backdrop-blur-xl border border-border rounded-lg max-w-md w-full shadow-pop overflow-hidden">
+      <div ref={panelRef} tabIndex={-1} className="relative outline-none modal-enter bg-overlay border border-border rounded-lg max-w-md w-full shadow-pop overflow-hidden">
         <div
           className="absolute top-0 left-0 right-0 h-px"
           style={{ background: `linear-gradient(90deg, transparent, color-mix(in srgb, ${colors.accent} 40%, transparent), transparent)` }}

@@ -84,7 +84,7 @@ const EquityCurve = ({ data }) => {
                 <svg className="w-8 h-8 text-border" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
                 </svg>
-                <p className="text-[10px] text-muted uppercase tracking-wider">Close at least 2 trades to render the curve</p>
+                <p className="text-2xs text-muted uppercase tracking-wider">Close at least 2 trades to render the curve</p>
             </div>
         );
     }
@@ -164,7 +164,7 @@ const EquityCurve = ({ data }) => {
             )}
         </svg>
         {hp && (
-            <div className={`absolute top-1 pointer-events-none z-10 bg-surface border border-border rounded-md shadow-lg px-3 py-2 text-[10px] font-num whitespace-nowrap ${flipTip ? '-translate-x-full' : ''}`}
+            <div className={`absolute top-1 pointer-events-none z-10 bg-surface border border-border rounded-md shadow-lg px-3 py-2 text-2xs font-num whitespace-nowrap ${flipTip ? '-translate-x-full' : ''}`}
                 style={{ left: `calc(${hoverPct}% ${flipTip ? '- 10px' : '+ 10px'})` }}>
                 <div className="text-muted mb-1">{hp.date.toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} <span className="text-faint">· trade #{hp.index}</span></div>
                 <div className="grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5">
@@ -189,7 +189,7 @@ const EquityCurve = ({ data }) => {
 const PaginationBar = ({ total, current, onPrev, onNext }) => total <= 1 ? null : (
     <div className="flex items-center bg-inset rounded-md border border-border overflow-hidden">
         <button disabled={current === 1} onClick={onPrev} className="px-2.5 py-1 hover:bg-overlay disabled:opacity-30 text-muted transition-colors" aria-label="Previous page">&#9664;</button>
-        <span className="text-[9px] font-bold text-text px-2 font-num">{current} / {total}</span>
+        <span className="text-3xs font-bold text-text px-2 font-num">{current} / {total}</span>
         <button disabled={current === total} onClick={onNext} className="px-2.5 py-1 hover:bg-overlay disabled:opacity-30 text-muted transition-colors" aria-label="Next page">&#9654;</button>
     </div>
 );
@@ -263,12 +263,12 @@ const DateRangeControl = ({ bounds, from, to, onChange }) => {
 
     return (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-3 mt-3 border-t border-border">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-muted shrink-0">Period</span>
+            <span className="text-2xs font-bold uppercase tracking-wider text-muted shrink-0">Period</span>
             <div className="flex items-center gap-1 shrink-0">
                 {RANGE_PRESETS.map(p => (
                     <button key={p.key} type="button"
                         onClick={() => onChange(presetStart(p.key, bounds.max), null)}
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold font-num transition-colors ${activePreset === p.key ? 'bg-accent/15 text-accent' : 'text-muted hover:text-text hover:bg-overlay'}`}>
+                        className={`px-2 py-0.5 rounded text-2xs font-bold font-num transition-colors ${activePreset === p.key ? 'bg-accent/15 text-accent' : 'text-muted hover:text-text hover:bg-overlay'}`}>
                         {p.label}
                     </button>
                 ))}
@@ -276,14 +276,14 @@ const DateRangeControl = ({ bounds, from, to, onChange }) => {
             <div className="flex items-center gap-2 shrink-0">
                 <input type="date" value={toDateInput(effFrom)} min={toDateInput(minDay)} max={toDateInput(effTo)}
                     onChange={e => { const t = Date.parse(e.target.value); if (!Number.isNaN(t)) commit(Math.min(t, effTo), effTo); }}
-                    className="bg-inset border border-border hover:border-border-strong focus:border-accent/70 rounded-md px-2 py-1 text-[11px] font-num text-text outline-none [color-scheme:dark] [html.light_&]:[color-scheme:light]" aria-label="Period start" />
+                    className="bg-inset border border-border hover:border-border-strong focus:border-accent/70 rounded-md px-2 py-1 text-xs font-num text-text outline-none [color-scheme:dark] [html.light_&]:[color-scheme:light]" aria-label="Period start" />
                 <span className="text-faint text-xs">→</span>
                 <input type="date" value={toDateInput(effTo)} min={toDateInput(effFrom)} max={toDateInput(maxDay)}
                     onChange={e => { const t = Date.parse(e.target.value); if (!Number.isNaN(t)) commit(effFrom, Math.max(t, effFrom)); }}
-                    className="bg-inset border border-border hover:border-border-strong focus:border-accent/70 rounded-md px-2 py-1 text-[11px] font-num text-text outline-none [color-scheme:dark] [html.light_&]:[color-scheme:light]" aria-label="Period end" />
+                    className="bg-inset border border-border hover:border-border-strong focus:border-accent/70 rounded-md px-2 py-1 text-xs font-num text-text outline-none [color-scheme:dark] [html.light_&]:[color-scheme:light]" aria-label="Period end" />
             </div>
             <div className="flex-1 min-w-[220px] flex items-center gap-3">
-                <span className="text-[10px] font-num text-faint shrink-0 hidden md:inline">{fmtShortDate(minDay)}</span>
+                <span className="text-2xs font-num text-faint shrink-0 hidden md:inline">{fmtShortDate(minDay)}</span>
                 <div className="relative flex-1 h-4">
                     <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1 rounded-full bg-inset border border-border" />
                     <div className="absolute top-1/2 -translate-y-1/2 h-1 rounded-full bg-accent/70"
@@ -295,9 +295,9 @@ const DateRangeControl = ({ bounds, from, to, onChange }) => {
                         onChange={e => { const i = Math.max(Number(e.target.value), fromIdx); commit(effFrom, minDay + i * DAY); }}
                         className={`${rangeThumb} w-full z-10`} />
                 </div>
-                <span className="text-[10px] font-num text-faint shrink-0 hidden md:inline">{fmtShortDate(maxDay)}</span>
+                <span className="text-2xs font-num text-faint shrink-0 hidden md:inline">{fmtShortDate(maxDay)}</span>
             </div>
-            <span className="text-[10px] font-num text-muted shrink-0">
+            <span className="text-2xs font-num text-muted shrink-0">
                 {isAll ? 'Full history' : `${spanDays.toLocaleString()} days`}
                 {!isAll && (
                     <button type="button" onClick={() => onChange(null, null)} className="ml-2 text-accent hover:underline font-bold">reset</button>
@@ -1092,8 +1092,8 @@ export default function TradeManager({ setError, bots = [], request = null }) {
 
     // ── Shared styles ─────────────────────────────────────────────────────────
 
-    const tabClass = (active) => `pb-2.5 text-[11px] font-bold uppercase tracking-wider transition-all duration-200 border-b-2 ${active ? 'text-accent border-accent' : 'text-muted border-transparent hover:text-text'}`;
-    const thClass = 'px-4 py-2.5 text-[9px] font-bold uppercase tracking-wider text-muted whitespace-nowrap';
+    const tabClass = (active) => `pb-2.5 text-xs font-bold uppercase tracking-wider transition-all duration-200 border-b-2 ${active ? 'text-accent border-accent' : 'text-muted border-transparent hover:text-text'}`;
+    const thClass = 'px-3 py-1.5 text-3xs font-bold uppercase tracking-wider text-muted whitespace-nowrap';
 
     const initialLoading = loading && !hasLoadedOnce;
 
@@ -1102,10 +1102,10 @@ export default function TradeManager({ setError, bots = [], request = null }) {
     // ─────────────────────────────────────────────────────────────────────────
 
     return (
-        <PageShell glowColor="cyan">
+        <PageShell>
 
             {/* ── FILTER BAR ─────────────────────────────────────────────────── */}
-            <div className="terminal-card px-4 py-3 sticky top-0 z-20">
+            <div className="terminal-card px-3 py-2 sticky top-0 z-20">
                 <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
                     <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 flex-1 min-w-[280px] max-w-[880px]">
                         <Select label="Algorithm" value={filterBot} onChange={e => { setFilterBot(e.target.value); resetPage(); }} className="py-1.5! text-xs!">
@@ -1139,7 +1139,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             Export
                         </Button>
                         {lastUpdated && (
-                            <span className="text-[10px] text-faint font-num whitespace-nowrap" title={anyBotActive ? 'Refreshes every 30 s while a bot is running' : 'Press Sync to refresh'}>
+                            <span className="text-2xs text-faint font-num whitespace-nowrap" title={anyBotActive ? 'Refreshes every 30 s while a bot is running' : 'Press Sync to refresh'}>
                                 updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{anyBotActive ? ' · auto' : ''}
                             </span>
                         )}
@@ -1149,7 +1149,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                 <DateRangeControl bounds={dateBounds} from={dateFrom} to={dateTo}
                     onChange={(f, t) => { setDateFrom(f); setDateTo(t); resetPage(); }} />
                 {serverFrom !== null && (
-                    <div className="flex items-center gap-2 pt-2 text-[10px] text-faint font-num">
+                    <div className="flex items-center gap-2 pt-2 text-2xs text-faint font-num">
                         <span>Loaded trades since {new Date(serverFrom).toISOString().slice(0, 10)} (earliest backtest window of your algorithms; open positions always included)</span>
                         <button type="button" onClick={() => setFullHistory(true)}
                             className="text-accent hover:underline font-bold" disabled={loading}>Load full history</button>
@@ -1166,11 +1166,11 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             ) : (
                 <>
                 {stats.mixed && (
-                    <div role="status" className="flex flex-wrap items-center gap-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-[10px] text-text">
+                    <div role="status" className="flex flex-wrap items-center gap-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-2xs text-text">
                         <span className="font-bold uppercase tracking-wider text-warn">Mixed modes</span>
                         <span className="text-muted">Net PnL is shown per mode — simulated and real trades are never added up.</span>
                         <span className="flex items-center gap-1 ml-auto">
-                            {stats.modes.map(m => <ModeBadge key={m} mode={m} short className="text-[8px]!" />)}
+                            {stats.modes.map(m => <ModeBadge key={m} mode={m} short className="text-3xs!" />)}
                         </span>
                     </div>
                 )}
@@ -1182,28 +1182,28 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                 <span className="flex flex-col gap-0.5 text-sm">
                                     {stats.modes.map(m => (
                                         <span key={m} className="flex items-center justify-between gap-2">
-                                            <ModeBadge mode={m} short className="text-[8px]!" />
+                                            <ModeBadge mode={m} short className="text-3xs!" />
                                             <span className={`font-num ${pnlColor(stats.pnlByMode[m])}`}>{pnlSign(stats.pnlByMode[m])}${safeNum(Math.abs(stats.pnlByMode[m]))}</span>
                                         </span>
                                     ))}
                                 </span>
                             }
                             sub="pick one mode for a return %"
-                            color="white"
+                            color="neutral"
                         />
                     ) : (
                         <StatCard
                             label={`Net PNL${stats.modes.length === 1 ? ` · ${stats.modes[0] === 'forward_test' ? 'forward test' : stats.modes[0]}` : ''}`}
                             value={`${stats.netPnl >= 0 ? '+' : '-'}$${safeNum(Math.abs(stats.netPnl))}`}
                             sub={stats.total > 0 ? `${stats.returnPct >= 0 ? '+' : ''}${safeNum(stats.returnPct, 1)}% on $${safeNum(stats.totalCapital, 0)}` : 'no closed trades'}
-                            color={stats.netPnl >= 0 ? 'green' : 'red'}
+                            color={stats.netPnl >= 0 ? 'success' : 'danger'}
                         />
                     )}
                     <StatCard
                         label="Starting Capital"
                         value={stats.botCount > 0 ? `$${safeNum(stats.totalCapital, 0)}` : '—'}
                         sub={stats.botCount > 1 ? `total across ${stats.botCount} bots` : (stats.botCount === 1 ? 'allocated to this bot' : 'no bots in view')}
-                        color="gold"
+                        color="accent"
                     />
                     <StatCard
                         label="Max Drawdown"
@@ -1213,63 +1213,63 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                         sub={engineDrawdown !== null
                             ? 'engine: mark-to-market (backtest)'
                             : 'closed trades only — intra-trade dips not included'}
-                        color="red"
+                        color="danger"
                     />
                     <StatCard
                         label="Return / Risk"
                         value={stats.total > 1 ? safeNum(stats.sharpe) : '—'}
                         sub="mean return ÷ std dev"
-                        color={stats.sharpe > 1 ? 'green' : stats.sharpe > 0 ? 'gold' : 'red'}
+                        color={stats.sharpe > 1 ? 'success' : stats.sharpe > 0 ? 'accent' : 'danger'}
                     />
 
                     <StatCard
                         label="Trades"
                         value={stats.total > 0 ? stats.total : '—'}
                         sub={stats.openCount > 0 ? `closed · ${stats.openCount} open now` : 'closed'}
-                        color="white"
+                        color="neutral"
                     />
                     <StatCard
                         label="Win Rate"
                         value={stats.total > 0 ? `${safeNum(stats.winRate, 1)}%` : '—'}
                         sub={`${stats.wins} wins / ${stats.losses} losses`}
-                        color="cyan"
+                        color="info"
                     />
                     <StatCard
                         label="Profit Factor"
                         value={stats.total > 0 ? (stats.profitFactor >= 999 ? '∞' : safeNum(stats.profitFactor)) : '—'}
                         sub="gross profit / gross loss"
-                        color="gold"
+                        color="accent"
                     />
                     <StatCard
                         label="Total Fees Paid"
                         value={stats.total > 0 ? `-$${safeNum(stats.totalFees)}` : '—'}
                         sub="all linked orders"
-                        color={stats.totalFees > 0 ? 'red' : 'white'}
+                        color={stats.totalFees > 0 ? 'danger' : 'neutral'}
                     />
 
                     <StatCard
                         label="Avg Win"
                         value={stats.wins > 0 ? `+$${safeNum(stats.avgWin)}` : '—'}
                         sub="per winning trade"
-                        color="green"
+                        color="success"
                     />
                     <StatCard
                         label="Avg Loss"
                         value={stats.losses > 0 ? `-$${safeNum(stats.avgLoss)}` : '—'}
                         sub="per losing trade"
-                        color="red"
+                        color="danger"
                     />
                     <StatCard
                         label="Avg Hold Time"
                         value={stats.total > 0 ? formatHoldTime(stats.avgHoldMs) : '—'}
                         sub="per closed position"
-                        color="white"
+                        color="neutral"
                     />
                     <StatCard
                         label="Avg Trade"
                         value={stats.total > 0 ? `${stats.avgTrade >= 0 ? '+' : '-'}$${safeNum(Math.abs(stats.avgTrade))}` : '—'}
                         sub="net PnL per closed trade"
-                        color={stats.total > 0 ? (stats.avgTrade >= 0 ? 'green' : 'red') : 'white'}
+                        color={stats.total > 0 ? (stats.avgTrade >= 0 ? 'success' : 'danger') : 'neutral'}
                     />
                 </div>
                 </>
@@ -1282,12 +1282,12 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                 <div className="terminal-card glow-panel-cyan p-5 flex-1 min-w-0">
                     <div className="flex items-center justify-between mb-4">
                         <div>
-                            <h2 className="text-[11px] font-bold uppercase tracking-wider text-text">Equity Curve</h2>
-                            <p className="text-[9px] text-muted mt-0.5 uppercase tracking-wider">Cumulative PNL — closed trades</p>
+                            <h2 className="text-xs font-bold uppercase tracking-wider text-text">Equity Curve</h2>
+                            <p className="text-3xs text-muted mt-0.5 uppercase tracking-wider">Cumulative PNL — closed trades</p>
                         </div>
                         <div className="flex items-center gap-4">
                             {/* Legend */}
-                            <div className="hidden sm:flex items-center gap-3 text-[9px] text-muted uppercase tracking-wider">
+                            <div className="hidden sm:flex items-center gap-3 text-3xs text-muted uppercase tracking-wider">
                                 <span className="flex items-center gap-1.5">
                                     <span className={`w-3 h-0.5 rounded-full ${equityCurveData.length >= 2 && equityCurveData[equityCurveData.length - 1].value < 0 ? 'bg-danger' : 'bg-success'}`} />
                                     Cumulative PNL
@@ -1304,7 +1304,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         <span className={`block text-sm font-num font-bold ${pnlColor(last.value)}`}>
                                             {pnlSign(last.value)}${safeNum(Math.abs(last.value))}
                                         </span>
-                                        <span className="block text-[9px] font-num text-muted">
+                                        <span className="block text-3xs font-num text-muted">
                                             ${safeNum(last.capital, 0)} → <span className="text-text">${safeNum(last.equity, 0)}</span>
                                         </span>
                                     </span>
@@ -1318,10 +1318,10 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                 </div>
 
                 {/* Buy & Hold Comparison */}
-                <div className="terminal-card p-5 lg:w-[340px] shrink-0">
+                <div className="terminal-card p-4 lg:w-[340px] shrink-0">
                     <div className="mb-4">
-                        <h2 className="text-[11px] font-bold uppercase tracking-wider text-text">Strategy vs Buy & Hold</h2>
-                        <p className="text-[9px] text-muted mt-0.5 uppercase tracking-wider">
+                        <h2 className="text-xs font-bold uppercase tracking-wider text-text">Strategy vs Buy & Hold</h2>
+                        <p className="text-3xs text-muted mt-0.5 uppercase tracking-wider">
                             {buyAndHoldData.basis === 'backtest' && buyAndHoldData.range
                                 ? `Backtest range ${fmtShortDate(buyAndHoldData.range.from)} → ${fmtShortDate(buyAndHoldData.range.to)}`
                                 : buyAndHoldData.basis === 'backtest'
@@ -1338,7 +1338,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             <Skeleton className="h-20 w-full rounded-lg" />
                         </div>
                     ) : buyAndHoldData.rows.length === 0 ? (
-                        <div className="flex items-center justify-center h-32 text-muted text-[10px] text-center">
+                        <div className="flex items-center justify-center h-32 text-muted text-2xs text-center">
                             No closed trades to compare.<br />Close positions to see the comparison.
                         </div>
                     ) : (
@@ -1348,12 +1348,12 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                 return (
                                     <div className="bg-accent/5 border border-accent/30 rounded-lg p-3">
                                         <div className="flex items-center justify-between mb-1">
-                                            <span className="text-[10px] font-bold text-text">Portfolio <span className="text-muted font-normal">equal-weight · {p.symbols} symbols</span></span>
-                                            <span className={`text-[9px] font-bold font-num px-1.5 py-0.5 rounded ${p.edge >= 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
+                                            <span className="text-2xs font-bold text-text">Portfolio <span className="text-muted font-normal">equal-weight · {p.symbols} symbols</span></span>
+                                            <span className={`text-3xs font-bold font-num px-1.5 py-0.5 rounded ${p.edge >= 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
                                                 {p.edge >= 0 ? '↑' : '↓'} Edge: {pnlSign(p.edge)}{safeNum(p.edge, 1)}%
                                             </span>
                                         </div>
-                                        <div className="flex justify-between text-[9px] font-num">
+                                        <div className="flex justify-between text-3xs font-num">
                                             <span className="text-muted uppercase font-bold">Strategy <span className={pnlColor(p.strategyPct)}>{pnlSign(p.strategyPct)}{safeNum(p.strategyPct, 1)}%</span></span>
                                             <span className="text-muted uppercase font-bold">Buy & Hold <span className={pnlColor(p.bhPct)}>{pnlSign(p.bhPct)}{safeNum(p.bhPct, 1)}%</span></span>
                                         </div>
@@ -1363,9 +1363,9 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             {buyAndHoldData.rows.map(d => (
                                 <div key={d.symbol} className="bg-bg/50 border border-border rounded-lg p-3">
                                     <div className="flex items-center justify-between mb-2">
-                                        <span className="text-[10px] font-bold text-text font-num">{d.symbol}</span>
+                                        <span className="text-2xs font-bold text-text font-num">{d.symbol}</span>
                                         {d.edge !== null && (
-                                            <span className={`text-[9px] font-bold font-num px-1.5 py-0.5 rounded ${d.edge >= 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
+                                            <span className={`text-3xs font-bold font-num px-1.5 py-0.5 rounded ${d.edge >= 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
                                                 {d.edge >= 0 ? '↑' : '↓'} Edge: {pnlSign(d.edge)}{safeNum(d.edge, 1)}%
                                             </span>
                                         )}
@@ -1374,8 +1374,8 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         {/* Strategy bar */}
                                         <div>
                                             <div className="flex justify-between mb-0.5">
-                                                <span className="text-[9px] text-muted uppercase font-bold">Strategy</span>
-                                                <span className={`text-[9px] font-num font-bold ${pnlColor(d.strategyPct)}`}>
+                                                <span className="text-3xs text-muted uppercase font-bold">Strategy</span>
+                                                <span className={`text-3xs font-num font-bold ${pnlColor(d.strategyPct)}`}>
                                                     {pnlSign(d.strategyPct)}{safeNum(d.strategyPct, 1)}%
                                                 </span>
                                             </div>
@@ -1389,8 +1389,8 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         {/* Buy & Hold bar */}
                                         <div>
                                             <div className="flex justify-between mb-0.5">
-                                                <span className="text-[9px] text-muted uppercase font-bold">Buy & Hold</span>
-                                                <span className={`text-[9px] font-num font-bold ${d.bhPct !== null ? pnlColor(d.bhPct) : 'text-muted'}`}>
+                                                <span className="text-3xs text-muted uppercase font-bold">Buy & Hold</span>
+                                                <span className={`text-3xs font-num font-bold ${d.bhPct !== null ? pnlColor(d.bhPct) : 'text-muted'}`}>
                                                     {d.bhPct !== null ? `${pnlSign(d.bhPct)}${safeNum(d.bhPct, 1)}%` : (priceSyncing ? 'Loading…' : 'N/A')}
                                                 </span>
                                             </div>
@@ -1416,15 +1416,15 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             {!initialLoading && closedPositions.length > 0 && (
                 <div className="flex flex-col lg:flex-row gap-4">
                     <div className="terminal-card flex-1 min-w-0 overflow-hidden">
-                        <div className="px-5 py-3.5 border-b border-border bg-bg/40 flex items-center justify-between gap-3 flex-wrap">
+                        <div className="px-4 py-2.5 border-b border-border bg-bg/40 flex items-center justify-between gap-3 flex-wrap">
                             <div>
-                                <h2 className="text-[11px] font-bold uppercase tracking-wider text-text">Performance Breakdown</h2>
-                                <p className="text-[9px] text-muted mt-0.5 uppercase tracking-wider">Closed trades in the current filter, best first</p>
+                                <h2 className="text-xs font-bold uppercase tracking-wider text-text">Performance Breakdown</h2>
+                                <p className="text-3xs text-muted mt-0.5 uppercase tracking-wider">Closed trades in the current filter, best first</p>
                             </div>
                             <div className="flex bg-inset rounded-md border border-border overflow-hidden">
                                 {[['bot', 'By algorithm'], ['symbol', 'By pair']].map(([v, l]) => (
                                     <button key={v} type="button" onClick={() => setBreakdownView(v)}
-                                        className={`px-3 py-1.5 text-[9px] font-bold uppercase tracking-wider transition-colors ${breakdownView === v ? 'bg-accent/10 text-accent' : 'text-muted hover:text-text'}`}>
+                                        className={`px-3 py-1.5 text-3xs font-bold uppercase tracking-wider transition-colors ${breakdownView === v ? 'bg-accent/10 text-accent' : 'text-muted hover:text-text'}`}>
                                         {l}
                                     </button>
                                 ))}
@@ -1432,7 +1432,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                         </div>
                         <div className="overflow-x-auto max-h-[320px] overflow-y-auto custom-scrollbar">
                             <table className="w-full text-left whitespace-nowrap">
-                                <thead className="bg-bg/80 text-muted border-b border-border sticky top-0">
+                                <thead className="bg-surface text-muted border-b border-border sticky top-0">
                                     <tr>
                                         <th className={thClass}>{breakdownView === 'bot' ? 'Algorithm' : 'Pair'}</th>
                                         <th className={`${thClass} text-right`}>Trades</th>
@@ -1447,37 +1447,37 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         <th className={`${thClass} text-right`}>Fees</th>
                                     </tr>
                                 </thead>
-                                <tbody className="text-[11px]">
+                                <tbody className="text-xs">
                                     {(breakdownView === 'bot' ? breakdownRows.byBot : breakdownRows.bySymbol).map(r => (
-                                        <tr key={r.key} className="border-b border-border/40 hover:bg-text/[0.03] transition-colors">
-                                            <td className="px-4 py-2.5 font-bold text-text">
+                                        <tr key={r.key} className="border-b border-border/40 hover:bg-overlay/50 transition-colors">
+                                            <td className="px-3 py-1.5 font-bold text-text">
                                                 <div className="flex items-center gap-2 min-w-0">
                                                     {breakdownView === 'bot' && <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${r.isActive ? 'bg-success animate-pulse' : 'bg-faint/40'}`} />}
                                                     <span className="truncate max-w-[220px]" title={r.label}>{r.label}</span>
-                                                    {breakdownView === 'bot' && r.timeframe && <span className="text-[9px] font-num text-accent">{r.timeframe}</span>}
-                                                    {r.modes.map(m => <ModeBadge key={m} mode={m} short className="text-[8px]!" />)}
+                                                    {breakdownView === 'bot' && r.timeframe && <span className="text-3xs font-num text-accent">{r.timeframe}</span>}
+                                                    {r.modes.map(m => <ModeBadge key={m} mode={m} short className="text-3xs!" />)}
                                                 </div>
                                             </td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted">{r.trades} <span className="text-faint">({r.wins}W)</span></td>
-                                            <td className="px-4 py-2.5 text-right font-num text-info">{safeNum(r.winRate, 1)}%</td>
-                                            <td className={`px-4 py-2.5 text-right font-num font-bold ${pnlColor(r.net)}`}>{pnlSign(r.net)}${safeNum(Math.abs(r.net))}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">{r.trades} <span className="text-faint">({r.wins}W)</span></td>
+                                            <td className="px-3 py-1.5 text-right font-num text-info">{safeNum(r.winRate, 1)}%</td>
+                                            <td className={`px-3 py-1.5 text-right font-num font-bold ${pnlColor(r.net)}`}>{pnlSign(r.net)}${safeNum(Math.abs(r.net))}</td>
                                             {breakdownView === 'bot' && (
-                                                <td className={`px-4 py-2.5 text-right font-num ${r.returnPct === null ? 'text-faint' : pnlColor(r.returnPct)}`}>
+                                                <td className={`px-3 py-1.5 text-right font-num ${r.returnPct === null ? 'text-faint' : pnlColor(r.returnPct)}`}>
                                                     {r.returnPct === null ? '—' : `${pnlSign(r.returnPct)}${safeNum(r.returnPct, 1)}%`}
                                                     {r.capital && <span className="text-faint ml-1">on ${safeNum(r.capital, 0)}</span>}
                                                 </td>
                                             )}
-                                            <td className="px-4 py-2.5 text-right font-num text-muted">{r.profitFactor === Infinity ? '∞' : safeNum(r.profitFactor)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">{r.profitFactor === Infinity ? '∞' : safeNum(r.profitFactor)}</td>
                                             {breakdownView === 'bot' && (
-                                                <td className="px-4 py-2.5 text-right font-num text-danger">{r.engineDD !== null ? `-${safeNum(r.engineDD, 1)}%` : '—'}</td>
+                                                <td className="px-3 py-1.5 text-right font-num text-danger">{r.engineDD !== null ? `-${safeNum(r.engineDD, 1)}%` : '—'}</td>
                                             )}
-                                            <td className="px-4 py-2.5 text-right font-num"><span className="text-success">+${safeNum(Math.max(0, r.best))}</span> <span className="text-faint">/</span> <span className="text-danger">-${safeNum(Math.abs(Math.min(0, r.worst)))}</span></td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted">{r.avgHoldMs ? formatHoldTime(r.avgHoldMs) : '—'}</td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted"
+                                            <td className="px-3 py-1.5 text-right font-num"><span className="text-success">+${safeNum(Math.max(0, r.best))}</span> <span className="text-faint">/</span> <span className="text-danger">-${safeNum(Math.abs(Math.min(0, r.worst)))}</span></td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">{r.avgHoldMs ? formatHoldTime(r.avgHoldMs) : '—'}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted"
                                                 title={r.longestFlat ? `${fmtShortDate(r.longestFlat.from)} – ${fmtShortDate(r.longestFlat.to)}` : 'never flat in this range'}>
                                                 {r.longestFlat ? formatHoldTime(r.longestFlat.ms) : '—'}
                                             </td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted">${safeNum(r.fees)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">${safeNum(r.fees)}</td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -1485,19 +1485,19 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                         </div>
                     </div>
 
-                    <div className="terminal-card p-5 lg:w-[340px] shrink-0">
+                    <div className="terminal-card p-4 lg:w-[340px] shrink-0">
                         <div className="mb-4">
-                            <h2 className="text-[11px] font-bold uppercase tracking-wider text-text">Monthly Net PNL</h2>
-                            <p className="text-[9px] text-muted mt-0.5 uppercase tracking-wider">By close date (UTC) · last {monthlyReturns.length} months</p>
+                            <h2 className="text-xs font-bold uppercase tracking-wider text-text">Monthly Net PNL</h2>
+                            <p className="text-3xs text-muted mt-0.5 uppercase tracking-wider">By close date (UTC) · last {monthlyReturns.length} months</p>
                         </div>
                         <div className="space-y-2 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
                             {monthlyReturns.map(m => (
                                 <div key={m.key} className="flex items-center gap-3">
-                                    <span className="text-[9px] font-num text-muted w-14 shrink-0">{m.label}</span>
+                                    <span className="text-3xs font-num text-muted w-14 shrink-0">{m.label}</span>
                                     <div className="flex-1 h-2 bg-border/60 rounded-full overflow-hidden flex">
                                         <div className={`h-full rounded-full ${m.net >= 0 ? 'bg-success' : 'bg-danger'}`} style={{ width: `${Math.max(2, m.share * 100)}%` }} />
                                     </div>
-                                    <span className={`text-[10px] font-num font-bold w-20 text-right shrink-0 ${pnlColor(m.net)}`} title={`${m.trades} trades`}>{pnlSign(m.net)}${safeNum(Math.abs(m.net), 0)}</span>
+                                    <span className={`text-2xs font-num font-bold w-20 text-right shrink-0 ${pnlColor(m.net)}`} title={`${m.trades} trades`}>{pnlSign(m.net)}${safeNum(Math.abs(m.net), 0)}</span>
                                 </div>
                             ))}
                         </div>
@@ -1508,15 +1508,15 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             {/* ── CAPITAL ALLOCATION ─────────────────────────────────────────── */}
             {!initialLoading && allocation.byBot.length > 0 && (
                 <div className="terminal-card overflow-hidden">
-                    <div className="px-5 py-3.5 border-b border-border bg-bg/40 flex items-center justify-between gap-3 flex-wrap">
+                    <div className="px-4 py-2.5 border-b border-border bg-bg/40 flex items-center justify-between gap-3 flex-wrap">
                         <div>
-                            <h2 className="text-[11px] font-bold uppercase tracking-wider text-text">Capital Allocation</h2>
-                            <p className="text-[9px] text-muted mt-0.5 uppercase tracking-wider">
+                            <h2 className="text-xs font-bold uppercase tracking-wider text-text">Capital Allocation</h2>
+                            <p className="text-3xs text-muted mt-0.5 uppercase tracking-wider">
                                 Each algorithm owns one pool shared by all its pairs · entries take a % of free equity · pairs have no fixed budget
                             </p>
                         </div>
                         <div className="flex items-center gap-4 flex-wrap">
-                            <div className="flex items-center gap-4 text-[10px] font-num">
+                            <div className="flex items-center gap-4 text-2xs font-num">
                                 <span className="text-muted">Pools <span className="text-text font-bold">${safeNum(allocation.totalPool, 0)}</span></span>
                                 <span className="text-muted">Deployed <span className={`font-bold ${allocation.totalDeployed > 0 ? 'text-accent' : 'text-text'}`}>${safeNum(allocation.totalDeployed, 0)}</span></span>
                                 <span className="text-muted">Max exposure <span className="text-text font-bold">${safeNum(allocation.totalExposure, 0)}</span></span>
@@ -1524,7 +1524,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             <div className="flex bg-inset rounded-md border border-border overflow-hidden">
                                 {[['bot', 'By algorithm'], ['pair', 'By pair']].map(([v, l]) => (
                                     <button key={v} type="button" onClick={() => setAllocationView(v)}
-                                        className={`px-3 py-1.5 text-[9px] font-bold uppercase tracking-wider transition-colors ${allocationView === v ? 'bg-accent/10 text-accent' : 'text-muted hover:text-text'}`}>
+                                        className={`px-3 py-1.5 text-3xs font-bold uppercase tracking-wider transition-colors ${allocationView === v ? 'bg-accent/10 text-accent' : 'text-muted hover:text-text'}`}>
                                         {l}
                                     </button>
                                 ))}
@@ -1534,7 +1534,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                     <div className="overflow-x-auto max-h-[320px] overflow-y-auto custom-scrollbar">
                         {allocationView === 'bot' ? (
                             <table className="w-full text-left whitespace-nowrap">
-                                <thead className="bg-bg/80 text-muted border-b border-border sticky top-0">
+                                <thead className="bg-surface text-muted border-b border-border sticky top-0">
                                     <tr>
                                         <th className={thClass}>Algorithm</th>
                                         <th className={`${thClass} text-right`}>Pool</th>
@@ -1546,32 +1546,32 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         <th className={thClass}>Pairs</th>
                                     </tr>
                                 </thead>
-                                <tbody className="text-[11px]">
+                                <tbody className="text-xs">
                                     {allocation.byBot.map(r => (
-                                        <tr key={r.key} className="border-b border-border/40 hover:bg-text/[0.03] transition-colors">
-                                            <td className="px-4 py-2.5 font-bold text-text">
+                                        <tr key={r.key} className="border-b border-border/40 hover:bg-overlay/50 transition-colors">
+                                            <td className="px-3 py-1.5 font-bold text-text">
                                                 <div className="flex items-center gap-2 min-w-0">
                                                     <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${r.isActive ? 'bg-success animate-pulse' : 'bg-faint/40'}`} />
                                                     <span className="truncate max-w-[220px]" title={r.label}>{r.label}</span>
-                                                    {r.timeframe && <span className="text-[9px] font-num text-accent">{r.timeframe}</span>}
-                                                    <ModeBadge mode={r.mode} short className="text-[8px]!" />
+                                                    {r.timeframe && <span className="text-3xs font-num text-accent">{r.timeframe}</span>}
+                                                    <ModeBadge mode={r.mode} short className="text-3xs!" />
                                                 </div>
                                             </td>
-                                            <td className="px-4 py-2.5 text-right font-num font-bold text-text">${safeNum(r.pool, 0)}</td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted">
+                                            <td className="px-3 py-1.5 text-right font-num font-bold text-text">${safeNum(r.pool, 0)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">
                                                 ${safeNum(r.entryUsd, 0)} <span className="text-faint">({r.isFixed ? 'fixed' : `${safeNum(r.entryPct, 0)}%`})</span>
                                             </td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted">{r.maxPositions}</td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted">
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">{r.maxPositions}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">
                                                 ${safeNum(r.exposureUsd, 0)} <span className="text-faint">({safeNum(r.exposurePct, 0)}%)</span>
                                             </td>
-                                            <td className={`px-4 py-2.5 text-right font-num ${r.cap > 0 ? 'text-muted' : 'text-faint'}`}>{r.cap > 0 ? `$${safeNum(r.cap, 0)}` : (r.mode === 'live' ? 'none!' : '—')}</td>
-                                            <td className="px-4 py-2.5 text-right font-num">
+                                            <td className={`px-3 py-1.5 text-right font-num ${r.cap > 0 ? 'text-muted' : 'text-faint'}`}>{r.cap > 0 ? `$${safeNum(r.cap, 0)}` : (r.mode === 'live' ? 'none!' : '—')}</td>
+                                            <td className="px-3 py-1.5 text-right font-num">
                                                 {r.openCount > 0 ? (
                                                     <span className="text-accent font-bold">${safeNum(r.deployed, 0)} <span className="text-faint font-normal">· {r.openCount} open · ${safeNum(r.free, 0)} free</span></span>
                                                 ) : <span className="text-faint">idle · ${safeNum(r.pool, 0)} free</span>}
                                             </td>
-                                            <td className="px-4 py-2.5 font-num text-muted">
+                                            <td className="px-3 py-1.5 font-num text-muted">
                                                 <span className="text-text font-bold">{r.symbols.length}</span>
                                                 <span className="text-faint ml-1.5 truncate inline-block max-w-[260px] align-bottom" title={r.symbols.join(', ')}>{r.symbols.join(', ')}</span>
                                             </td>
@@ -1581,7 +1581,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             </table>
                         ) : (
                             <table className="w-full text-left whitespace-nowrap">
-                                <thead className="bg-bg/80 text-muted border-b border-border sticky top-0">
+                                <thead className="bg-surface text-muted border-b border-border sticky top-0">
                                     <tr>
                                         <th className={thClass}>Pair</th>
                                         <th className={`${thClass} text-right`}>Algorithms</th>
@@ -1591,19 +1591,19 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         <th className={thClass}>Traded by</th>
                                     </tr>
                                 </thead>
-                                <tbody className="text-[11px]">
+                                <tbody className="text-xs">
                                     {allocation.byPair.map(r => (
-                                        <tr key={r.key} className="border-b border-border/40 hover:bg-text/[0.03] transition-colors">
-                                            <td className="px-4 py-2.5 font-bold text-text">{r.label}</td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted">{r.bots.length}</td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted" title="Sum of the pools this pair competes for — shared with the other pairs of each algorithm">${safeNum(r.poolAccess, 0)}</td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted" title="What one entry signal on this pair may commit, summed over all algorithms">${safeNum(r.maxEntry, 0)}</td>
-                                            <td className="px-4 py-2.5 text-right font-num">
+                                        <tr key={r.key} className="border-b border-border/40 hover:bg-overlay/50 transition-colors">
+                                            <td className="px-3 py-1.5 font-bold text-text">{r.label}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">{r.bots.length}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted" title="Sum of the pools this pair competes for — shared with the other pairs of each algorithm">${safeNum(r.poolAccess, 0)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted" title="What one entry signal on this pair may commit, summed over all algorithms">${safeNum(r.maxEntry, 0)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num">
                                                 {r.openCount > 0
                                                     ? <span className="text-accent font-bold">${safeNum(r.deployed, 0)} <span className="text-faint font-normal">· {r.openCount} open</span></span>
                                                     : <span className="text-faint">idle</span>}
                                             </td>
-                                            <td className="px-4 py-2.5 font-num text-faint"><span className="truncate inline-block max-w-[320px] align-bottom" title={r.bots.join(', ')}>{r.bots.join(', ')}</span></td>
+                                            <td className="px-3 py-1.5 font-num text-faint"><span className="truncate inline-block max-w-[320px] align-bottom" title={r.bots.join(', ')}>{r.bots.join(', ')}</span></td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -1616,18 +1616,18 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             {/* ── ACTIVE POSITIONS ───────────────────────────────────────────── */}
             {activePositions.length > 0 && (
                 <div className="terminal-card overflow-hidden">
-                    <div className="px-5 py-3.5 border-b border-border bg-bg/40 flex items-center justify-between">
+                    <div className="px-4 py-2.5 border-b border-border bg-bg/40 flex items-center justify-between">
                         <div className="flex items-center gap-3">
                             <div className="w-1.5 h-1.5 rounded-full bg-success animate-pulse shadow-glow-success" />
-                            <h3 className="text-[11px] font-bold uppercase tracking-wider text-text">
+                            <h3 className="text-xs font-bold uppercase tracking-wider text-text">
                                 Open Positions <span className="text-muted font-normal ml-1 font-num">({activePositions.length})</span>
                             </h3>
                         </div>
-                        {priceSyncing && <span className="text-[9px] text-muted animate-pulse">Syncing prices…</span>}
+                        {priceSyncing && <span className="text-3xs text-muted animate-pulse">Syncing prices…</span>}
                     </div>
                     <div className="overflow-x-auto">
                         <table className="w-full text-left whitespace-nowrap min-w-[700px]">
-                            <thead className="bg-bg/80 text-muted border-b border-border">
+                            <thead className="bg-surface text-muted border-b border-border">
                                 <tr>
                                     <th className={thClass}>Algorithm</th>
                                     <th className={thClass}>Exchange</th>
@@ -1640,30 +1640,30 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                     <th className={`${thClass} text-right`}>Actions</th>
                                 </tr>
                             </thead>
-                            <tbody className="text-[11px]">
+                            <tbody className="text-xs">
                                 {activePositions.map(pos => {
                                     const pnl = getLivePnl(pos);
                                     const hasPrice = !!livePrices[pos.symbol];
                                     return (
-                                        <tr key={pos.id} className="border-b border-border/40 hover:bg-text/[0.03] transition-colors">
-                                            <td className="px-4 py-3 font-bold text-text">
+                                        <tr key={pos.id} className="border-b border-border/40 hover:bg-overlay/50 transition-colors">
+                                            <td className="px-3 py-2 font-bold text-text">
                                                 <span className="align-middle">{pos.bot_name}</span>
-                                                <ModeBadge mode={pos.mode} short className="ml-2 text-[8px]!" />
+                                                <ModeBadge mode={pos.mode} short className="ml-2 text-3xs!" />
                                             </td>
-                                            <td className="px-4 py-3 text-accent font-bold uppercase text-[10px]">{pos.exchange || 'okx'}</td>
-                                            <td className="px-4 py-3 font-bold text-text font-num">{pos.symbol}</td>
+                                            <td className="px-3 py-2 text-accent font-bold uppercase text-2xs">{pos.exchange || 'okx'}</td>
+                                            <td className="px-3 py-2 font-bold text-text font-num">{pos.symbol}</td>
                                             <td className="px-4 py-3">
-                                                <Badge variant={pos.side === 'long' ? 'success' : 'danger'} className="text-[9px]!">{pos.side}</Badge>
+                                                <Badge variant={pos.side === 'long' ? 'success' : 'danger'} className="text-3xs!">{pos.side}</Badge>
                                             </td>
-                                            <td className="px-4 py-3 text-right font-num text-muted">${safeNum(pos.entry_price)}</td>
-                                            <td className="px-4 py-3 text-right font-num text-muted">{formatCrypto(pos.amount)}</td>
-                                            <td className={`px-4 py-3 text-right font-num font-bold ${hasPrice ? pnlColor(pnl.abs) : 'text-muted'}`}>
+                                            <td className="px-3 py-2 text-right font-num text-muted">${safeNum(pos.entry_price)}</td>
+                                            <td className="px-3 py-2 text-right font-num text-muted">{formatCrypto(pos.amount)}</td>
+                                            <td className={`px-3 py-2 text-right font-num font-bold ${hasPrice ? pnlColor(pnl.abs) : 'text-muted'}`}>
                                                 {hasPrice ? `${pnl.abs >= 0 ? '+' : '-'}$${safeNum(Math.abs(pnl.abs))}` : '—'}
                                             </td>
-                                            <td className={`px-4 py-3 text-right font-num font-bold ${hasPrice ? pnlColor(pnl.pct) : 'text-muted'}`}>
+                                            <td className={`px-3 py-2 text-right font-num font-bold ${hasPrice ? pnlColor(pnl.pct) : 'text-muted'}`}>
                                                 {hasPrice ? `${pnlSign(pnl.pct)}${safeNum(pnl.pct, 2)}%` : '—'}
                                             </td>
-                                            <td className="px-4 py-3 text-right">
+                                            <td className="px-3 py-2 text-right">
                                                 {/* No "Drop" on an open row: deleting the record of a live
                                                     position would orphan the coins on the exchange. Close it
                                                     first; the closed row keeps the delete action. */}
@@ -1685,20 +1685,20 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             <div className="flex space-x-8 border-b border-border">
                 <button onClick={() => { setActiveTab('positions'); resetPage(); }} className={tabClass(activeTab === 'positions')}>
                     Historical Ledger
-                    {closedPositions.length > 0 && <span className="ml-2 bg-raised border border-border text-muted px-1.5 py-0.5 rounded text-[8px] font-num">{closedPositions.length}</span>}
+                    {closedPositions.length > 0 && <span className="ml-2 bg-raised border border-border text-muted px-1.5 py-0.5 rounded text-3xs font-num">{closedPositions.length}</span>}
                 </button>
                 <button onClick={() => { setActiveTab('orders'); resetPage(); }} className={tabClass(activeTab === 'orders')}>
                     Execution Log
-                    {filteredOrders.length > 0 && <span className="ml-2 bg-raised border border-border text-muted px-1.5 py-0.5 rounded text-[8px] font-num">{filteredOrders.length}</span>}
+                    {filteredOrders.length > 0 && <span className="ml-2 bg-raised border border-border text-muted px-1.5 py-0.5 rounded text-3xs font-num">{filteredOrders.length}</span>}
                 </button>
             </div>
 
             {/* ── HISTORICAL LEDGER ──────────────────────────────────────────── */}
             {activeTab === 'positions' && (
                 <div className="terminal-card overflow-hidden flex flex-col h-[560px]">
-                    <div className="px-5 py-3 border-b border-border bg-bg/40 flex flex-wrap gap-y-2 items-center justify-between shrink-0">
+                    <div className="px-4 py-2.5 border-b border-border bg-bg/40 flex flex-wrap gap-y-2 items-center justify-between shrink-0">
                         <div className="flex items-center gap-3">
-                            <h3 className="text-[11px] font-bold uppercase tracking-wider text-text">Historical Ledger</h3>
+                            <h3 className="text-xs font-bold uppercase tracking-wider text-text">Historical Ledger</h3>
                             <PaginationBar
                                 total={totalPagesPos}
                                 current={currentPage}
@@ -1722,7 +1722,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             />
                         ) : (
                             <table className="w-full text-left whitespace-nowrap min-w-[860px] relative">
-                                <thead className="bg-inset text-muted sticky top-0 z-10 border-b border-border">
+                                <thead className="bg-surface text-muted sticky top-0 z-10 border-b border-border">
                                     <tr>
                                         <th className={thClass}>Date Closed</th>
                                         <th className={thClass}>Algorithm</th>
@@ -1737,7 +1737,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         <th className={`${thClass} text-center`}></th>
                                     </tr>
                                 </thead>
-                                <tbody className="text-[11px]">
+                                <tbody className="text-xs">
                                     {renderedPositions.map(pos => {
                                         const isWin = (pos.profit_abs || 0) >= 0;
                                         const exitPrice = getExitPrice(pos);
@@ -1753,37 +1753,37 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         })();
                                         const posFees = feesByPosId[pos.id] || 0;
                                         return (
-                                            <tr key={pos.id} className="border-b border-border/40 hover:bg-text/[0.03] transition-colors group">
-                                                <td className="px-4 py-2.5 font-num text-muted text-[10px]">
+                                            <tr key={pos.id} className="border-b border-border/40 hover:bg-overlay/50 transition-colors group">
+                                                <td className="px-3 py-1.5 font-num text-muted text-2xs">
                                                     {pos.closed_at ? new Date(pos.closed_at).toLocaleString() : '—'}
                                                 </td>
-                                                <td className="px-4 py-2.5 font-bold text-text">
+                                                <td className="px-3 py-1.5 font-bold text-text">
                                                     <span className="align-middle">{pos.bot_name}</span>
-                                                    <ModeBadge mode={pos.mode} short className="ml-1.5 text-[8px]!" />
+                                                    <ModeBadge mode={pos.mode} short className="ml-1.5 text-3xs!" />
                                                 </td>
-                                                <td className="px-4 py-2.5 text-accent font-bold uppercase text-[10px]">{pos.exchange || 'okx'}</td>
-                                                <td className="px-4 py-2.5 font-bold font-num text-text">{pos.symbol}</td>
-                                                <td className="px-4 py-2.5 text-right font-num text-[10px]">
+                                                <td className="px-3 py-1.5 text-accent font-bold uppercase text-2xs">{pos.exchange || 'okx'}</td>
+                                                <td className="px-3 py-1.5 font-bold font-num text-text">{pos.symbol}</td>
+                                                <td className="px-3 py-1.5 text-right font-num text-2xs">
                                                     <span className="text-muted">${safeNum(pos.entry_price)}</span>
                                                     <span className="text-faint mx-1">→</span>
                                                     <span className={exitPrice ? pnlColor(pos.profit_abs) : 'text-muted'}>
                                                         {exitPrice ? `$${safeNum(exitPrice)}` : '—'}
                                                     </span>
                                                 </td>
-                                                <td className="px-4 py-2.5 text-right font-num text-muted text-[10px]">{formatCrypto(pos.amount)}</td>
-                                                <td className="px-4 py-2.5 text-right font-num text-muted text-[10px]">{formatHoldTime(holdMs)}</td>
-                                                <td className="px-4 py-2.5 text-right">
-                                                    <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold font-num ${isWin ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
+                                                <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">{formatCrypto(pos.amount)}</td>
+                                                <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">{formatHoldTime(holdMs)}</td>
+                                                <td className="px-3 py-1.5 text-right">
+                                                    <span className={`px-1.5 py-0.5 rounded text-3xs font-bold font-num ${isWin ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
                                                         {pnlSign(pos.profit_pct)}{safeNum(pos.profit_pct)}%
                                                     </span>
                                                 </td>
-                                                <td className={`px-4 py-2.5 text-right font-num font-bold ${pnlColor(pos.profit_abs)}`}>
+                                                <td className={`px-3 py-1.5 text-right font-num font-bold ${pnlColor(pos.profit_abs)}`}>
                                                     {(pos.profit_abs || 0) >= 0 ? '+' : '-'}${safeNum(Math.abs(pos.profit_abs || 0))}
                                                 </td>
-                                                <td className="px-4 py-2.5 text-right font-num text-muted text-[10px]">
+                                                <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">
                                                     {posFees > 0 ? `-$${safeNum(posFees, 4)}` : '—'}
                                                 </td>
-                                                <td className="px-4 py-2.5 text-center opacity-60 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                                                <td className="px-3 py-1.5 text-center opacity-60 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                                     <button onClick={() => deleteHistoricalTrade(pos.id)} className="text-muted hover:text-danger transition-colors font-bold text-xs" aria-label="Delete trade">✕</button>
                                                 </td>
                                             </tr>
@@ -1799,11 +1799,11 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             {/* ── EXECUTION LOG ──────────────────────────────────────────────── */}
             {activeTab === 'orders' && (
                 <div className="terminal-card overflow-hidden flex flex-col h-[560px]">
-                    <div className="px-5 py-3 border-b border-border bg-bg/40 flex flex-wrap gap-y-2 items-center justify-between shrink-0">
+                    <div className="px-4 py-2.5 border-b border-border bg-bg/40 flex flex-wrap gap-y-2 items-center justify-between shrink-0">
                         <div className="flex items-center gap-3">
                             <div>
-                                <h3 className="text-[11px] font-bold uppercase tracking-wider text-text">Execution Log</h3>
-                                <p className="text-[9px] text-muted mt-0.5 tracking-wide">Every order dispatched to exchange or simulator</p>
+                                <h3 className="text-xs font-bold uppercase tracking-wider text-text">Execution Log</h3>
+                                <p className="text-3xs text-muted mt-0.5 tracking-wide">Every order dispatched to exchange or simulator</p>
                             </div>
                             <PaginationBar
                                 total={totalPagesOrd}
@@ -1825,7 +1825,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             />
                         ) : (
                             <table className="w-full text-left whitespace-nowrap min-w-[800px] relative">
-                                <thead className="bg-inset text-muted sticky top-0 z-10 border-b border-border">
+                                <thead className="bg-surface text-muted sticky top-0 z-10 border-b border-border">
                                     <tr>
                                         <th className={thClass}>Timestamp</th>
                                         <th className={thClass}>Algorithm</th>
@@ -1838,31 +1838,31 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         <th className={`${thClass} text-right`}>Status</th>
                                     </tr>
                                 </thead>
-                                <tbody className="text-[11px]">
+                                <tbody className="text-xs">
                                     {renderedOrders.map(order => (
-                                        <tr key={order.id} className="border-b border-border/40 hover:bg-text/[0.03] transition-colors">
-                                            <td className="px-4 py-2.5 font-num text-muted text-[10px]">{new Date(order.timestamp).toLocaleString()}</td>
-                                            <td className="px-4 py-2.5 font-bold text-text">
+                                        <tr key={order.id} className="border-b border-border/40 hover:bg-overlay/50 transition-colors">
+                                            <td className="px-3 py-1.5 font-num text-muted text-2xs">{new Date(order.timestamp).toLocaleString()}</td>
+                                            <td className="px-3 py-1.5 font-bold text-text">
                                                 <span className="align-middle">{order.bot_name}</span>
-                                                <ModeBadge mode={order.mode} short className="ml-1.5 text-[8px]!" />
+                                                <ModeBadge mode={order.mode} short className="ml-1.5 text-3xs!" />
                                             </td>
-                                            <td className="px-4 py-2.5 text-accent font-bold uppercase text-[10px]">{order.exchange || 'okx'}</td>
-                                            <td className="px-4 py-2.5 font-bold font-num text-text">{order.symbol}</td>
-                                            <td className="px-4 py-2.5">
-                                                <span className={`font-bold uppercase text-[10px] ${order.side === 'buy' ? 'text-success' : 'text-danger'}`}>
+                                            <td className="px-3 py-1.5 text-accent font-bold uppercase text-2xs">{order.exchange || 'okx'}</td>
+                                            <td className="px-3 py-1.5 font-bold font-num text-text">{order.symbol}</td>
+                                            <td className="px-3 py-1.5">
+                                                <span className={`font-bold uppercase text-2xs ${order.side === 'buy' ? 'text-success' : 'text-danger'}`}>
                                                     {order.side}
                                                 </span>
-                                                <span className="ml-1.5 text-muted text-[9px] uppercase">{order.order_type}</span>
+                                                <span className="ml-1.5 text-muted text-3xs uppercase">{order.order_type}</span>
                                             </td>
-                                            <td className="px-4 py-2.5 text-right font-num text-text">${safeNum(order.price)}</td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted">{formatCrypto(order.amount)}</td>
-                                            <td className="px-4 py-2.5 text-right font-num text-muted text-[10px]">
+                                            <td className="px-3 py-1.5 text-right font-num text-text">${safeNum(order.price)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">{formatCrypto(order.amount)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">
                                                 {order.fee > 0 ? `-$${safeNum(order.fee, 4)}` : '—'}
                                             </td>
-                                            <td className="px-4 py-2.5 text-right">
+                                            <td className="px-3 py-1.5 text-right">
                                                 <Badge
                                                     variant={order.status === 'filled' ? 'success' : (order.status === 'rejected' || order.status === 'canceled') ? 'danger' : 'accent'}
-                                                    className="text-[8px]!">
+                                                    className="text-3xs!">
                                                     {order.status}
                                                 </Badge>
                                             </td>

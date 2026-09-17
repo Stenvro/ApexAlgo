@@ -23,14 +23,14 @@ const VARIANTS = {
   ghost:
     'bg-transparent text-muted border border-transparent hover:text-text hover:bg-raised',
   danger:
-    'bg-danger/10 text-danger border border-danger/40 hover:bg-danger hover:text-white hover:shadow-glow-danger',
+    'bg-danger/10 text-danger border border-danger/40 hover:bg-danger hover:text-danger-ink hover:shadow-glow-danger',
   success:
-    'bg-success/10 text-success border border-success/40 hover:bg-success hover:text-white hover:shadow-glow-success',
+    'bg-success/10 text-success border border-success/40 hover:bg-success hover:text-success-ink hover:shadow-glow-success',
 };
 
 const SIZES = {
-  sm: 'px-3 py-1.5 text-[10px] gap-1.5',
-  md: 'px-4 py-2 text-[11px] gap-2',
+  sm: 'px-3 py-1.5 text-2xs gap-1.5',
+  md: 'px-4 py-2 text-xs gap-2',
   lg: 'px-6 py-3 text-xs gap-2',
 };
 

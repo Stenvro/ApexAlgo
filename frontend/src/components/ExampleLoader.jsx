@@ -75,10 +75,10 @@ export default function ExampleLoader({ onImported, size = 'sm', variant = 'seco
               className="w-full text-left px-4 py-3 hover:bg-raised transition-colors border-b border-border/50 last:border-b-0 disabled:opacity-50"
             >
               <span className="block text-xs font-semibold text-text">{ex.name}</span>
-              <span className="block text-[10px] text-muted mt-0.5 leading-relaxed">{ex.description}</span>
+              <span className="block text-2xs text-muted mt-0.5 leading-relaxed">{ex.description}</span>
             </button>
           ))}
-          <p className="px-4 py-2.5 text-[9px] text-faint leading-relaxed bg-inset/60">
+          <p className="px-4 py-2.5 text-3xs text-faint leading-relaxed bg-inset/60">
             More examples live in the <span className="font-num">examples/</span> directory of the repository —
             import them via the Import button.
           </p>

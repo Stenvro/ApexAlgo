@@ -6,7 +6,7 @@ import Badge from './Badge';
  * Every view (Home, bot cards, Analytics rows) renders a trade/bot mode
  * through this component so the vocabulary and colour never drift:
  *
- *   live          → accent (gold) + ● glyph  — real orders, real money
+ *   live          → accent (mint) + ● glyph  — real orders, real money
  *   paper         → info                     — sandbox key, no money
  *   forward_test  → purple                   — local simulation on live candles
  *   backtest      → neutral                  — historical simulation

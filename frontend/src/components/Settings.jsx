@@ -90,13 +90,13 @@ function WalletPanel({ wallet }) {
     <div>
       <div className="flex items-end justify-between mb-3 flex-wrap gap-2">
         <div>
-          <p className="text-[9px] font-bold uppercase tracking-wider text-muted">Estimated value</p>
+          <p className="text-3xs font-bold uppercase tracking-wider text-muted">Estimated value</p>
           <p className="text-xl font-num font-bold text-text leading-none mt-1">{usd(total)}</p>
         </div>
         <div className="text-right">
-          <p className="text-[9px] text-faint font-num">{rows.length} asset{rows.length === 1 ? '' : 's'}{wallet.unpriced?.length ? ` · ${wallet.unpriced.length} unpriced` : ''}</p>
+          <p className="text-3xs text-faint font-num">{rows.length} asset{rows.length === 1 ? '' : 's'}{wallet.unpriced?.length ? ` · ${wallet.unpriced.length} unpriced` : ''}</p>
           {dust.length > 0 && (
-            <button type="button" onClick={() => setShowDust(v => !v)} className="text-[9px] text-muted hover:text-text underline-offset-2 hover:underline">
+            <button type="button" onClick={() => setShowDust(v => !v)} className="text-3xs text-muted hover:text-text underline-offset-2 hover:underline">
               {showDust ? 'hide' : 'show'} {dust.length} dust (&lt;$1)
             </button>
           )}
@@ -105,7 +105,7 @@ function WalletPanel({ wallet }) {
       <div className="overflow-x-auto rounded-md border border-border">
         <table className="w-full text-left">
           <thead className="bg-bg/60">
-            <tr className="text-[8px] font-bold uppercase tracking-wider text-muted">
+            <tr className="text-3xs font-bold uppercase tracking-wider text-muted">
               <th className="px-3 py-2">Asset</th>
               <th className="px-3 py-2 text-right">Available</th>
               <th className="px-3 py-2 text-right">In orders</th>
@@ -113,11 +113,11 @@ function WalletPanel({ wallet }) {
               <th className="px-3 py-2 w-24">Share</th>
             </tr>
           </thead>
-          <tbody className="text-[11px] font-num">
+          <tbody className="text-xs font-num">
             {visible.map(r => {
               const share = total > 0 && r.usd_value ? Math.min(100, (r.usd_value / total) * 100) : 0;
               return (
-                <tr key={r.coin} className="border-t border-border/50 hover:bg-text/[0.03]">
+                <tr key={r.coin} className="border-t border-border/50 hover:bg-overlay/50">
                   <td className="px-3 py-2 font-bold text-text">{r.coin}</td>
                   <td className="px-3 py-2 text-right text-text">{qty(r.free)}</td>
                   <td className={`px-3 py-2 text-right ${r.used > 0 ? 'text-warn' : 'text-faint'}`}>{r.used > 0 ? qty(r.used) : '—'}</td>
@@ -386,16 +386,16 @@ export default function Settings() {
   const liveKeyCount = keys.filter(k => !k.is_sandbox).length;
 
   return (
-    <PageShell glowColor="gold">
+    <PageShell>
       {/* Swap modal */}
       {swapModal && (
         <div className="fixed inset-0 z-[999] flex items-center justify-center p-4" role="dialog" aria-modal="true">
-          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setSwapModal(null)} />
+          <div className="absolute inset-0 backdrop" onClick={() => setSwapModal(null)} />
           <div className="relative modal-enter terminal-card max-w-md w-full shadow-pop">
             <div className="px-5 py-4 border-b border-border flex justify-between items-center">
               <div>
                 <h3 className="text-xs font-bold uppercase tracking-wider text-text">Market Execution</h3>
-                <p className="text-muted text-[10px] mt-0.5">Routing via: <span className="text-accent font-bold">{swapModal}</span></p>
+                <p className="text-muted text-2xs mt-0.5">Routing via: <span className="text-accent font-bold">{swapModal}</span></p>
               </div>
               <button
                 onClick={() => setSwapModal(null)}
@@ -415,16 +415,16 @@ export default function Settings() {
 
               <div>
                 <div className="flex justify-between items-end mb-1.5">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-muted">Trade Size</span>
+                  <span className="text-2xs font-bold uppercase tracking-wider text-muted">Trade Size</span>
                   {walletBalancesFor(swapModal)?.[swapFrom] && (
-                    <span className="text-[9px] text-muted font-num">Avail: {qty(walletBalancesFor(swapModal)[swapFrom].free)} {swapFrom}</span>
+                    <span className="text-3xs text-muted font-num">Avail: {qty(walletBalancesFor(swapModal)[swapFrom].free)} {swapFrom}</span>
                   )}
                 </div>
                 <div className="flex bg-inset border border-border rounded-md overflow-hidden focus-within:border-accent/70 transition-colors duration-200">
                   <select
                     value={amountType}
                     onChange={e => setAmountType(e.target.value)}
-                    className="bg-raised text-muted text-[10px] uppercase font-bold px-2.5 py-2 border-r border-border outline-none cursor-pointer hover:text-text"
+                    className="bg-raised text-muted text-2xs uppercase font-bold px-2.5 py-2 border-r border-border outline-none cursor-pointer hover:text-text"
                   >
                     <option value="from">Spend ({swapFrom})</option>
                     <option value="to">Receive ({swapTo})</option>
@@ -442,7 +442,7 @@ export default function Settings() {
                     type="button"
                     onClick={handleMaxClick}
                     title="Use full available balance"
-                    className="bg-overlay hover:bg-border text-text text-[9px] font-bold uppercase px-3 transition-colors border-l border-border"
+                    className="bg-overlay hover:bg-border text-text text-3xs font-bold uppercase px-3 transition-colors border-l border-border"
                   >
                     MAX
                   </button>
@@ -458,13 +458,13 @@ export default function Settings() {
       )}
 
       {/* Exchange Connections */}
-      <GlowPanel glowColor="gold">
+      <GlowPanel glowColor="accent">
         <SectionHeader
           title="Exchange Connections"
           subtitle={keys.length
             ? `${connectedCount}/${keys.length} connected · ${liveKeyCount} live · ${keys.length - liveKeyCount} sandbox${lastChecked ? ` · checked ${lastChecked.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}`
             : 'Encrypted API keys stored locally'}
-          accentColor="white"
+          accentColor="neutral"
           action={
             <Button variant="secondary" size="sm" loading={refreshing} onClick={fetchKeys} title="Re-verify every key against its exchange">
               Test connections
@@ -504,7 +504,7 @@ export default function Settings() {
                             : <Badge variant="danger" dot pulse>Error</Badge>}
                           <Badge variant={k.is_sandbox ? 'info' : 'accent'}>{k.is_sandbox ? 'Sandbox' : 'Live'}</Badge>
                         </div>
-                        <div className="flex items-center gap-2 flex-wrap mt-1 text-[10px] text-muted">
+                        <div className="flex items-center gap-2 flex-wrap mt-1 text-2xs text-muted">
                           <span className="uppercase font-bold tracking-wider">{exchangeNames[k.exchange] || k.exchange}</span>
                           {k.latency_ms !== null && k.latency_ms !== undefined && (
                             <span className="font-num text-faint" title="Round-trip time of the last balance check">{k.latency_ms} ms</span>
@@ -540,22 +540,22 @@ export default function Settings() {
                   </div>
 
                   {!k.is_active && k.error_msg && (
-                    <p className="mt-3 text-[10px] text-danger bg-danger/[0.06] border border-danger/20 rounded-md px-3 py-2">{k.error_msg}</p>
+                    <p className="mt-3 text-2xs text-danger bg-danger/[0.06] border border-danger/20 rounded-md px-3 py-2">{k.error_msg}</p>
                   )}
 
                   {/* Which bots depend on this key */}
                   <div className="mt-3 flex items-center gap-2 flex-wrap">
-                    <span className="text-[8px] font-bold uppercase tracking-wider text-faint">Used by</span>
+                    <span className="text-3xs font-bold uppercase tracking-wider text-faint">Used by</span>
                     {linked.length === 0 ? (
-                      <span className="text-[10px] text-muted">no bots yet — assign it in the builder's bot config node</span>
+                      <span className="text-2xs text-muted">no bots yet — assign it in the builder's bot config node</span>
                     ) : linked.map(b => (
-                      <span key={b.name} className="inline-flex items-center gap-1.5 text-[9px] font-bold text-text-secondary bg-bg/60 border border-border rounded-sm px-1.5 py-0.5" title={b.is_active ? 'running' : 'stopped'}>
+                      <span key={b.name} className="inline-flex items-center gap-1.5 text-3xs font-bold text-text-secondary bg-bg/60 border border-border rounded-sm px-1.5 py-0.5" title={b.is_active ? 'running' : 'stopped'}>
                         <span className={`w-1.5 h-1.5 rounded-full ${b.is_active ? 'bg-success animate-pulse' : 'bg-faint/40'}`} />
                         {b.name}
                         {b.live && <span className="text-accent">live</span>}
                       </span>
                     ))}
-                    {runningLinked.length > 0 && <span className="text-[9px] text-success font-num">{runningLinked.length} running</span>}
+                    {runningLinked.length > 0 && <span className="text-3xs text-success font-num">{runningLinked.length} running</span>}
                   </div>
 
                   {balances[k.name] && (
@@ -576,7 +576,7 @@ export default function Settings() {
         <SectionHeader
           title="Add Connection"
           subtitle="Credentials are verified against the exchange, then encrypted at rest (Fernet)"
-          accentColor="white"
+          accentColor="neutral"
         />
         <div className="grid grid-cols-1 lg:grid-cols-[1fr_300px] gap-6 mt-5">
           <form onSubmit={handleSave} className="grid grid-cols-1 md:grid-cols-2 gap-4 content-start">
@@ -641,7 +641,7 @@ export default function Settings() {
                 <span className="ml-2 text-xs text-muted group-hover:text-text transition-colors font-bold uppercase tracking-wider">
                   Sandbox / Testnet
                 </span>
-                {!hasSandbox && <span className="ml-2 text-[9px] text-warn font-bold uppercase">not available on {exchangeInfo.name}</span>}
+                {!hasSandbox && <span className="ml-2 text-3xs text-warn font-bold uppercase">not available on {exchangeInfo.name}</span>}
               </label>
               <Button type="submit" loading={loading}>
                 {loading ? 'Verifying…' : `Verify & Save${hasSandbox && isSandbox ? '' : ' (live)'}`}
@@ -652,15 +652,15 @@ export default function Settings() {
           {/* Per-exchange setup guide + safety checklist */}
           <aside className="bg-inset/50 border border-border rounded-lg p-4 space-y-4 self-start">
             <div>
-              <p className="text-[9px] font-bold uppercase tracking-wider text-muted">Setting up {exchangeInfo.name}</p>
+              <p className="text-3xs font-bold uppercase tracking-wider text-muted">Setting up {exchangeInfo.name}</p>
               {exchangeInfo.keys_url ? (
-                <a href={exchangeInfo.keys_url} target="_blank" rel="noreferrer noopener" className="text-[11px] text-info hover:underline break-all mt-1 block">
+                <a href={exchangeInfo.keys_url} target="_blank" rel="noreferrer noopener" className="text-xs text-info hover:underline break-all mt-1 block">
                   Create an API key on {exchangeInfo.name} ↗
                 </a>
               ) : (
-                <p className="text-[11px] text-muted mt-1">Create an API key in your {exchangeInfo.name} account settings.</p>
+                <p className="text-xs text-muted mt-1">Create an API key in your {exchangeInfo.name} account settings.</p>
               )}
-              <ul className="mt-2 space-y-1 text-[10px] text-text-secondary">
+              <ul className="mt-2 space-y-1 text-2xs text-text-secondary">
                 <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Enable <b>read</b> + <b>spot trade</b> permissions</li>
                 <li className="flex items-center gap-1.5"><span className="text-danger">{IconBlock}</span>Leave <b>withdrawal</b> disabled — the bot never needs it</li>
                 <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Restrict the key to this machine's IP if the exchange allows it</li>
@@ -670,8 +670,8 @@ export default function Settings() {
               </ul>
             </div>
             <div className="border-t border-border pt-3">
-              <p className="text-[9px] font-bold uppercase tracking-wider text-muted">Going live safely</p>
-              <ul className="mt-2 space-y-1 text-[10px] text-text-secondary list-disc list-inside">
+              <p className="text-3xs font-bold uppercase tracking-wider text-muted">Going live safely</p>
+              <ul className="mt-2 space-y-1 text-2xs text-text-secondary list-disc list-inside">
                 <li>Set <b>max order value</b> in the bot config — required for live orders.</li>
                 <li>Start with a small balance; bots size trades from the free balance capped by their capital.</li>
                 <li>Keys are stored encrypted and never leave this server except to the exchange.</li>

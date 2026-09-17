@@ -186,6 +186,31 @@ def test_no_signal_places_no_order(db, live_bot, run_tick):
     assert _positions(db) == []
 
 
+def test_pair_missing_on_trading_exchange_is_skipped_not_ordered(db, live_bot, run_tick):
+    # A demo account lists fewer pairs than the public market the backtest
+    # ran on (OKX demo has no XRP/USDC) — no order attempt, no order row
+    live_bot()
+    mock = ExchangeMock()
+    del mock.markets[SYMBOL]
+    run_tick(mock)
+    assert mock.created == []
+    assert db.query(Order).filter(Order.bot_name == "live-bot").count() == 0
+    assert _positions(db) == []
+
+
+def test_failed_placement_is_booked_rejected_not_canceled(db, live_bot, run_tick):
+    live_bot()
+    mock = ExchangeMock()
+
+    def boom(symbol, amount):
+        raise RuntimeError("exchange refused")
+    mock.create_market_buy_order = boom
+    run_tick(mock)
+    order = db.query(Order).filter(Order.bot_name == "live-bot", Order.mode == "live").one()
+    assert order.status == "rejected" and order.exchange_order_id is None
+    assert _positions(db) == []
+
+
 def test_replayed_candle_does_not_place_second_buy(db, live_bot, run_tick):
     live_bot(_settings(max_positions=2))
     mock = ExchangeMock()

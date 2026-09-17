@@ -30,10 +30,9 @@ const getTimeframeSeconds = (tf) => {
 
 // Series palette resolved from the live CSS tokens at call time so indicator
 // lines re-tint when the theme switches (chart is re-created on theme change).
-// Last three are extras with no token counterpart (magenta/orange/teal — legible on both themes).
 const getChartPalette = () => [
     getToken('info'), getToken('accent'), getToken('success'), getToken('danger'),
-    getToken('purple'), '#d946ef', '#ff9800', '#00bcd4',
+    getToken('purple'), getToken('chart-1'), getToken('chart-2'), getToken('chart-3'),
 ];
 const colorCache = {}; // seriesId -> stable palette index
 let colorIdx = 0;
@@ -636,28 +635,28 @@ function ChartEngine({ dataset, openDataVault }) {
           <div className="flex flex-col">
             <div className="flex items-center space-x-2">
               <span className="text-text font-bold tracking-wider text-xs md:text-sm font-num">{dataset.symbol}</span>
-              <span className="bg-info/10 border border-info/30 text-info text-[9px] md:text-[10px] px-1.5 py-0.5 rounded uppercase font-bold tracking-widest">{(dataset.exchange || 'okx').toUpperCase()}</span>
-              <span className="bg-overlay border border-border text-text text-[9px] md:text-[10px] px-1.5 py-0.5 rounded uppercase font-bold tracking-widest font-num">{dataset.timeframe}</span>
+              <span className="bg-info/10 border border-info/30 text-info text-3xs md:text-2xs px-1.5 py-0.5 rounded uppercase font-bold tracking-widest">{(dataset.exchange || 'okx').toUpperCase()}</span>
+              <span className="bg-overlay border border-border text-text text-3xs md:text-2xs px-1.5 py-0.5 rounded uppercase font-bold tracking-widest font-num">{dataset.timeframe}</span>
             </div>
-            {marketInfo && <span className={`text-[10px] md:text-xs font-num font-medium mt-0.5 ${marketInfo.change_24h >= 0 ? 'text-success' : 'text-danger'}`}>{formatNum(marketInfo.last)}</span>}
+            {marketInfo && <span className={`text-2xs md:text-xs font-num font-medium mt-0.5 ${marketInfo.change_24h >= 0 ? 'text-success' : 'text-danger'}`}>{formatNum(marketInfo.last)}</span>}
           </div>
 
           {marketInfo && (
             <>
               <div className="hidden md:flex flex-col border-l border-border pl-6">
-                <span className="text-muted text-[10px] uppercase">24h Change</span>
+                <span className="text-muted text-2xs uppercase">24h Change</span>
                 <span className={`text-xs font-num mt-0.5 ${marketInfo.change_24h >= 0 ? 'text-success' : 'text-danger'}`}>{formatChange(marketInfo.change_24h)}</span>
               </div>
               <div className="hidden md:flex flex-col border-l border-border pl-6">
-                <span className="text-muted text-[10px] uppercase">24h High</span>
+                <span className="text-muted text-2xs uppercase">24h High</span>
                 <span className="text-text text-xs font-num mt-0.5">{formatNum(marketInfo.high_24h)}</span>
               </div>
               <div className="hidden lg:flex flex-col border-l border-border pl-6">
-                <span className="text-muted text-[10px] uppercase">24h Low</span>
+                <span className="text-muted text-2xs uppercase">24h Low</span>
                 <span className="text-text text-xs font-num mt-0.5">{formatNum(marketInfo.low_24h)}</span>
               </div>
               <div className="hidden xl:flex flex-col border-l border-border pl-6">
-                <span className="text-muted text-[10px] uppercase">24h Volume</span>
+                <span className="text-muted text-2xs uppercase">24h Volume</span>
                 <span className="text-text text-xs font-num mt-0.5">{formatNum(marketInfo.vol_24h)}</span>
               </div>
             </>
@@ -699,12 +698,12 @@ function ChartEngine({ dataset, openDataVault }) {
                       {isExpanded && (
                         <div className="flex flex-col space-y-4 pl-6 md:pl-8 pr-4 pb-4 bg-bg/50 border-l-2 border-border ml-4 mt-1">
                             <div className="flex flex-col space-y-2 mt-2">
-                                <span className="text-[9px] md:text-[10px] font-bold text-info uppercase tracking-wider">Live & Paper Mode</span>
+                                <span className="text-3xs md:text-2xs font-bold text-info uppercase tracking-wider">Live & Paper Mode</span>
                                 <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-info rounded border-border bg-inset" checked={config.showRealTrades} onChange={() => toggleBotSetting(botName, 'showRealTrades')} /><span className="ml-2 text-xs text-text">Real Trades (T-B / T-S)</span></label>
                                 <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-info rounded border-border bg-inset" checked={config.showRealPositions} onChange={() => toggleBotSetting(botName, 'showRealPositions')} /><span className="ml-2 text-xs text-text">Real Position Line</span></label>
                             </div>
                             <div className="flex flex-col space-y-2">
-                                <span className="text-[9px] md:text-[10px] font-bold text-accent uppercase tracking-wider">Backtest Mode</span>
+                                <span className="text-3xs md:text-2xs font-bold text-accent uppercase tracking-wider">Backtest Mode</span>
                                 <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-accent rounded border-border bg-inset" checked={config.showBacktestTrades} onChange={() => toggleBotSetting(botName, 'showBacktestTrades')} /><span className="ml-2 text-xs text-text-secondary">Historical Trades (T-B / T-S)</span></label>
                                 <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-accent rounded border-border bg-inset" checked={config.showBacktestPositions} onChange={() => toggleBotSetting(botName, 'showBacktestPositions')} /><span className="ml-2 text-xs text-text-secondary">Historical Position Line</span></label>
                             </div>
@@ -731,7 +730,7 @@ function ChartEngine({ dataset, openDataVault }) {
               <circle cx="12" cy="12" r="10" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
               <path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
             </svg>
-            <span className="text-muted text-[10px] font-bold tracking-[0.3em] uppercase">Loading candles…</span>
+            <span className="text-muted text-2xs font-bold tracking-[0.3em] uppercase">Loading candles…</span>
           </div>
         )}
         {errorMsg && !loading && (
@@ -755,7 +754,7 @@ function ChartEngine({ dataset, openDataVault }) {
         )}
 
         {hoverData && !loading && !errorMsg && (
-          <div className="absolute top-2 left-2 md:top-3 md:left-3 z-10 bg-raised/80 backdrop-blur-sm border border-border p-1.5 md:p-2 rounded-lg text-[9px] md:text-xs font-num pointer-events-none shadow-card max-w-[95%] md:max-w-[80%] flex flex-wrap gap-y-1 md:gap-y-2">
+          <div className="absolute top-2 left-2 md:top-3 md:left-3 z-10 bg-raised/80 backdrop-blur-sm border border-border p-1.5 md:p-2 rounded-lg text-3xs md:text-xs font-num pointer-events-none shadow-card max-w-[95%] md:max-w-[80%] flex flex-wrap gap-y-1 md:gap-y-2">
             <div className="flex space-x-2 md:space-x-3 items-center flex-wrap gap-y-1 md:gap-y-2">
               <div className="flex space-x-1"><span className="text-muted">O</span><span className={hoverData.open > hoverData.close ? 'text-danger' : 'text-success'}>{formatNum(hoverData.open)}</span></div>
               <div className="flex space-x-1"><span className="text-muted">H</span><span className="text-text">{formatNum(hoverData.high)}</span></div>
@@ -774,7 +773,7 @@ function ChartEngine({ dataset, openDataVault }) {
                       if (val === undefined) return null;
                       return (
                           <div key={`${botName}-${indKey}`} className="flex space-x-1 border-l border-border pl-2 md:pl-3 ml-1 items-center">
-                              <span className="text-muted text-[8px] md:text-[10px] uppercase">{indKey}</span><span className="text-accent">{formatNum(val)}</span>
+                              <span className="text-muted text-3xs md:text-2xs uppercase">{indKey}</span><span className="text-accent">{formatNum(val)}</span>
                           </div>
                       );
                   });
@@ -786,10 +785,10 @@ function ChartEngine({ dataset, openDataVault }) {
         {/* Signal-marker legend */}
         {!loading && !errorMsg && (
           <div className="absolute top-2 right-2 md:top-3 md:right-3 z-10 hidden sm:flex items-center gap-3 bg-raised/80 backdrop-blur-sm border border-border px-2.5 py-1.5 rounded-lg pointer-events-none">
-            <span className="flex items-center gap-1 text-[8px] font-bold uppercase tracking-wider text-muted"><span className="text-success text-[10px] leading-none">▲</span> S-B</span>
-            <span className="flex items-center gap-1 text-[8px] font-bold uppercase tracking-wider text-muted"><span className="text-danger text-[10px] leading-none">▼</span> S-S</span>
-            <span className="flex items-center gap-1 text-[8px] font-bold uppercase tracking-wider text-muted"><span className="w-1.5 h-1.5 rounded-full bg-info" /> T-Buy</span>
-            <span className="flex items-center gap-1 text-[8px] font-bold uppercase tracking-wider text-muted"><span className="w-1.5 h-1.5 rounded-full bg-purple" /> T-Sell</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted"><span className="text-success text-2xs leading-none">▲</span> S-B</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted"><span className="text-danger text-2xs leading-none">▼</span> S-S</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted"><span className="w-1.5 h-1.5 rounded-full bg-info" /> T-Buy</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted"><span className="w-1.5 h-1.5 rounded-full bg-purple" /> T-Sell</span>
           </div>
         )}
 
@@ -804,41 +803,41 @@ function ChartEngine({ dataset, openDataVault }) {
                 return (
                     <div key={idx} className={`bg-raised/95 backdrop-blur-md border p-3 rounded-lg shadow-pop flex flex-col min-w-[240px] md:min-w-[260px] ${trade.side === 'buy' ? 'border-info' : 'border-purple'}`}>
                         <div className="flex justify-between items-center mb-2 pb-2 border-b border-border">
-                            <span className={`text-[10px] md:text-xs font-bold uppercase tracking-wider ${trade.side === 'buy' ? 'text-info' : 'text-purple'}`}>
+                            <span className={`text-2xs md:text-xs font-bold uppercase tracking-wider ${trade.side === 'buy' ? 'text-info' : 'text-purple'}`}>
                                 {trade.side === 'buy' ? 'ENTRY EXECUTION' : 'EXIT EXECUTION'}
                             </span>
-                            <span className="bg-overlay border border-border text-text text-[8px] px-1.5 py-0.5 rounded uppercase font-bold">{trade.mode}</span>
+                            <span className="bg-overlay border border-border text-text text-3xs px-1.5 py-0.5 rounded uppercase font-bold">{trade.mode}</span>
                         </div>
                         <div className="grid grid-cols-2 gap-y-3 gap-x-4">
                             <div className="flex flex-col">
-                                <span className="text-[8px] md:text-[9px] text-muted uppercase font-bold">Price</span>
-                                <span className="text-[10px] md:text-xs text-text font-num">${formatNum(trade.price)}</span>
+                                <span className="text-3xs md:text-3xs text-muted uppercase font-bold">Price</span>
+                                <span className="text-2xs md:text-xs text-text font-num">${formatNum(trade.price)}</span>
                             </div>
                             <div className="flex flex-col text-right">
-                                <span className="text-[8px] md:text-[9px] text-muted uppercase font-bold">Size</span>
-                                <span className="text-[10px] md:text-xs text-text font-num">{formatCrypto(trade.amount)}</span>
+                                <span className="text-3xs md:text-3xs text-muted uppercase font-bold">Size</span>
+                                <span className="text-2xs md:text-xs text-text font-num">{formatCrypto(trade.amount)}</span>
                             </div>
 
                             <div className="flex flex-col">
-                                <span className="text-[8px] md:text-[9px] text-muted uppercase font-bold">Total</span>
-                                <span className="text-[10px] md:text-xs text-text font-num">${formatNum(totalValue)}</span>
+                                <span className="text-3xs md:text-3xs text-muted uppercase font-bold">Total</span>
+                                <span className="text-2xs md:text-xs text-text font-num">${formatNum(totalValue)}</span>
                             </div>
                             <div className="flex flex-col text-right">
-                                <span className="text-[8px] md:text-[9px] text-muted uppercase font-bold">Type</span>
-                                <span className="text-[10px] md:text-xs text-text uppercase">{trade.order_type || 'Market'}</span>
+                                <span className="text-3xs md:text-3xs text-muted uppercase font-bold">Type</span>
+                                <span className="text-2xs md:text-xs text-text uppercase">{trade.order_type || 'Market'}</span>
                             </div>
 
                             {trade.side === 'sell' && trade.position && (
                                 <div className="flex flex-col col-span-2 pt-2 border-t border-border">
-                                    <span className="text-[8px] md:text-[9px] text-muted uppercase font-bold mb-1">PnL</span>
+                                    <span className="text-3xs md:text-3xs text-muted uppercase font-bold mb-1">PnL</span>
                                     <div className="grid grid-cols-2 gap-2 bg-inset p-2 rounded-lg border border-border">
                                         <div className="flex flex-col">
-                                            <span className="text-[8px] text-muted uppercase">Avg Entry</span>
-                                            <span className="text-[9px] md:text-[10px] text-text font-num">${formatNum(trade.position.entry_price)}</span>
+                                            <span className="text-3xs text-muted uppercase">Avg Entry</span>
+                                            <span className="text-3xs md:text-2xs text-text font-num">${formatNum(trade.position.entry_price)}</span>
                                         </div>
                                         <div className="flex flex-col text-right">
-                                            <span className="text-[8px] text-muted uppercase">Realized</span>
-                                            <span className={`text-[9px] md:text-[10px] font-num font-bold ${isWin ? 'text-success' : 'text-danger'}`}>
+                                            <span className="text-3xs text-muted uppercase">Realized</span>
+                                            <span className={`text-3xs md:text-2xs font-num font-bold ${isWin ? 'text-success' : 'text-danger'}`}>
                                                 {isWin ? '+' : ''}${pnlAbs} ({pnlPct}%)
                                             </span>
                                         </div>
@@ -847,8 +846,8 @@ function ChartEngine({ dataset, openDataVault }) {
                             )}
 
                             <div className="flex flex-col col-span-2 pt-2 border-t border-border">
-                                <span className="text-[8px] md:text-[9px] text-muted uppercase font-bold">Source</span>
-                                <span className="text-[10px] md:text-xs text-accent truncate">{trade.bot_name}</span>
+                                <span className="text-3xs md:text-3xs text-muted uppercase font-bold">Source</span>
+                                <span className="text-2xs md:text-xs text-accent truncate">{trade.bot_name}</span>
                             </div>
                         </div>
                     </div>

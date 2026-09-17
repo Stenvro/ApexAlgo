@@ -86,22 +86,22 @@ export default function BotConsole({ botName, isOpen, clearSignal = 0 }) {
             <svg className="w-3 h-3 text-faint shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8} aria-hidden="true">
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 8l4 4-4 4M12 16h6M3 4h18v16H3z" />
             </svg>
-            <span className="text-[8px] font-bold uppercase tracking-widest text-muted truncate">{botName}</span>
+            <span className="text-3xs font-bold uppercase tracking-widest text-muted truncate">{botName}</span>
           </span>
-          <span className="text-[8px] font-num text-faint shrink-0">{entries.length} lines</span>
+          <span className="text-3xs font-num text-faint shrink-0">{entries.length} lines</span>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <button
             onClick={clearLocal}
             title="Clear console output (local only)"
-            className="text-[8px] font-bold uppercase text-muted hover:text-text transition-colors px-1.5 py-0.5 rounded-sm hover:bg-overlay"
+            className="text-3xs font-bold uppercase text-muted hover:text-text transition-colors px-1.5 py-0.5 rounded-sm hover:bg-overlay"
           >
             CLEAR
           </button>
           <button
             onClick={jumpToBottom}
             title={autoScroll ? 'Auto-scroll on' : 'Click to resume auto-scroll'}
-            className={`text-[8px] font-bold uppercase px-1.5 py-0.5 rounded-sm transition-colors ${
+            className={`text-3xs font-bold uppercase px-1.5 py-0.5 rounded-sm transition-colors ${
               autoScroll
                 ? 'text-success bg-success/10'
                 : 'text-muted hover:text-text hover:bg-overlay'
@@ -121,7 +121,7 @@ export default function BotConsole({ botName, isOpen, clearSignal = 0 }) {
       >
         {entries.length === 0 ? (
           <div className="flex items-center justify-center h-full">
-            <span className="text-[9px] text-faint">No activity yet — start the engine to stream events</span>
+            <span className="text-3xs text-faint">No activity yet — start the engine to stream events</span>
           </div>
         ) : (
           entries.map((e) => (
@@ -129,11 +129,11 @@ export default function BotConsole({ botName, isOpen, clearSignal = 0 }) {
               key={e.seq}
               className="flex items-start gap-2 px-3 py-[2px] hover:bg-overlay/60 fade-in"
             >
-              <span className="text-faint text-[9px] shrink-0 select-none pt-[1px]">{e.ts}</span>
-              <span className={`text-[9px] font-bold shrink-0 w-9 pt-[1px] ${LEVEL_COLOR[e.level] ?? 'text-faint'}`}>
+              <span className="text-faint text-3xs shrink-0 select-none pt-[1px]">{e.ts}</span>
+              <span className={`text-3xs font-bold shrink-0 w-9 pt-[1px] ${LEVEL_COLOR[e.level] ?? 'text-faint'}`}>
                 {e.level}
               </span>
-              <span className={`text-[9px] break-all leading-relaxed ${e.level === 'ERROR' ? 'text-danger/90' : e.level === 'WARN' ? 'text-warn/90' : 'text-text-secondary'}`}>
+              <span className={`text-3xs break-all leading-relaxed ${e.level === 'ERROR' ? 'text-danger/90' : e.level === 'WARN' ? 'text-warn/90' : 'text-text-secondary'}`}>
                 {e.msg}
               </span>
             </div>

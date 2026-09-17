@@ -111,18 +111,18 @@ function RuntimeStrip({ bot }) {
   const nextClose = rt?.phase === 'live' ? fmtClock(rt.next_close) : null;
   const symbolPos = rt?.symbol_count > 1 && rt?.symbol_index ? ` (${rt.symbol_index}/${rt.symbol_count})` : '';
   return (
-    <div className="px-5 py-2.5 border-b border-border bg-inset/40">
+    <div className="px-4 py-2 border-b border-border bg-inset/40">
       <div className="flex items-center gap-2.5 min-w-0">
-        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm border text-[9px] font-bold uppercase tracking-wider shrink-0 ${meta.cls}`}>
+        <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm border text-3xs font-bold uppercase tracking-wider shrink-0 ${meta.cls}`}>
           {meta.pulse && <span className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />}
           {meta.label}
           {rt?.phase === 'live' && rt.mode && <span className="font-medium normal-case tracking-normal opacity-80">· {MODE_LABEL[rt.mode] || rt.mode}</span>}
         </span>
-        <span className="text-[10px] text-text-secondary font-num truncate flex-1" title={rt?.detail}>
+        <span className="text-2xs text-text-secondary font-num truncate flex-1" title={rt?.detail}>
           {rt?.detail || 'Engine active'}{symbolPos}
         </span>
-        {nextClose && <span className="text-[9px] text-faint font-num shrink-0">next candle {nextClose}</span>}
-        {pct !== null && <span className="text-[9px] text-muted font-num shrink-0">{pct}%</span>}
+        {nextClose && <span className="text-3xs text-faint font-num shrink-0">next candle {nextClose}</span>}
+        {pct !== null && <span className="text-3xs text-muted font-num shrink-0">{pct}%</span>}
       </div>
       {pct !== null && (
         <div className="mt-2 h-1 rounded-full bg-border overflow-hidden">
@@ -141,11 +141,11 @@ function StopReason({ bot }) {
   const reason = bot.settings?.last_stop_reason;
   if (bot.is_active || !reason) return null;
   return (
-    <div className="px-5 py-2.5 border-b border-warn/30 bg-warn/[0.06] flex items-start gap-2">
+    <div className="px-4 py-2 border-b border-warn/30 bg-warn/[0.06] flex items-start gap-2">
       <svg className="w-3.5 h-3.5 text-warn shrink-0 mt-px" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M12 3l9 16H3l9-16z" />
       </svg>
-      <p className="text-[10px] text-warn leading-snug"><span className="font-bold uppercase tracking-wider mr-1">Stopped by engine</span>{reason}</p>
+      <p className="text-2xs text-warn leading-snug"><span className="font-bold uppercase tracking-wider mr-1">Stopped by engine</span>{reason}</p>
     </div>
   );
 }
@@ -163,8 +163,8 @@ function BacktestResult({ bot }) {
   if (!sm || typeof sm.trades !== 'number') return null;
   const variants = Number(sm.variants) || 0;
   return (
-    <div className="px-5 py-2 border-b border-border bg-bg/40 flex items-center justify-between gap-3">
-      <div className="flex items-center gap-2 min-w-0 text-[9px] font-num text-muted"
+    <div className="px-4 py-2 border-b border-border bg-bg/40 flex items-center justify-between gap-3">
+      <div className="flex items-center gap-2 min-w-0 text-3xs font-num text-muted"
         title={variants > 0 ? `${variants} distinct configuration${variants === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.` : undefined}>
         <span className="font-bold uppercase tracking-widest">Backtest{variants > 0 && <span className="text-faint"> #{variants}</span>}</span>
         {sm.data_from && sm.data_to && (
@@ -173,7 +173,7 @@ function BacktestResult({ bot }) {
       </div>
       <button type="button"
         onClick={() => window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: bot.name, mode: 'backtest' } }))}
-        className="text-[9px] font-bold uppercase tracking-wider text-info hover:text-text transition-colors shrink-0">
+        className="text-3xs font-bold uppercase tracking-wider text-info hover:text-text transition-colors shrink-0">
         View in Analytics →
       </button>
     </div>
@@ -205,7 +205,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
       } fade-in-delay-${Math.min(index + 1, 6)}`}
     >
       {/* ── Card Header: status hierarchy + primary action ── */}
-      <div className="px-5 py-4 border-b border-border flex justify-between items-start gap-3 bg-gradient-to-r from-bg/60 to-raised/40">
+      <div className="px-4 py-3 border-b border-border flex justify-between items-start gap-3">
         <div className="flex flex-col min-w-0">
           <div className="flex items-center gap-2.5 flex-wrap">
             <h3 className="text-text font-bold text-sm tracking-wide truncate">{bot.name}</h3>
@@ -219,24 +219,24 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
           {/* Metrics row */}
           <div className="flex items-center gap-4 mt-2.5 flex-wrap">
             <div className="flex flex-col">
-              <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Timeframe</span>
-              <span className="text-[11px] font-num font-bold text-accent">{bot.settings?.timeframe || 'N/A'}</span>
+              <span className="text-3xs font-bold uppercase tracking-wider text-faint">Timeframe</span>
+              <span className="text-xs font-num font-bold text-accent">{bot.settings?.timeframe || 'N/A'}</span>
             </div>
             <div className="flex flex-col">
-              <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Pairs</span>
-              <span className="text-[11px] font-num font-bold text-text">{assignedPairs.length}</span>
+              <span className="text-3xs font-bold uppercase tracking-wider text-faint">Pairs</span>
+              <span className="text-xs font-num font-bold text-text">{assignedPairs.length}</span>
             </div>
             <div className="flex flex-col min-w-0" title={assignedPairs.join(', ')}>
-              <span className="text-[9px] font-bold uppercase tracking-wider text-faint">Whitelist</span>
+              <span className="text-3xs font-bold uppercase tracking-wider text-faint">Whitelist</span>
               <span className="flex items-center gap-1 flex-wrap">
-                {visiblePairs.length === 0 && <span className="text-[10px] text-faint">—</span>}
+                {visiblePairs.length === 0 && <span className="text-2xs text-faint">—</span>}
                 {visiblePairs.map(pair => (
-                  <span key={pair} className="text-[9px] font-num font-bold text-text-secondary bg-inset border border-border rounded-sm px-1.5 py-0.5">
+                  <span key={pair} className="text-3xs font-num font-bold text-text-secondary bg-inset border border-border rounded-sm px-1.5 py-0.5">
                     {pair}
                   </span>
                 ))}
                 {extraPairs > 0 && (
-                  <span className="text-[9px] font-num text-muted">+{extraPairs}</span>
+                  <span className="text-3xs font-num text-muted">+{extraPairs}</span>
                 )}
               </span>
             </div>
@@ -267,20 +267,20 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
       <BacktestResult bot={bot} />
 
       {/* ── Card Body ── */}
-      <div className="px-5 py-4 flex-1 flex flex-col space-y-5">
+      <div className="px-4 py-3 flex-1 flex flex-col space-y-4">
 
         {/* Environment Routing */}
         <div className="flex flex-col space-y-2">
           <div className="flex justify-between items-end">
-            <span className="text-[9px] font-bold text-muted uppercase tracking-wider">Environment Routing</span>
-            {!hasApiKey && <span className="text-[8px] font-bold uppercase text-danger">No API Key Linked</span>}
+            <span className="text-3xs font-bold text-muted uppercase tracking-wider">Environment Routing</span>
+            {!hasApiKey && <span className="text-3xs font-bold uppercase text-danger">No API Key Linked</span>}
           </div>
           <div className="flex bg-inset rounded-md border border-border overflow-hidden">
             <button
               disabled={bot.is_active}
               onClick={() => updateBotConfig(bot.id, bot, { settings: { api_execution: false } })}
               title="Forward test: simulate fills locally on live candles without touching the exchange."
-              className={`flex-1 py-2 text-[9px] font-bold uppercase transition-all duration-200 disabled:opacity-50 ${!isApiExecutionOn ? 'bg-purple/10 text-purple' : 'text-muted hover:text-text hover:bg-raised'}`}
+              className={`flex-1 py-2 text-3xs font-bold uppercase transition-all duration-200 disabled:opacity-50 ${!isApiExecutionOn ? 'bg-purple/10 text-purple' : 'text-muted hover:text-text hover:bg-raised'}`}
             >
               Forward test
             </button>
@@ -288,7 +288,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
               disabled={bot.is_active || !hasApiKey}
               onClick={() => updateBotConfig(bot.id, bot, { settings: { api_execution: true } })}
               title={!hasApiKey ? 'Assign an API key to route orders (paper on a sandbox key, live otherwise).' : 'Route orders through the API key: paper on a sandbox key, live (real money) otherwise.'}
-              className={`flex-1 py-2 text-[9px] font-bold uppercase transition-all duration-200 border-l border-border disabled:opacity-50 ${isApiExecutionOn ? 'bg-accent/10 text-accent' : 'text-muted hover:text-text hover:bg-raised'}`}
+              className={`flex-1 py-2 text-3xs font-bold uppercase transition-all duration-200 border-l border-border disabled:opacity-50 ${isApiExecutionOn ? 'bg-accent/10 text-accent' : 'text-muted hover:text-text hover:bg-raised'}`}
             >
               Exchange orders
             </button>
@@ -297,7 +297,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
 
         {/* Initialization Protocol */}
         <div className="flex flex-col space-y-2 border-t border-border pt-4">
-          <span className="text-[9px] font-bold text-muted uppercase tracking-wider">Initialization Protocol</span>
+          <span className="text-3xs font-bold text-muted uppercase tracking-wider">Initialization Protocol</span>
           <label className={`flex items-center p-3 rounded-md border transition-all duration-200 ${bot.is_active ? 'opacity-50 pointer-events-none cursor-not-allowed' : 'cursor-pointer hover:border-border-strong'} ${isBacktestOn ? 'bg-success/5 border-success/30' : 'bg-inset border-border'}`}>
             <input
               type="checkbox"
@@ -307,8 +307,8 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
               className="form-checkbox h-3.5 w-3.5 accent-success rounded-sm cursor-pointer"
             />
             <div className="ml-3 flex flex-col">
-              <span className={`text-[11px] font-bold uppercase tracking-wider ${isBacktestOn ? 'text-success' : 'text-text'}`}>Run Historical Backtest</span>
-              <span className="text-[9px] text-muted mt-0.5">Process past data before executing live. Previous backtest results are cleared automatically on every run.</span>
+              <span className={`text-xs font-bold uppercase tracking-wider ${isBacktestOn ? 'text-success' : 'text-text'}`}>Run Historical Backtest</span>
+              <span className="text-3xs text-muted mt-0.5">Process past data before executing live. Previous backtest results are cleared automatically on every run.</span>
             </div>
           </label>
         </div>
@@ -318,9 +318,9 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
       <button
         onClick={() => toggleConsole(bot.id)}
         title={consoleOpen ? 'Hide console output' : 'Show console output'}
-        className="w-full px-5 py-2.5 border-t border-border bg-bg/60 flex justify-between items-center hover:bg-bg transition-colors group"
+        className="w-full px-4 py-2 border-t border-border bg-bg/60 flex justify-between items-center hover:bg-bg transition-colors group"
       >
-        <span className="text-[8px] font-bold uppercase tracking-widest text-muted group-hover:text-text transition-colors">
+        <span className="text-3xs font-bold uppercase tracking-widest text-muted group-hover:text-text transition-colors">
           Console
         </span>
         <ChevronIcon open={consoleOpen} />
@@ -337,7 +337,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
 
       {/* ── Card Footer: icon actions ── */}
       <div className="px-4 py-2 bg-bg/50 border-t border-border flex justify-between items-center">
-        <span className="text-[9px] font-bold text-faint uppercase tracking-wider font-num">ID {bot.id}</span>
+        <span className="text-3xs font-bold text-faint uppercase tracking-wider font-num">ID {bot.id}</span>
         <div className="flex items-center gap-0.5">
           <IconButton
             title="Edit strategy in the builder"
@@ -646,7 +646,7 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
   const liveCount     = bots.filter(b => b.is_active && b.settings?.api_execution).length;
 
   return (
-    <PageShell glowColor="green">
+    <PageShell>
       <input
         type="file"
         ref={fileInputRef}
@@ -660,7 +660,7 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
         subtitle={runningCount
           ? `${runningCount} of ${bots.length} running${startingCount ? ` · ${startingCount} starting up` : ''}${liveCount ? ` · ${liveCount} on live orders` : ''}`
           : 'Manage, configure, and deploy automated strategies'}
-        accentColor="white"
+        accentColor="neutral"
         action={
           <div className="flex items-center gap-2.5">
             {bots.length > 1 && (
@@ -731,7 +731,7 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
           )}
         </div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {bots.map((bot, index) => (
             <BotCard
               key={bot.id}

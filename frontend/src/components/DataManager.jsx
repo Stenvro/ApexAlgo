@@ -276,7 +276,7 @@ export default function DataManager({ openChart }) {
   const columns = [
     {
       key: 'exchange', label: 'Exchange',
-      render: (v) => <span className="text-accent font-bold uppercase text-[10px]">{v || 'okx'}</span>,
+      render: (v) => <span className="text-accent font-bold uppercase text-2xs">{v || 'okx'}</span>,
     },
     {
       key: 'symbol', label: 'Symbol',
@@ -297,11 +297,11 @@ export default function DataManager({ openChart }) {
     },
     {
       key: 'oldest_candle', label: 'Oldest Record',
-      render: (v) => <span className="text-muted text-[10px]">{new Date(v).toLocaleString()}</span>,
+      render: (v) => <span className="text-muted text-2xs">{new Date(v).toLocaleString()}</span>,
     },
     {
       key: 'newest_candle', label: 'Newest Record',
-      render: (v) => <span className="text-text text-[10px] font-bold">{new Date(v).toLocaleString()}</span>,
+      render: (v) => <span className="text-text text-2xs font-bold">{new Date(v).toLocaleString()}</span>,
     },
     {
       key: 'actions', label: 'Actions', align: 'right',
@@ -341,10 +341,10 @@ export default function DataManager({ openChart }) {
     },
   ];
 
-  const filterSelectClass = '!py-1.5 !text-[11px] !font-bold uppercase';
+  const filterSelectClass = '!py-1.5 !text-xs !font-bold uppercase';
 
   return (
-    <PageShell glowColor="gold">
+    <PageShell>
       {/* Prune modal — custom body (date input, so richer than confirmDialog) */}
       {pruneModalConfig && (
         <Modal
@@ -355,7 +355,7 @@ export default function DataManager({ openChart }) {
           }}
           customBody={
             <div className="space-y-4">
-              <p className="text-[11px] text-text-secondary leading-relaxed">
+              <p className="text-xs text-text-secondary leading-relaxed">
                 Manage local data for{' '}
                 <strong className="text-accent font-num">{pruneModalConfig.symbol} ({pruneModalConfig.timeframe})</strong>.
                 Select a date to delete all history before that date, or click Delete All to wipe the entire pair.
@@ -381,7 +381,7 @@ export default function DataManager({ openChart }) {
                   size="sm"
                   loading={loading}
                   disabled={!pruneDate}
-                  className="!bg-danger !text-white hover:!bg-danger/80"
+                  className="!bg-danger !text-danger-ink hover:!bg-danger-hover"
                   onClick={() => executeDelete(pruneModalConfig.symbol, pruneModalConfig.timeframe, pruneDate)}
                 >
                   Prune Date
@@ -395,7 +395,7 @@ export default function DataManager({ openChart }) {
       <SectionHeader
         title="Market Data"
         subtitle="Download, sync, and manage historical candle datasets"
-        accentColor="gold"
+        accentColor="accent"
       />
 
       {/* Summary stats */}
@@ -409,23 +409,23 @@ export default function DataManager({ openChart }) {
           </>
         ) : (
           <>
-            <StatCard label="Datasets" value={summary.length.toLocaleString()} color="gold" sub="pair / interval combos" />
-            <StatCard label="Total Candles" value={totalCandles.toLocaleString()} color="cyan" />
-            <StatCard label="Unique Pairs" value={uniqueSymbols.length.toLocaleString()} color="green" />
+            <StatCard label="Datasets" value={summary.length.toLocaleString()} color="accent" sub="pair / interval combos" />
+            <StatCard label="Total Candles" value={totalCandles.toLocaleString()} color="info" />
+            <StatCard label="Unique Pairs" value={uniqueSymbols.length.toLocaleString()} color="success" />
             <StatCard label="Exchanges" value={uniqueExchanges.length.toLocaleString()} color="purple" />
           </>
         )}
       </div>
 
       {/* Download form */}
-      <GlowPanel glowColor="gold">
+      <GlowPanel glowColor="accent">
         <form onSubmit={handleDownload} className="space-y-5">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-5">
             {/* Step 1 — Source */}
             <div className="space-y-3">
               <div className="flex items-center gap-2">
-                <span className="w-5 h-5 rounded-full bg-accent/10 border border-accent/30 text-accent text-[10px] font-num font-bold flex items-center justify-center">1</span>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-muted">Source</span>
+                <span className="w-5 h-5 rounded-full bg-accent/10 border border-accent/30 text-accent text-2xs font-num font-bold flex items-center justify-center">1</span>
+                <span className="text-2xs font-bold uppercase tracking-wider text-muted">Source</span>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <Select label="Exchange" value={exchange} onChange={e => setExchange(e.target.value)}>
@@ -448,8 +448,8 @@ export default function DataManager({ openChart }) {
             {/* Step 2 — Range */}
             <div className="space-y-3">
               <div className="flex items-center gap-2">
-                <span className="w-5 h-5 rounded-full bg-accent/10 border border-accent/30 text-accent text-[10px] font-num font-bold flex items-center justify-center">2</span>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-muted">Interval & Range</span>
+                <span className="w-5 h-5 rounded-full bg-accent/10 border border-accent/30 text-accent text-2xs font-num font-bold flex items-center justify-center">2</span>
+                <span className="text-2xs font-bold uppercase tracking-wider text-muted">Interval & Range</span>
               </div>
               <div className="grid grid-cols-3 gap-3">
                 <Select label="Interval" required value={timeframe} onChange={e => setTimeframe(e.target.value)} className="font-num">
@@ -480,7 +480,7 @@ export default function DataManager({ openChart }) {
           </div>
 
           <div className="flex items-center justify-between gap-4 pt-4 border-t border-border">
-            <p className="text-[10px] text-faint">
+            <p className="text-2xs text-faint">
               {loading
                 ? 'Fetching candles from the exchange — large ranges can take a while.'
                 : 'Candles are stored locally, deduplicated per exchange, symbol and interval.'}
@@ -496,7 +496,7 @@ export default function DataManager({ openChart }) {
       <div className="space-y-3">
         <div className="flex flex-wrap gap-y-3 justify-between items-center">
           <div className="flex items-center gap-3 flex-wrap">
-            <span className="text-[10px] text-muted font-bold uppercase tracking-wider hidden md:inline">Filter</span>
+            <span className="text-2xs text-muted font-bold uppercase tracking-wider hidden md:inline">Filter</span>
             <div className="w-36">
               <Select value={filterSymbol} onChange={(e) => handleFilterSymbol(e.target.value)} className={filterSelectClass}>
                 <option value="ALL">All Pairs</option>
@@ -520,7 +520,7 @@ export default function DataManager({ openChart }) {
                 >
                   &#9664;
                 </button>
-                <span className="text-[9px] font-bold text-text px-2 font-num">PG {currentPage} / {totalPages}</span>
+                <span className="text-3xs font-bold text-text px-2 font-num">PG {currentPage} / {totalPages}</span>
                 <button
                   disabled={currentPage === totalPages}
                   onClick={() => setCurrentPage(p => p + 1)}

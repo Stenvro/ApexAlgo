@@ -23,7 +23,7 @@ const DataTable = ({ columns, data, emptyMessage = 'No data available', emptySta
             {columns.map((col) => (
               <th
                 key={col.key}
-                className={`px-4 py-2.5 text-[9px] font-bold uppercase tracking-wider text-muted bg-inset border-b border-border whitespace-nowrap ${alignClass(col.align)}`}
+                className={`px-3 py-2 text-3xs font-bold uppercase tracking-wider text-muted bg-surface border-b border-border whitespace-nowrap ${alignClass(col.align)}`}
               >
                 {col.label}
               </th>
@@ -35,7 +35,7 @@ const DataTable = ({ columns, data, emptyMessage = 'No data available', emptySta
             <tr>
               <td colSpan={columns.length} className="px-4 py-4">
                 {emptyState || (
-                  <p className="py-6 text-center text-[11px] text-muted">{emptyMessage}</p>
+                  <p className="py-6 text-center text-xs text-muted">{emptyMessage}</p>
                 )}
               </td>
             </tr>
@@ -44,12 +44,12 @@ const DataTable = ({ columns, data, emptyMessage = 'No data available', emptySta
               <tr
                 key={row.id ?? i}
                 onClick={onRowClick ? () => onRowClick(row) : undefined}
-                className={`group transition-colors duration-100 hover:bg-text/[0.03] ${onRowClick ? 'cursor-pointer' : ''}`}
+                className={`group transition-colors duration-100 hover:bg-overlay/50 ${onRowClick ? 'cursor-pointer' : ''}`}
               >
                 {columns.map((col) => (
                   <td
                     key={col.key}
-                    className={`px-4 py-2.5 text-[11px] font-num text-text border-b border-border/40 whitespace-nowrap ${alignClass(col.align)}`}
+                    className={`px-3 py-1.5 text-xs font-num text-text border-b border-border/60 whitespace-nowrap ${alignClass(col.align)}`}
                   >
                     {col.render ? col.render(row[col.key], row) : row[col.key]}
                   </td>

@@ -18,7 +18,7 @@
  *   <Select label="Exchange" value={ex} onChange={...}><option>okx</option></Select>
  */
 const fieldBase =
-  'w-full bg-inset border rounded-md px-3 py-2.5 text-sm text-text placeholder-faint outline-none transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed';
+  'w-full bg-inset border rounded-md px-3 py-2 text-xs text-text placeholder-faint outline-none transition-colors duration-200 disabled:opacity-50 disabled:cursor-not-allowed';
 
 const borderFor = (error) =>
   error
@@ -28,13 +28,13 @@ const borderFor = (error) =>
 const FieldWrap = ({ label, error, hint, children }) => (
   <label className="block w-full text-left">
     {label && (
-      <span className="block text-[10px] font-bold uppercase tracking-wider text-muted mb-1.5">
+      <span className="block text-2xs font-bold uppercase tracking-wider text-muted mb-1.5">
         {label}
       </span>
     )}
     {children}
-    {error && <span className="block text-[11px] text-danger mt-1.5">{error}</span>}
-    {!error && hint && <span className="block text-[11px] text-faint mt-1.5">{hint}</span>}
+    {error && <span className="block text-xs text-danger mt-1.5">{error}</span>}
+    {!error && hint && <span className="block text-xs text-faint mt-1.5">{hint}</span>}
   </label>
 );
 

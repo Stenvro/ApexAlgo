@@ -243,6 +243,16 @@ Aim for **reward:risk ≥ 1.5** on fixed targets, and let trailing stops handle 
 
 Windows: 1d = 1 000 candles (Dec 2023 → Sep 2026, includes the 2024–25 bull run and the 2026 drawdown); 4h = 6 000 candles (same period); "4h short" = 2 000 candles (Oct 2025 → Sep 2026, bear phase: BTC −31%, ETH −35%, SOL −45%). Buy & hold 50/50 BTC/ETH over the 1d window: **+49.5% with a 58.6% max drawdown**.
 
+**Re-verified on engine v2.0.0 (17 Sep 2026)** — the three shipped templates in `examples/`, run exactly as shipped with `scripts/verify_examples.py` (window 22 Dec 2023 → 16 Sep 2026). Trade count, win rate and max drawdown reproduce the rows below; the return differs by a few points only because the window end (and therefore the price the last open position is flattened at) has moved. With `--one-per-pair` (the pre-v2 behaviour) Donchian gives 21 trades / 52% / +17.5% / DD 23.7% — pyramiding adds one layer on repeated breakouts; the two cross-based templates never fire a BUY while in a position, so pyramiding does not change them.
+
+| Template (as shipped) | TF | Trades | Win % | Return | Max DD | Buy & hold |
+|---|---|---|---|---|---|---|
+| `Supertrend_Trend_1d` (BTC+ETH, 50%, `max_positions` 2 global) | 1d | 26 | 42 | +26.0% | 32.0% | BTC +73%, ETH +4% |
+| `Donchian_Breakout_1d` (BTC+ETH, 50%, `max_positions` 2 global) | 1d | 20 | 60 | +19.9% | 26.3% | BTC +73%, ETH +4% |
+| `EMA_Cross_4h` (BTC+ETH+SOL, 33%, `max_positions` 3 global) | 4h | 153 | 37 | +14.2% | 26.3% | BTC +75%, ETH +7%, SOL −5% |
+
+Original measurements (engine v1, one position per pair):
+
 | Strategy (pairs, size) | TF | Trades | Win % | Return | Max DD |
 |---|---|---|---|---|---|
 | Supertrend(10, 3) flip, trailing SL 15% (BTC+ETH, 50%) | 1d | 26 | 42 | **+28.8%** | 32.0% |
@@ -308,7 +318,7 @@ Output exactly **one** valid JSON document in a fenced code block. Use only meth
       "drawdown_action": "block_entries",
       "drawdown_cooldown_days": 7,
       "max_capital_loss": 30,
-      "max_order_value": 250,
+      "max_order_value": 1000,
       "live_allocation_pct": 100,
       "api_execution": false,
       "backtest_on_start": true,
@@ -403,7 +413,7 @@ For long daily backtests prefer Binance or Coinbase data; for Kraken use ≤ 720
 
 ## 6. Vetted templates
 
-Three complete files, all imported and backtested in the real engine (results in §4.9). Adapt pairs, fee and sizes; keep the structure. Each is deliberately minimal — every addition we tried made them worse.
+Three complete files, identical to `examples/*.apex.json` in the repository, all imported and backtested in the real engine (results in §4.9, re-verified on v2.0.0 with `scripts/verify_examples.py`; `tests/golden/` pins their order stream on synthetic data so an engine change can never silently alter them). Adapt pairs, fee and sizes; keep the structure. Each is deliberately minimal — every addition we tried made them worse.
 
 ### 6.1 Supertrend trend follower — 1d, flip in / flip out, 15% disaster trail
 
@@ -429,7 +439,7 @@ Backtest Dec 2023 → Sep 2026, BTC+ETH: **+28.8%, max DD 32.0%, 26 trades, 42% 
       "drawdown_action": "block_entries",
       "drawdown_cooldown_days": 14,
       "max_capital_loss": 40,
-      "max_order_value": 250,
+      "max_order_value": 1000,
       "live_allocation_pct": 100,
       "api_execution": false,
       "backtest_on_start": true,
@@ -487,7 +497,7 @@ Backtest Dec 2023 → Sep 2026, BTC+ETH: **+23.7%, max DD 23.7%, 21 trades, 52% 
       "drawdown_action": "block_entries",
       "drawdown_cooldown_days": 14,
       "max_capital_loss": 35,
-      "max_order_value": 250,
+      "max_order_value": 1000,
       "live_allocation_pct": 100,
       "api_execution": false,
       "backtest_on_start": true,
@@ -546,7 +556,7 @@ Backtest Dec 2023 → Sep 2026, BTC+ETH+SOL at 33%: **+15.3%, max DD 26.3%, 153 
       "drawdown_action": "block_entries",
       "drawdown_cooldown_days": 7,
       "max_capital_loss": 35,
-      "max_order_value": 250,
+      "max_order_value": 1000,
       "live_allocation_pct": 100,
       "api_execution": false,
       "backtest_on_start": true,

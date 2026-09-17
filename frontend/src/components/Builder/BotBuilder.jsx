@@ -391,8 +391,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
 
   // Esc asks to close (same dirty-check as the buttons); a browser reload with
   // unsaved work gets the native "leave page?" prompt.
-  const requestCloseRef = useRef(null);
-  requestCloseRef.current = requestClose;
+  const requestCloseRef = useRef(null);  // set below, once requestClose exists
   useEffect(() => {
       const onKey = (e) => {
           if (e.key !== 'Escape' || e.defaultPrevented) return;
@@ -538,6 +537,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
       if (choice === true) await handleSaveAndCompile();
       else if (choice === 'secondary') closeBuilder();
   };
+  requestCloseRef.current = requestClose;
 
   const handleSaveAndCompile = async () => {
     setSaving(true);
@@ -764,7 +764,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
 
   // Palette item styling per node class — colors are token utilities
   const paletteItem = (accentClasses) =>
-      `p-3 bg-inset border rounded-md text-[11px] font-bold cursor-pointer md:cursor-grab transition-colors uppercase tracking-wider select-none ${accentClasses}`;
+      `p-3 bg-inset border rounded-md text-xs font-bold cursor-pointer md:cursor-grab transition-colors uppercase tracking-wider select-none ${accentClasses}`;
 
   const PALETTE = [
       { title: '1. Setup & Context', items: [
@@ -804,7 +804,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
       </div>
 
       {/* Mobile overlay backdrop for toolbox */}
-      {toolboxOpen && <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[105] md:hidden fade-in" onClick={() => setToolboxOpen(false)}></div>}
+      {toolboxOpen && <div className="fixed inset-0 backdrop z-[105] md:hidden fade-in" onClick={() => setToolboxOpen(false)}></div>}
 
       {/* Left sidebar / toolbox — slides in from the left on mobile */}
       <div className={`fixed md:static inset-y-0 left-0 z-[110] w-72 bg-raised/95 backdrop-blur-xl border-r border-border flex flex-col shadow-pop transform transition-transform duration-300 ease-in-out ${toolboxOpen ? 'translate-x-0' : '-translate-x-full'} md:translate-x-0 h-[100dvh]`}>
@@ -812,7 +812,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
           <div className="absolute -top-8 -left-8 w-32 h-32 rounded-full blur-[60px] bg-accent/5 pointer-events-none" />
           <div className="relative">
             <h2 className="text-text font-bold tracking-wider text-lg">APEX<span className="text-accent">ALGO</span></h2>
-            <span className="text-[10px] text-muted uppercase tracking-widest">{editingBot ? 'Editing Architecture' : 'Algorithm Builder'}</span>
+            <span className="text-2xs text-muted uppercase tracking-widest">{editingBot ? 'Editing Architecture' : 'Algorithm Builder'}</span>
           </div>
           <button onClick={() => setToolboxOpen(false)} className="md:hidden text-muted hover:text-text p-2 font-bold text-lg transition-colors" aria-label="Close toolbox">✕</button>
         </div>
@@ -820,7 +820,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         <div className="flex-1 overflow-y-auto p-5 space-y-6 custom-scrollbar pb-24 md:pb-5">
             {PALETTE.map(section => (
                 <div key={section.title} className="space-y-3">
-                    <span className="text-[10px] font-bold text-muted uppercase tracking-wider block border-b border-border pb-1">{section.title}</span>
+                    <span className="text-2xs font-bold text-muted uppercase tracking-wider block border-b border-border pb-1">{section.title}</span>
                     {section.items.map(item => (
                         <div key={item.type}
                             className={paletteItem(item.cls)}
@@ -845,7 +845,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         {/* Floating top bar — bot name bound to the Main Configuration node */}
         {configNodeForName && (
             <div className="hidden md:flex absolute top-4 right-4 z-10 items-center gap-2 bg-raised/90 backdrop-blur-xl border border-border rounded-lg px-3 py-2 shadow-card">
-                <span className="text-[9px] font-bold uppercase tracking-wider text-muted whitespace-nowrap">Algorithm</span>
+                <span className="text-3xs font-bold uppercase tracking-wider text-muted whitespace-nowrap">Algorithm</span>
                 <input
                     type="text"
                     value={configNodeForName.data.botName ?? ''}
@@ -858,10 +858,10 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         {nodes.length > 0 && !hasStrategyNodes && !issues && (
           <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-10 pointer-events-none px-4 w-full max-w-md">
             <div className="bg-raised/90 backdrop-blur-xl border border-border rounded-lg px-4 py-3 shadow-card text-center fade-in">
-              <p className="text-[11px] text-text-secondary leading-relaxed">
+              <p className="text-xs text-text-secondary leading-relaxed">
                 <span className="font-semibold text-text">Build:</span> Indicator → Condition → Entry Action.
               </p>
-              <p className="text-[10px] text-muted mt-1">Drag or click blocks from the toolbox.</p>
+              <p className="text-2xs text-muted mt-1">Drag or click blocks from the toolbox.</p>
             </div>
           </div>
         )}
@@ -872,7 +872,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
                 <svg className="w-3.5 h-3.5 text-danger shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M12 3l9 16H3l9-16z" />
                 </svg>
-                <span className="text-[10px] font-bold uppercase tracking-wider text-danger flex-1">Not saved — {issues.errors.length} issue{issues.errors.length === 1 ? '' : 's'} to fix</span>
+                <span className="text-2xs font-bold uppercase tracking-wider text-danger flex-1">Not saved — {issues.errors.length} issue{issues.errors.length === 1 ? '' : 's'} to fix</span>
                 <button type="button" onClick={() => setIssues(null)} aria-label="Dismiss validation issues" className="text-faint hover:text-text p-1 -mr-1 transition-colors">
                   <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" /></svg>
                 </button>
@@ -881,10 +881,10 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
                 {issues.errors.map((line, i) => {
                   const m = /Node '([^']+)'/.exec(line);
                   return (
-                    <li key={i} className="px-4 py-2 text-[11px] text-text leading-snug flex items-start gap-2">
+                    <li key={i} className="px-4 py-2 text-xs text-text leading-snug flex items-start gap-2">
                       <span className="flex-1">{line}</span>
                       {m && nodes.some(n => n.id === m[1]) && (
-                        <button type="button" onClick={() => focusNode(m[1])} className="text-[10px] text-info hover:underline shrink-0">show</button>
+                        <button type="button" onClick={() => focusNode(m[1])} className="text-2xs text-info hover:underline shrink-0">show</button>
                       )}
                     </li>
                   );

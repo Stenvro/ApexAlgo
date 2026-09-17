@@ -25,7 +25,7 @@ const VARIANTS = {
 const Badge = ({ variant = 'neutral', dot = false, pulse = false, className = '', title, children }) => (
   <span
     title={title}
-    className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border text-[10px] font-bold uppercase tracking-wider whitespace-nowrap ${VARIANTS[variant] || VARIANTS.neutral} ${className}`}
+    className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-sm border text-2xs font-bold uppercase tracking-wider whitespace-nowrap ${VARIANTS[variant] || VARIANTS.neutral} ${className}`}
   >
     {dot && (
       <span

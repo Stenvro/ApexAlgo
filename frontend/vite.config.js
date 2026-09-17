@@ -6,11 +6,14 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+// Single source for the version shown in the UI: bump package.json, rebuild
+const pkg = JSON.parse(fs.readFileSync(path.resolve(__dirname, 'package.json'), 'utf8'))
 const certPath = path.resolve(__dirname, '../.cert/cert.pem')
 const keyPath = path.resolve(__dirname, '../.cert/key.pem')
 
 export default defineConfig({
   envDir: '../',
+  define: { __APP_VERSION__: JSON.stringify(pkg.version) },
   plugins: [
     react(),
     tailwindcss(),
