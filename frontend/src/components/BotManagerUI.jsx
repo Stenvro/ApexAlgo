@@ -155,34 +155,20 @@ const fmtDay = (iso) => {
   return Number.isNaN(d.getTime()) ? '?' : d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: '2-digit' });
 };
 
-/* What the last backtest said — the number the drawdown gate enforces, the
-   range it walked, and a jump to the same trades in Analytics */
+/* One slim line: how many configurations of this strategy have been
+   backtested, the range the last one walked, and a jump to Analytics — the
+   performance numbers themselves live there, not on the card */
 function BacktestResult({ bot }) {
   const sm = bot.last_backtest_summary ?? bot.settings?.last_backtest_summary;
   if (!sm || typeof sm.trades !== 'number') return null;
-  const net = Number(sm.net_pnl) || 0;
-  const ret = Number(sm.return_pct) || 0;
-  const dd = Number(sm.max_drawdown) || 0;
-  const limit = Number(bot.settings?.max_drawdown) || 0;
   const variants = Number(sm.variants) || 0;
-  const cell = (label, value, cls = 'text-text', title) => (
-    <div className="flex flex-col min-w-0" title={title}>
-      <span className="text-[8px] font-bold uppercase tracking-wider text-faint">{label}</span>
-      <span className={`text-[11px] font-num font-bold ${cls}`}>{value}</span>
-    </div>
-  );
   return (
-    <div className="px-5 py-2.5 border-b border-border bg-bg/40 flex items-center justify-between gap-3 flex-wrap"
-      title={variants > 0 ? `Variant #${variants} — ${variants} distinct configuration${variants === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.` : undefined}>
-      <div className="flex items-center gap-4 flex-wrap">
-        <span className="text-[8px] font-bold uppercase tracking-widest text-muted self-start pt-0.5">Backtest{variants > 0 && <span className="text-faint"> #{variants}</span>}</span>
-        {cell('Net PnL', `${net >= 0 ? '+' : '-'}$${Math.abs(net).toFixed(2)}`, net >= 0 ? 'text-success' : 'text-danger')}
-        {cell('Return', `${ret >= 0 ? '+' : ''}${ret.toFixed(1)}%`, ret >= 0 ? 'text-success' : 'text-danger', `on $${Number(bot.settings?.backtest_capital) || 1000} starting capital`)}
-        {cell('Trades', `${sm.trades}${sm.trades > 0 ? ` · ${Number(sm.win_rate || 0).toFixed(0)}% win` : ''}`)}
-        {cell('Max DD', `-${dd.toFixed(1)}%${limit > 0 ? ` / ${limit}%` : ''}`, limit > 0 && dd >= limit ? 'text-danger' : 'text-text',
-          limit > 0 ? `Mark-to-market drawdown vs the ${limit}% limit that stops the bot` : 'Mark-to-market drawdown (no limit set)')}
+    <div className="px-5 py-2 border-b border-border bg-bg/40 flex items-center justify-between gap-3">
+      <div className="flex items-center gap-2 min-w-0 text-[9px] font-num text-muted"
+        title={variants > 0 ? `${variants} distinct configuration${variants === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.` : undefined}>
+        <span className="font-bold uppercase tracking-widest">Backtest{variants > 0 && <span className="text-faint"> #{variants}</span>}</span>
         {sm.data_from && sm.data_to && (
-          <span className="text-[9px] font-num text-muted self-end pb-px">{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>
+          <span className="truncate">{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>
         )}
       </div>
       <button type="button"
