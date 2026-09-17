@@ -64,11 +64,44 @@ def test_per_pair_scope_still_allows_one_position_per_symbol(db):
     assert _max_concurrent(positions) == 2
 
 
-@pytest.mark.parametrize("scope", ["global", "per_pair"])
-def test_never_more_than_one_position_per_symbol(db, scope):
-    positions = _run(db, _settings(max_positions=5, scope=scope))
+def test_per_pair_pyramids_up_to_max_positions_on_each_symbol(db):
+    """entry is always true, so every candle adds a position until the cap"""
+    positions = _run(db, _settings(max_positions=3, scope="per_pair"))
     for sym in SYMBOLS:
-        assert _max_concurrent([p for p in positions if p.symbol == sym]) == 1
+        assert _max_concurrent([p for p in positions if p.symbol == sym]) == 3
+    assert _max_concurrent(positions) == 6
+
+
+def test_global_scope_pyramids_up_to_max_positions_across_the_portfolio(db):
+    positions = _run(db, _settings(max_positions=3, scope="global"))
+    assert _max_concurrent(positions) == 3
+    assert {p.symbol for p in positions} == set(SYMBOLS)
+
+
+def test_each_pyramided_position_has_its_own_stops_and_a_sell_flattens_the_pair(db):
+    from backend.models.orders import Order
+    s = _settings(max_positions=3, scope="per_pair")
+    # Wide stops so the SELL signal (red candle) is what closes the layers
+    s["trade_settings"]["entry"]["stop_losses"][0]["value"] = 90
+    s["trade_settings"]["entry"]["take_profits"][0]["value"] = 900
+    s["nodes"]["exit"] = {"class": "condition", "left": "close", "operator": "<", "right": "open"}
+    s["exit_node"] = "exit"
+    positions = _run(db, s)
+    assert _max_concurrent(positions) == 6
+    for p in positions:
+        orders = db.query(Order).filter(Order.position_id == p.id, Order.status == "filled").all()
+        # Every layer enters once and exits once, on its own candle
+        assert sorted(o.side for o in orders) == ["buy", "sell"]
+        assert p.status == "closed"
+    # A SELL closes every layer of the pair that was open before that candle
+    # (the layer opened on the SELL candle itself waits for the next one)
+    for sym in SYMBOLS:
+        sym_pos = [p for p in positions if p.symbol == sym]
+        last_ts = max(p.closed_at for p in sym_pos)  # end-of-data flatten, not a SELL
+        for ts in {p.closed_at for p in sym_pos if p.closed_at != last_ts}:
+            open_before = {p.id for p in sym_pos if p.created_at < ts and (p.closed_at >= ts)}
+            closed_at_ts = {p.id for p in sym_pos if p.closed_at == ts}
+            assert open_before == closed_at_ts, f"{sym} @ {ts}: partial flatten"
 
 
 def test_backtest_partial_take_profits_are_a_share_of_the_original_amount(db):

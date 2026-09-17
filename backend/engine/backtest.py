@@ -106,7 +106,6 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
         current_high = float(row['high'])
         current_low = float(row['low'])
         ctx["last_close"] = current_price
-        just_opened_this_tick = False
 
         is_buy = bool(ctx["entry_arr"][index])
         is_sell = bool(ctx["exit_arr"][index])
@@ -114,7 +113,7 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
         current_atr = float(atr_arr[index]) if atr_arr is not None and not pd.isna(atr_arr[index]) else 0.0
 
         if run_backtest and (ctx["last_bt_ts"] is None or ts > ctx["last_bt_ts"]):
-            open_bt_pos = ctx["open_pos"]
+            open_list = ctx["open_positions"]
 
             # Cooldown check: block entry if too many trades occurred within the cooldown window
             can_buy_cooldown = True
@@ -123,13 +122,17 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                 if len(recent_trades) >= cooldown_trades:
                     can_buy_cooldown = False
 
-            # Global scope caps the portfolio across all pairs, exactly
-            # as the live gate does — a backtest of a strategy the live
-            # bot is never allowed to run says nothing about it
-            open_global = sum(1 for c2 in sym_contexts if c2["open_pos"] is not None)
-            slot_free = max_pos_scope == "per_pair" or open_global < max_pos
+            # max_positions is the pyramiding cap, exactly as the live gate
+            # applies it: per_pair counts this symbol, global counts the
+            # whole portfolio — a backtest of a strategy the live bot is
+            # never allowed to run says nothing about it
+            if max_pos_scope == "per_pair":
+                slot_free = len(open_list) < max_pos
+            else:
+                slot_free = sum(len(c2["open_positions"]) for c2 in sym_contexts) < max_pos
+            just_opened = None
             # Capital depletion halt / drawdown block: no new entries, exits keep running
-            if is_buy and not open_bt_pos and slot_free and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
+            if is_buy and slot_free and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
                 trade_amount = calculate_trade_amount(current_price, bot.settings, current_equity=bt_equity)
                 if trade_amount is not None:
                     bt_entry_price = current_price * (1 + bt_entry_slippage)
@@ -144,28 +147,32 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                     total_cost = investment_cost * (1 + bt_entry_fee)
                     if trade_amount > 0 and total_cost <= bt_equity + 1e-9:
                         ctx["trade_entry_indices"].append(index)
-                        ctx["original_amount"] = trade_amount
                         bt_equity = max(bt_equity - total_cost, 0.0)  # Lock capital + entry fee
-                        open_bt_pos = Position(exchange=exchange_name, bot_name=bot.name, symbol=symbol, mode="backtest", status="open", side="long", entry_price=bt_entry_price, amount=trade_amount, created_at=_naive_utc(ts))
-                        db.add(open_bt_pos)
+                        just_opened = Position(exchange=exchange_name, bot_name=bot.name, symbol=symbol, mode="backtest", status="open", side="long", entry_price=bt_entry_price, amount=trade_amount, created_at=_naive_utc(ts))
+                        db.add(just_opened)
                         db.flush()
-                        db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="buy", order_type="market", price=bt_entry_price, amount=trade_amount, timestamp=_naive_utc(ts), status="filled", fee=investment_cost * bt_entry_fee))
-                        ctx["open_pos"] = open_bt_pos
-                        just_opened_this_tick = True
+                        db.add(Order(position_id=just_opened.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="buy", order_type="market", price=bt_entry_price, amount=trade_amount, timestamp=_naive_utc(ts), status="filled", fee=investment_cost * bt_entry_fee))
+                        open_list.append(just_opened)
+                        ctx["original_amount"][just_opened.id] = trade_amount
 
-            elif open_bt_pos and not just_opened_this_tick:
+            # Every position carries its own SL/TP/trailing state; a SELL
+            # signal reaches each of them, so it flattens the whole pair.
+            # The position opened on this candle is not evaluated until
+            # the next one (same as live)
+            for open_bt_pos in list(open_list):
+                if open_bt_pos is just_opened:
+                    continue
                 exit_events = check_exits(open_bt_pos, current_price, current_high, current_low, is_sell, bot.settings, current_atr, row_open=current_open)
 
                 for ev in exit_events:
-                    open_bt_pos = ctx["open_pos"]
-                    if open_bt_pos is None: break
+                    if open_bt_pos.status == "closed": break
 
                     if ev.get('close_amount_type') == 'fixed':
                         close_qty = min(ev['qty_pct'], open_bt_pos.amount)
                     else:
                         # Percentage of the *original* size, so two 50% take-
                         # profits close the whole position instead of 75%
-                        _base_qty = ctx["original_amount"] or open_bt_pos.amount
+                        _base_qty = ctx["original_amount"].get(open_bt_pos.id) or open_bt_pos.amount
                         close_qty = _base_qty * (ev['qty_pct'] / 100)
                     close_qty = min(close_qty, open_bt_pos.amount)
                     if close_qty <= 0: continue
@@ -182,7 +189,7 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                     bt_equity += exit_proceeds
 
                     # Weighted profit_pct: accumulate based on portion of original position closed (fee-adjusted)
-                    original_amount = ctx["original_amount"]
+                    original_amount = ctx["original_amount"].get(open_bt_pos.id)
                     if original_amount and original_amount > 0:
                         portion_pct = (realized_pnl / entry_cost) * 100 if entry_cost > 0 else 0.0
                         weight = close_qty / original_amount
@@ -198,8 +205,8 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                         open_bt_pos.closed_at = _naive_utc(ts)
                         with states_lock:
                             position_states.pop(open_bt_pos.id, None)
-                        ctx["open_pos"] = None
-                        ctx["original_amount"] = None
+                        open_list.remove(open_bt_pos)
+                        ctx["original_amount"].pop(open_bt_pos.id, None)
                     else:
                         open_bt_pos.amount -= close_qty
 
@@ -213,9 +220,8 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
         if run_backtest:
             open_value = 0.0
             for c2 in sym_contexts:
-                p2 = c2["open_pos"]
-                if p2 is not None and c2["last_close"]:
-                    open_value += p2.amount * c2["last_close"]
+                if c2["last_close"]:
+                    open_value += sum(p2.amount for p2 in c2["open_positions"]) * c2["last_close"]
             equity_now = bt_equity + open_value
             if equity_now > bt_peak_equity:
                 bt_peak_equity = equity_now
@@ -226,7 +232,7 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                 bt_dd_detail = {
                     "peak_ts": bt_peak_ts, "peak_eq": bt_peak_equity,
                     "trough_ts": ts, "trough_eq": equity_now,
-                    "open_at_trough": sum(1 for c2 in sym_contexts if c2["open_pos"] is not None),
+                    "open_at_trough": sum(len(c2["open_positions"]) for c2 in sym_contexts),
                 }
             if bt_starting_capital > 0:
                 bt_max_loss = max(bt_max_loss, ((bt_starting_capital - equity_now) / bt_starting_capital) * 100)
@@ -266,34 +272,33 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
     # never become a tracked live position.
     if run_backtest:
         for ctx in sym_contexts:
-            open_bt_pos = ctx["open_pos"]
-            if not open_bt_pos:
-                continue
             df_s = ctx["df"]
             last_price = float(df_s.iloc[-1]['close'])
-            remaining_qty = open_bt_pos.amount
             last_ts = df_s.iloc[-1]['timestamp']
             if last_ts.tzinfo is None: last_ts = last_ts.replace(tzinfo=timezone.utc)
+            for open_bt_pos in list(ctx["open_positions"]):
+                remaining_qty = open_bt_pos.amount
 
-            entry_cost = open_bt_pos.entry_price * remaining_qty * (1 + bt_entry_fee)
-            exit_proceeds = last_price * remaining_qty * (1 - bt_exit_fee)
-            final_pnl = exit_proceeds - entry_cost
+                entry_cost = open_bt_pos.entry_price * remaining_qty * (1 + bt_entry_fee)
+                exit_proceeds = last_price * remaining_qty * (1 - bt_exit_fee)
+                final_pnl = exit_proceeds - entry_cost
 
-            open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + final_pnl
-            original_amount = ctx["original_amount"]
-            if original_amount and original_amount > 0:
-                portion_pct = (final_pnl / entry_cost) * 100 if entry_cost > 0 else 0.0
-                weight = remaining_qty / original_amount
-                open_bt_pos.profit_pct = (open_bt_pos.profit_pct or 0.0) + (portion_pct * weight)
+                open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + final_pnl
+                original_amount = ctx["original_amount"].get(open_bt_pos.id)
+                if original_amount and original_amount > 0:
+                    portion_pct = (final_pnl / entry_cost) * 100 if entry_cost > 0 else 0.0
+                    weight = remaining_qty / original_amount
+                    open_bt_pos.profit_pct = (open_bt_pos.profit_pct or 0.0) + (portion_pct * weight)
 
-            open_bt_pos.status = "closed"
-            open_bt_pos.closed_at = _naive_utc(last_ts)
-            bt_equity += exit_proceeds  # Return proceeds to capital pool
-            db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=ctx["symbol"], side="sell", order_type="market", price=last_price, amount=remaining_qty, timestamp=_naive_utc(last_ts), status="filled", fee=last_price * remaining_qty * bt_exit_fee))
+                open_bt_pos.status = "closed"
+                open_bt_pos.closed_at = _naive_utc(last_ts)
+                bt_equity += exit_proceeds  # Return proceeds to capital pool
+                db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=ctx["symbol"], side="sell", order_type="market", price=last_price, amount=remaining_qty, timestamp=_naive_utc(last_ts), status="filled", fee=last_price * remaining_qty * bt_exit_fee))
 
-            with states_lock:
-                position_states.pop(open_bt_pos.id, None)
-            ctx["open_pos"] = None
+                with states_lock:
+                    position_states.pop(open_bt_pos.id, None)
+            ctx["open_positions"] = []
+            ctx["original_amount"] = {}
 
     # Commit signals in batches — INSERT OR IGNORE respects the unique constraint
     for ctx in sym_contexts:

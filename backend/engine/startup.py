@@ -250,7 +250,7 @@ def execute_sync_backfill(engine, bot_id: int):
 
             existing_timestamps = {_naive_utc(s[0]) for s in db.query(Signal.timestamp).filter(Signal.bot_name == bot.name, Signal.symbol == symbol).all()}
 
-            open_bt_pos = None
+            open_bt_positions = []
             last_bt_ts = None
 
             if run_backtest:
@@ -263,7 +263,7 @@ def execute_sync_backfill(engine, bot_id: int):
                     last_bt_ts = last_order.timestamp
                     if last_bt_ts.tzinfo is None: last_bt_ts = last_bt_ts.replace(tzinfo=timezone.utc)
 
-                open_bt_pos = db.query(Position).filter(Position.bot_name == bot.name, Position.symbol == symbol, Position.mode == "backtest", Position.status == "open").first()
+                open_bt_positions = db.query(Position).filter(Position.bot_name == bot.name, Position.symbol == symbol, Position.mode == "backtest", Position.status == "open").order_by(Position.id).all()
 
             entry_series = evaluator.resolve_node(bot.settings.get("entry_node")) if bot.settings.get("entry_node") else pd.Series(False, index=evaluator.df.index)
             exit_series = evaluator.resolve_node(exit_node) if exit_node else pd.Series(False, index=evaluator.df.index)
@@ -279,8 +279,8 @@ def execute_sync_backfill(engine, bot_id: int):
                 "indicator_cols": [c for c in evaluator.df.columns if c not in _standard_cols],
                 "existing_timestamps": existing_timestamps,
                 "last_bt_ts": last_bt_ts,
-                "open_pos": open_bt_pos,
-                "original_amount": None,  # for weighted profit_pct calculation
+                "open_positions": open_bt_positions,  # pyramided up to max_positions
+                "original_amount": {},  # pos.id -> entry size, for weighted profit_pct / partial exits
                 "trade_entry_indices": [],
                 "new_signals": [],
                 "last_close": None,

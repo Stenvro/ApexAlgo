@@ -60,8 +60,8 @@ export const BotConfigNode = ({ id, data }) => (
       <div className="pt-2 border-t border-border">
         <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Position Limit Scope</label>
         <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-purple outline-none" value={data.maxPositionsScope !== undefined ? data.maxPositionsScope : "per_pair"} onChange={(e) => data.onChange(id, 'maxPositionsScope', e.target.value)}>
-          <option value="per_pair">Per Pair (e.g. 1x BTC, 1x ETH)</option>
-          <option value="global">Global (Total across wallet)</option>
+          <option value="per_pair">Per Pair (up to N layers on each symbol)</option>
+          <option value="global">Global (up to N open positions in total)</option>
         </select>
       </div>
 

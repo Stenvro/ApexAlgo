@@ -122,12 +122,11 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
     ccxt_symbol = symbol.replace('-', '/').upper()
     if is_buy and entries_blocked:
         blb.push(bot.name, "INFO", f"BUY signal on {symbol} skipped — entries blocked by max drawdown")
-    elif is_buy and bot_positions:
-        # Parity with the backtest, which holds exactly one position per
-        # pair: a second BUY on a symbol that is already open is never
-        # pyramided, whatever max_positions_scope says
-        blb.push(bot.name, "INFO", f"BUY signal on {symbol} skipped — position already open on {symbol}")
-    elif is_buy and open_count < max_pos and can_buy_cooldown:
+    elif is_buy and open_count >= max_pos:
+        # Pyramiding cap, same rule as the backtest (per_pair: this symbol,
+        # global: the whole portfolio)
+        blb.push(bot.name, "INFO", f"BUY signal on {symbol} skipped — max_positions ({max_pos}) reached")
+    elif is_buy and can_buy_cooldown:
         trade_amount = engine._calculate_trade_amount(current_price, bot.settings)
         if trade_amount is None:
             logger.warning("Skipping buy for %s: invalid trade amount", symbol)

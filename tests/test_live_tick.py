@@ -316,13 +316,18 @@ def test_skipped_entry_still_evaluates_stop_loss(db, live_bot, run_tick):
     assert db.get(Position, pos.id).status == "closed"
 
 
-def test_second_buy_on_open_symbol_is_skipped(db, live_bot, run_tick):
+def test_second_buy_pyramids_until_max_positions(db, live_bot, run_tick):
+    """Same rule as the backtest: a BUY on a symbol that is already open adds
+    a position until max_positions, then is skipped."""
     _, candles = live_bot(_settings(entry_always=True, max_positions=2, scope="global"))
     _open_live_position(db, candles)
     mock = ExchangeMock(free_quote=10_000.0)
     run_tick(mock)
-    assert mock.created == []
-    assert len(_positions(db, "open")) == 1
+    assert len(mock.created) == 1
+    assert len(_positions(db, "open")) == 2
+    run_tick(mock)
+    assert len(mock.created) == 1, "cap reached — third BUY must be skipped"
+    assert len(_positions(db, "open")) == 2
 
 
 # ── concurrency (plan 1.5) ─────────────────────────────────────────────────
