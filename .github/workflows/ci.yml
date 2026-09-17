@@ -18,7 +18,7 @@ jobs:
             requirements.txt
             requirements-dev.txt
       - run: pip install -r requirements-dev.txt
-      - run: ruff check backend tests
+      - run: ruff check backend tests scripts
       - run: pytest -q tests
         env:
           # conftest pins a temp DB + throw-away keys itself; set here so a

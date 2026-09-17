@@ -1,6 +1,6 @@
 # ApexAlgo — Beta Tester Guide
 
-> Applies to **v1.0.0A** and later.
+> Applies to **v2.0.0** and later (v2 changed how forward tests and `max_positions` behave — see the release notes if you upgrade from v1).
 
 Welcome to the ApexAlgo beta! ApexAlgo is a self-hosted, no-code crypto trading platform: you build strategies visually (or import them), backtest them on real historical data, and run them in paper or live mode against your own exchange account.
 
@@ -77,7 +77,7 @@ The repo contains `STRATEGY_CONTEXT.md`. Paste that file into any capable AI ass
 - **`Max order value` is mandatory for live bots** — the app refuses to start a live bot without this hard cap per order. Set it low.
 - Set **Max drawdown** (e.g. 10–15%): by default the bot then automatically closes its positions and stops if the equity curve drops that far from its peak. You can switch **On max drawdown** to *Block new entries* instead (exits keep working, no forced liquidation) — if you do, also set **Max capital loss %** as the hard stop, since blocking entries alone does not cap losses on open positions.
 - Fill in your exchange's real **fee** (e.g. 0.1%) in the trade settings — backtests without fees are misleadingly optimistic.
-- After any backend restart, compare the bot's open positions in the UI with your exchange account before letting it continue.
+- After any backend restart the bot reconciles its open positions with your exchange balances before going live and stops with an error if they don't match — still glance at the exchange yourself before letting it continue.
 
 ### If you suspect a leak or anything weird
 

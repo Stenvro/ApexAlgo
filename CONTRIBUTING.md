@@ -34,14 +34,14 @@ Useful reference material while working on the engine or builder:
 - `dev` is the working branch; `master` only receives releases. **Open pull requests against `dev`.**
 - Fork the repository, create a branch from `dev` (`git checkout -b fix/short-description dev`), commit with a clear message (`fix:`, `feat:`, `perf:`, `docs:` prefixes are used throughout the history) and open a PR.
 - Keep PRs focused. A bug fix and an unrelated refactor should be two PRs.
-- Describe *how you tested* the change. For engine changes, a backtest before/after on the same bot export is the most convincing evidence.
+- Describe *how you tested* the change. Run `python -m pytest -q tests` (see README → Tests and lint); for engine changes the golden backtests must stay byte-identical, or the PR must say why a snapshot was regenerated (`UPDATE_GOLDEN=1`) and what changed in the trades.
 - Don't commit anything from `data/` (database, `.env`, certificates) — `.gitignore` already blocks it, keep it that way.
 
 ## Code style
 
 **Backend (Python 3.11+, FastAPI, SQLAlchemy)**
 - Follow the surrounding code; no new dependencies without a good reason (every one is pinned in `requirements.txt`).
-- Every file must at least pass `python -m py_compile`; `ruff check backend` should stay clean.
+- `ruff check backend tests scripts` and `python -m pytest -q tests` must stay green (CI runs both). New engine behaviour needs a test next to the existing ones in `tests/`.
 - Schema changes go through the idempotent migrations in `backend/core/database.py::run_migrations()` — they run on every startup, so they must be safe to re-run.
 - Anything that can place a real order must keep the existing safety rails (`max_order_value`, balance verification, fill reconciliation). If in doubt, ask in the issue first.
 
@@ -61,6 +61,8 @@ Pull requests adding strategies to [`examples/`](examples/) are very welcome. Re
 - Export from the builder as `.apex.json` and name it `Descriptive_Name.apex.json`.
 - No API key names, `api_execution` must be `false`, sandbox flags off.
 - Include a short description of the idea and the backtest period/pair(s) you validated it on in the PR. Educational value counts more than headline returns.
+- Paste the output of `python scripts/verify_examples.py --only <YourFile>` in the PR — that is the number we document for it in `STRATEGY_CONTEXT.md` §4.9.
+- Run `python -m pytest -q tests/test_golden_backtest.py` once: it writes `tests/golden/<YourFile>.json` for the new example. Commit that file too; from then on the engine tests guard your strategy's trades.
 
 ## License of contributions
 

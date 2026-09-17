@@ -25,6 +25,7 @@ venv/
 env/
 apexalgo_venv/
 .pytest_cache/
+.ruff_cache/
 
 # --- FRONTEND (REACT/VITE) ---
 node_modules/

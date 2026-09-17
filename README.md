@@ -215,6 +215,26 @@ Required when changing `package.json`, `requirements.txt`, Dockerfiles, or entry
 docker compose build && docker compose up -d
 ```
 
+### Tests and lint
+
+The backend test suite runs against a throw-away SQLite file (your `data/` database is never touched) and covers the exit-rule table, a full live tick against a mocked exchange, backtest/live parity, the routers, and **golden backtests**: every example strategy is run on deterministic synthetic candles and its order stream is compared with `tests/golden/*.json`, so an engine change can never silently alter a strategy's trades.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest -q tests                 # ~75 s
+ruff check backend tests scripts
+cd frontend && npm run lint && npm run build
+```
+
+If a golden snapshot changes on purpose, regenerate it with `UPDATE_GOLDEN=1 python -m pytest -q tests/test_golden_backtest.py` and review the diff. To reproduce the example results on real exchange data (`STRATEGY_CONTEXT.md` §4.9):
+
+```bash
+python scripts/verify_examples.py          # all examples, as shipped
+python scripts/verify_examples.py --only Supertrend --one-per-pair
+```
+
+The same checks run in GitHub Actions on every push and pull request.
+
 ### Custom LAN Access
 
 By default both ports bind to `127.0.0.1` (local machine only). To reach the UI from other devices on your network, start with:
@@ -330,9 +350,17 @@ ApexAlgo/
 │   │   ├── events.py              # Async event bus (CANDLE_CLOSED, BOT_STATE_CHANGED)
 │   │   └── security.py            # API key authentication
 │   ├── engine/
-│   │   ├── bot_manager.py         # Core trading engine: backfill, live processing, order execution, indicator fingerprinting, drawdown caching
+│   │   ├── bot_manager.py         # Engine front door: state, locks, CANDLE_CLOSED dispatch to the modules below
+│   │   ├── backtest.py            # Chronological multi-pair simulation against one capital pool (pyramiding, MTM drawdown)
+│   │   ├── live_cycle.py          # One live candle: entries, exits, signal batch, close-all
+│   │   ├── startup.py             # Bot start: data wait/backfill, backtest, drawdown gate, reconciliation, go-live
+│   │   ├── exits.py               # SL/TP/trailing/ATR/multi-tier exit rule table (shared by backtest and live)
+│   │   ├── risk.py                # Drawdown / capital-loss tracking, unrealized PnL
+│   │   ├── sizing.py              # Trade sizing, capital pools, config fingerprints
+│   │   ├── broker.py              # ccxt plumbing: order reconciliation, cancel, min-notional, wallet checks
 │   │   ├── candle_poller.py       # Universal multi-exchange REST polling with incremental backfill
 │   │   ├── evaluator.py           # Node graph resolver using pandas_ta (memoized per evaluation cycle)
+│   │   ├── indicator_registry.py  # Single source of truth for builder indicators (served at /api/indicators)
 │   │   └── settings_validator.py  # Bot settings integrity checks
 │   ├── models/
 │   │   ├── bots.py                # BotConfig ORM
@@ -348,7 +376,7 @@ ApexAlgo/
 │   └── src/
 │       ├── api/                   # Axios client (same-origin by default), error humanizer
 │       ├── theme.js               # Light/dark theme state + token access
-│       ├── examples/              # Bundled example strategies (one-click loader)
+│       ├── examples/              # One-click loader; imports the strategies from the root examples/
 │       └── components/
 │           ├── Builder/           # Visual strategy editor (BotBuilder, CustomNodes, indicatorConfig)
 │           ├── ui/                # Design-system primitives (Button, Toast, Modal, DataTable, …)
@@ -370,10 +398,16 @@ ApexAlgo/
 │   ├── Setup.sh                   # Full setup (Python, Node, venv, deps, certs, .env)
 │   ├── Start_ApexAlgo.sh          # Start backend + frontend in screen sessions
 │   └── Switch_Mode.sh             # Switch between Docker and screen sessions
-├── examples/                      # Verified importable strategies (.apex.json)
+├── examples/                      # Verified importable strategies (.apex.json) — results in STRATEGY_CONTEXT.md §4.9
+├── scripts/
+│   └── verify_examples.py         # Re-runs the examples on real exchange candles in a temp DB (reproduces §4.9)
+├── tests/                         # pytest suite: exit rules, live tick with exchange mock, parity, routers, golden backtests
+│   └── golden/                    # Pinned order streams of the example strategies on synthetic candles
+├── .github/workflows/ci.yml       # pytest + ruff + npm lint/build on push and PR
 ├── docker-compose.yml             # Two services; ports on 127.0.0.1 by default (BIND_ADDR opt-in)
 ├── data/                          # Database, .env, SSL certs (gitignored)
 ├── requirements.txt
+├── requirements-dev.txt           # pytest, ruff, httpx (tests + lint)
 ├── BETA.md                        # Beta tester guide (setup, safety rules, troubleshooting)
 └── STRATEGY_CONTEXT.md            # AI context: builder reference + .apex.json import schema
 ```
@@ -423,7 +457,7 @@ Strategy Builder (ReactFlow) ──serialize──> Bot Settings JSON
 
 Each bot card in the Bot Manager has an expandable console panel. It streams the bot's engine output in real time by polling `GET /api/bots/{name}/logs?since={seq}` every 2 seconds while the panel is open — zero overhead when closed.
 
-Logs are written to the `bot_logs` SQLite table by `bot_manager.py` at key execution points:
+Logs are written to the `bot_logs` SQLite table by the engine (`backend/engine/`) at key execution points:
 
 | Event | Level |
 | :--- | :--- |

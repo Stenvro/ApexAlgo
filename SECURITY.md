@@ -24,7 +24,7 @@ Areas that matter most:
 
 - API authentication (`X-API-Key`, `backend/core/security.py`) and the login gate in the web UI.
 - Encryption of exchange credentials at rest (`backend/core/encryption.py`) and any path where a secret could end up in logs, exports or API responses.
-- The live order path in `backend/engine/bot_manager.py` (sizing, `max_order_value`, fill reconciliation).
+- The live order path in `backend/engine/live_cycle.py` and `backend/engine/broker.py` (sizing, `max_order_value`, fill reconciliation).
 - The Docker/nginx setup (TLS, CSP, port binding, non-root container).
 
 Out of scope: vulnerabilities in third-party exchanges, issues that require an attacker to already control the host or the `data/` directory, and trading losses caused by strategy logic.
