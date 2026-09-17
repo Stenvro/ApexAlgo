@@ -27,12 +27,12 @@ const ALL_TIMEFRAMES = [
 export const BotConfigNode = ({ id, data }) => (
   <div className="bg-raised/90 backdrop-blur-xl border border-purple rounded-xl shadow-lg w-[340px]">
     <div className="bg-purple/10 px-3 py-2 border-b border-purple/30 flex justify-between items-center">
-      <span className="font-bold text-purple text-[11px] uppercase tracking-wider">MAIN CONFIGURATION</span>
+      <span className="font-bold text-purple text-xs uppercase tracking-wider">MAIN CONFIGURATION</span>
       {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove main configuration block" title="Remove block">✕</button>}
     </div>
     <div className="p-4 bg-bg/80 rounded-b space-y-4">
       <div>
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Algorithm Name</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Algorithm Name</label>
         <input 
           type="text" 
           className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-purple outline-none"
@@ -42,7 +42,7 @@ export const BotConfigNode = ({ id, data }) => (
       </div>
       <div className="flex space-x-2">
         <div className="w-1/2">
-            <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Data Interval</label>
+            <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Data Interval</label>
             <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-purple outline-none" value={data.timeframe !== undefined ? data.timeframe : "1m"} onChange={(e) => data.onChange(id, 'timeframe', e.target.value)}>
                 {(data.supportedTimeframes
                     ? ALL_TIMEFRAMES.filter(tf => data.supportedTimeframes.includes(tf.value))
@@ -53,12 +53,12 @@ export const BotConfigNode = ({ id, data }) => (
             </select>
         </div>
         <div className="w-1/2">
-            <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Max Positions</label>
+            <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Max Positions</label>
             <input type="number" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.maxPositions !== undefined ? data.maxPositions : 1} onChange={(e) => data.onChange(id, 'maxPositions', e.target.value === "" ? "" : parseInt(e.target.value))} />
         </div>
       </div>
       <div className="pt-2 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Position Limit Scope</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Position Limit Scope</label>
         <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-purple outline-none" value={data.maxPositionsScope !== undefined ? data.maxPositionsScope : "per_pair"} onChange={(e) => data.onChange(id, 'maxPositionsScope', e.target.value)}>
           <option value="per_pair">Per Pair (up to N layers on each symbol)</option>
           <option value="global">Global (up to N open positions in total)</option>
@@ -66,47 +66,47 @@ export const BotConfigNode = ({ id, data }) => (
       </div>
 
       <div className="pt-2 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Max New Entries per X Candles (0 = Off)</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Max New Entries per X Candles (0 = Off)</label>
         <div className="flex space-x-2 items-center">
             <input type="number" placeholder="Max Entries" title="Max Entries" className="w-1/2 bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.cooldownTrades !== undefined ? data.cooldownTrades : 0} onChange={(e) => data.onChange(id, 'cooldownTrades', e.target.value === "" ? "" : parseInt(e.target.value))} />
-            <span className="text-[9px] text-muted font-bold uppercase">PER</span>
+            <span className="text-3xs text-muted font-bold uppercase">PER</span>
             <input type="number" placeholder="Candles" title="Amount of Candles" className="w-1/2 bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.cooldownCandles !== undefined ? data.cooldownCandles : 0} onChange={(e) => data.onChange(id, 'cooldownCandles', e.target.value === "" ? "" : parseInt(e.target.value))} />
         </div>
       </div>
       <div className="pt-2 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Max Drawdown % (0 = Off)</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Max Drawdown % (0 = Off)</label>
         <input type="number" step="0.1" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.maxDrawdown !== undefined ? data.maxDrawdown : 0} onChange={(e) => data.onChange(id, 'maxDrawdown', e.target.value === "" ? "" : parseFloat(e.target.value))} />
-        <span className="text-[9px] text-muted block mt-1">Peak-to-trough on the equity curve, checked after the backtest and after every closed trade</span>
+        <span className="text-3xs text-muted block mt-1">Peak-to-trough on the equity curve, checked after the backtest and after every closed trade</span>
       </div>
       <div className="pt-2 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Max Capital Loss % (0 = Off)</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Max Capital Loss % (0 = Off)</label>
         <input type="number" step="0.1" min="0" max="99" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.maxCapitalLoss !== undefined ? data.maxCapitalLoss : 0} onChange={(e) => data.onChange(id, 'maxCapitalLoss', e.target.value === "" ? "" : parseFloat(e.target.value))} />
-        <span className="text-[9px] text-muted block mt-1">Loss of starting capital, independent of drawdown — never resumes. Required for live bots that block entries.</span>
+        <span className="text-3xs text-muted block mt-1">Loss of starting capital, independent of drawdown — never resumes. Required for live bots that block entries.</span>
       </div>
       <div className="pt-2 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">On Limit Breach (drawdown or capital loss)</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">On Limit Breach (drawdown or capital loss)</label>
         <select className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none" value={data.drawdownAction || 'close_all'} onChange={(e) => data.onChange(id, 'drawdownAction', e.target.value)}>
           <option value="close_all">Close all & stop (default)</option>
           <option value="block_entries">Block new entries, keep exits</option>
         </select>
-        <span className="text-[9px] text-muted block mt-1">{(data.drawdownAction || 'close_all') === 'block_entries' ? 'Drawdown: entries pause until it recovers below half the limit, or the bot has been flat for the cooldown (peak resets). Capital loss: entries stop for good, exits finish, then the bot stops.' : 'Market-closes every open position and stops the bot immediately'}</span>
+        <span className="text-3xs text-muted block mt-1">{(data.drawdownAction || 'close_all') === 'block_entries' ? 'Drawdown: entries pause until it recovers below half the limit, or the bot has been flat for the cooldown (peak resets). Capital loss: entries stop for good, exits finish, then the bot stops.' : 'Market-closes every open position and stops the bot immediately'}</span>
       </div>
       {(data.drawdownAction || 'close_all') === 'block_entries' && (
         <div className="pt-2 border-t border-border">
-          <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Drawdown Cooldown (days)</label>
+          <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Drawdown Cooldown (days)</label>
           <input type="number" step="1" min="0" max="365" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.drawdownCooldownDays !== undefined ? data.drawdownCooldownDays : 7} onChange={(e) => data.onChange(id, 'drawdownCooldownDays', e.target.value === "" ? "" : parseFloat(e.target.value))} />
-          <span className="text-[9px] text-muted block mt-1">How long the bot must stay flat before entries resume from a fresh peak. 0 = resume as soon as flat.</span>
+          <span className="text-3xs text-muted block mt-1">How long the bot must stay flat before entries resume from a fresh peak. 0 = resume as soon as flat.</span>
         </div>
       )}
       <div className="pt-2 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Max Order Value USD (0 = Off)</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Max Order Value USD (0 = Off)</label>
         <input type="number" step="1" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.maxOrderValue !== undefined ? data.maxOrderValue : 0} onChange={(e) => data.onChange(id, 'maxOrderValue', e.target.value === "" ? "" : parseFloat(e.target.value))} />
-        <span className="text-[9px] text-muted block mt-1">Safety guard: rejects live orders exceeding this USD value</span>
+        <span className="text-3xs text-muted block mt-1">Safety guard: rejects live orders exceeding this USD value</span>
       </div>
       <div className="pt-2 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Live Allocation % of Wallet</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Live Allocation % of Wallet</label>
         <input type="number" step="1" min="1" max="100" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.liveAllocationPct !== undefined ? data.liveAllocationPct : 100} onChange={(e) => data.onChange(id, 'liveAllocationPct', e.target.value === "" ? "" : parseFloat(e.target.value))} />
-        <span className="text-[9px] text-muted block mt-1">Share of the exchange wallet (quote balance + open positions) this bot may deploy. Split it between bots that share one API key. Entry size % applies to what is still undeployed.</span>
+        <span className="text-3xs text-muted block mt-1">Share of the exchange wallet (quote balance + open positions) this bot may deploy. Split it between bots that share one API key. Entry size % applies to what is still undeployed.</span>
       </div>
       <ExecutionModeSection id={id} data={data} />
     </div>
@@ -132,7 +132,7 @@ const ExecutionModeSection = ({ id, data }) => {
   ];
   return (
     <div className={`pt-2 border-t ${isLiveMoney ? 'border-accent/40' : 'border-border'}`}>
-      <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Execution</label>
+      <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Execution</label>
       <select
         className={`w-full bg-inset border text-xs rounded-md p-2 nodrag outline-none ${isLiveMoney ? 'border-accent text-accent focus:border-accent' : 'border-border text-text focus:border-purple'}`}
         value={mode}
@@ -146,17 +146,17 @@ const ExecutionModeSection = ({ id, data }) => {
       {wantsExchange && hasKey ? (
         <ul className="mt-2 space-y-1">
           {checks.map((c, i) => (
-            <li key={i} className={`flex items-start gap-1.5 text-[9px] ${c.ok ? 'text-muted' : 'text-danger'}`}>
+            <li key={i} className={`flex items-start gap-1.5 text-3xs ${c.ok ? 'text-muted' : 'text-danger'}`}>
               <span aria-hidden="true" className="shrink-0">{c.ok ? '✓' : '✕'}</span>
               <span>{c.label}</span>
             </li>
           ))}
-          {isLiveMoney && <li className="text-[9px] text-accent font-bold pt-0.5">Every entry this bot takes is a real market order on {String(ctx.exchange || '').toUpperCase()}.</li>}
+          {isLiveMoney && <li className="text-3xs text-accent font-bold pt-0.5">Every entry this bot takes is a real market order on {String(ctx.exchange || '').toUpperCase()}.</li>}
         </ul>
       ) : wantsExchange ? (
-        <span className="text-[9px] text-danger block mt-1">Exchange orders are selected but no API key is set — the bot would start in forward test. Select a key in the Exchange Routing block or switch to forward test.</span>
+        <span className="text-3xs text-danger block mt-1">Exchange orders are selected but no API key is set — the bot would start in forward test. Select a key in the Exchange Routing block or switch to forward test.</span>
       ) : (
-        <span className="text-[9px] text-muted block mt-1">{hasKey ? 'Fills are simulated on live candles with the configured fee and slippage; nothing reaches the exchange.' : 'Without an API key the bot can only forward test.'}</span>
+        <span className="text-3xs text-muted block mt-1">{hasKey ? 'Fills are simulated on live candles with the configured fee and slippage; nothing reaches the exchange.' : 'Without an API key the bot can only forward test.'}</span>
       )}
     </div>
   );
@@ -173,11 +173,11 @@ export const WhitelistNode = ({ id, data }) => {
   return (
     <div className={`bg-raised/90 backdrop-blur-xl border rounded-xl shadow-lg min-w-[260px] max-w-[340px] ${unknown.length ? 'border-danger' : 'border-warn'}`}>
       <div className="bg-warn/10 px-3 py-2 border-b border-warn/30 flex justify-between items-center">
-        <span className="font-bold text-warn text-[11px] uppercase tracking-wider">ASSET WHITELIST</span>
+        <span className="font-bold text-warn text-xs uppercase tracking-wider">ASSET WHITELIST</span>
         {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove whitelist block">✕</button>}
       </div>
       <div className="p-4 bg-bg/80 rounded-b space-y-2">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Tradeable Pairs (Comma Separated)</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Tradeable Pairs (Comma Separated)</label>
         <textarea
           className={`w-full bg-inset border text-text text-xs rounded-md p-2 nodrag outline-none min-h-[60px] resize-none font-num ${unknown.length ? 'border-danger focus:border-danger' : 'border-border focus:border-warn'}`}
           placeholder="BTC/USDT, ETH/USDT, SOL/USDT"
@@ -192,14 +192,14 @@ export const WhitelistNode = ({ id, data }) => {
               const bad = listed && !listed.has(p);
               return (
                 <span key={p} title={bad ? `${p} is not listed on ${exch}` : (listed ? `Listed on ${exch}` : undefined)}
-                  className={`px-1.5 py-0.5 rounded text-[9px] font-num font-bold border ${bad ? 'border-danger/50 bg-danger/10 text-danger' : 'border-border bg-inset text-text'}`}>
+                  className={`px-1.5 py-0.5 rounded text-3xs font-num font-bold border ${bad ? 'border-danger/50 bg-danger/10 text-danger' : 'border-border bg-inset text-text'}`}>
                   {bad ? '✕ ' : ''}{p}
                 </span>
               );
             })}
           </div>
         )}
-        <span className={`text-[9px] block ${unknown.length ? 'text-danger' : 'text-muted'}`}>
+        <span className={`text-3xs block ${unknown.length ? 'text-danger' : 'text-muted'}`}>
           {unknown.length
             ? `${unknown.join(', ')} not listed on ${exch} — the bot cannot start with these.`
             : listed
@@ -214,7 +214,7 @@ export const WhitelistNode = ({ id, data }) => {
 export const BacktestNode = ({ id, data }) => (
   <div className="bg-raised/90 backdrop-blur-xl border border-accent rounded-xl shadow-lg min-w-[280px]">
     <div className="bg-accent/10 px-3 py-2 border-b border-accent/30 flex justify-between items-center">
-      <span className="font-bold text-accent text-[11px] uppercase tracking-wider">BACKTEST ENGINE</span>
+      <span className="font-bold text-accent text-xs uppercase tracking-wider">BACKTEST ENGINE</span>
       {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove backtest block" title="Remove block">✕</button>}
     </div>
     <div className="p-4 bg-bg/80 rounded-b space-y-4">
@@ -224,11 +224,11 @@ export const BacktestNode = ({ id, data }) => (
       </label>
       <div className="flex space-x-2 pt-2 border-t border-border">
         <div className="w-1/2">
-            <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Start Capital</label>
+            <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Start Capital</label>
             <input type="number" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-accent outline-none font-num text-center" value={data.capital !== undefined ? data.capital : 1000} onChange={(e) => data.onChange(id, 'capital', e.target.value === "" ? "" : parseFloat(e.target.value))} />
         </div>
         <div className="w-1/2">
-            <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Candles (Lookback)</label>
+            <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Candles (Lookback)</label>
             <input type="number" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-accent outline-none font-num text-center" value={data.lookback !== undefined ? data.lookback : 150} onChange={(e) => data.onChange(id, 'lookback', e.target.value === "" ? "" : parseInt(e.target.value))} />
         </div>
       </div>
@@ -254,12 +254,12 @@ export const ApiKeyNode = ({ id, data }) => {
   return (
     <div className="bg-raised/90 backdrop-blur-xl border border-info rounded-xl shadow-lg min-w-[260px]">
       <div className="bg-info/10 px-3 py-2 border-b border-info/30 flex justify-between items-center">
-        <span className="font-bold text-info text-[11px] uppercase tracking-wider">EXCHANGE ROUTING</span>
+        <span className="font-bold text-info text-xs uppercase tracking-wider">EXCHANGE ROUTING</span>
         {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove exchange routing block" title="Remove block">✕</button>}
       </div>
       <div className="p-4 bg-bg/80 rounded-b space-y-3">
         <div>
-          <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Select API Credentials</label>
+          <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Select API Credentials</label>
           <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-info outline-none" value={selectedKey} onChange={(e) => data.onChange(id, 'apiKeyName', e.target.value)}>
             <option value="">No key (select exchange below)</option>
             {data.availableKeys?.map(k => (
@@ -270,11 +270,11 @@ export const ApiKeyNode = ({ id, data }) => {
         {derivedExchange ? (
           <div className="flex items-center space-x-2 px-1">
             <div className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_6px_var(--color-success)]" />
-            <span className="text-[10px] text-muted uppercase font-bold">Exchange: <span className="text-success">{derivedExchange.toUpperCase()}</span></span>
+            <span className="text-2xs text-muted uppercase font-bold">Exchange: <span className="text-success">{derivedExchange.toUpperCase()}</span></span>
           </div>
         ) : (
           <div>
-            <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Data Exchange</label>
+            <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Data Exchange</label>
             <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-info outline-none" value={data.dataExchange || 'okx'} onChange={(e) => data.onChange(id, 'dataExchange', e.target.value)}>
               {API_KEY_NODE_EXCHANGES.map(ex => (
                 <option key={ex.id} value={ex.id}>{ex.name}</option>
@@ -312,12 +312,12 @@ export const IndicatorNode = ({ id, data }) => {
   return (
   <div className="bg-raised/90 backdrop-blur-xl border border-border rounded-xl shadow-lg min-w-[250px] hover:border-accent transition-all duration-200 relative">
     <div className="bg-overlay px-3 py-2 flex justify-between items-center">
-      <span className="font-bold text-text text-[11px] uppercase tracking-wider">TECHNICAL INDICATOR</span>
+      <span className="font-bold text-text text-xs uppercase tracking-wider">TECHNICAL INDICATOR</span>
       {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove indicator block" title="Remove block">✕</button>}
     </div>
     <div className="p-4 space-y-3 bg-bg/80 rounded-b">
       
-      <select className={`w-full bg-inset border text-text text-[11px] rounded-md p-2 nodrag focus:border-accent outline-none font-semibold ${unknown ? 'border-danger' : 'border-border'}`} value={currentIndKey} onChange={(e) => data.onChange(id, 'indicator', e.target.value)}>
+      <select className={`w-full bg-inset border text-text text-xs rounded-md p-2 nodrag focus:border-accent outline-none font-semibold ${unknown ? 'border-danger' : 'border-border'}`} value={currentIndKey} onChange={(e) => data.onChange(id, 'indicator', e.target.value)}>
           {!registry && <option value={currentIndKey}>{error ? 'Failed to load indicators' : 'Loading indicators…'}</option>}
           {unknown && <option value={currentIndKey}>Unknown: {currentIndKey}</option>}
           {registry && registry.categories.map(groupName => (
@@ -330,14 +330,14 @@ export const IndicatorNode = ({ id, data }) => {
       </select>
 
       {unknown && (
-          <p className="text-[10px] text-danger">Indicator &quot;{currentIndKey}&quot; is not supported by the backend. Pick another one.</p>
+          <p className="text-2xs text-danger">Indicator &quot;{currentIndKey}&quot; is not supported by the backend. Pick another one.</p>
       )}
 
       {indDef && indDef.params.length > 0 && (
           <div className="border-t border-border pt-3 space-y-2">
               {indDef.params.map(p => (
                   <div key={p.id} className="flex items-center space-x-2">
-                    <span className="text-[10px] text-muted font-bold uppercase flex-1">{p.label}</span>
+                    <span className="text-2xs text-muted font-bold uppercase flex-1">{p.label}</span>
                     <input 
                         type="number" 
                         step="any"
@@ -352,8 +352,8 @@ export const IndicatorNode = ({ id, data }) => {
 
       {showDropdown && (
         <div className="border-t border-border pt-3 mt-3 animate-fade-in">
-          <label className="text-[9px] text-info font-bold uppercase mb-1.5 block">Signal Output (Multi-Line)</label>
-          <select className="w-full bg-inset border border-info/50 text-text text-[10px] rounded-md p-1.5 focus:border-info outline-none" value={data.outputIdx !== undefined ? data.outputIdx : 0} onChange={(e) => data.onChange(id, 'outputIdx', parseInt(e.target.value))}>
+          <label className="text-3xs text-info font-bold uppercase mb-1.5 block">Signal Output (Multi-Line)</label>
+          <select className="w-full bg-inset border border-info/50 text-text text-2xs rounded-md p-1.5 focus:border-info outline-none" value={data.outputIdx !== undefined ? data.outputIdx : 0} onChange={(e) => data.onChange(id, 'outputIdx', parseInt(e.target.value))}>
             {outputs.map((lineName, idx) => (
                 <option key={idx} value={idx} disabled={indDef.disabled_outputs.includes(idx)}>{lineName} (Idx: {idx}){indDef.disabled_outputs.includes(idx) ? ' — look-ahead, disabled' : ''}</option>
             ))}
@@ -370,12 +370,12 @@ export const IndicatorNode = ({ id, data }) => {
 export const PriceDataNode = ({ id, data }) => (
   <div className="bg-raised/90 backdrop-blur-xl border border-border rounded-xl shadow-lg min-w-[220px] hover:border-accent transition-all duration-200 relative">
     <div className="bg-overlay/60 px-3 py-2 border-b border-border/50 flex justify-between items-center">
-      <span className="font-bold text-text text-[11px] uppercase tracking-wider">PRICE DATA</span>
+      <span className="font-bold text-text text-xs uppercase tracking-wider">PRICE DATA</span>
       {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove price data block" title="Remove block">✕</button>}
     </div>
     <div className="p-4 space-y-3 bg-bg/80 rounded-b">
       <div>
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Price Type</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Price Type</label>
         <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-accent outline-none font-semibold" value={data.priceType !== undefined ? data.priceType : "close"} onChange={(e) => data.onChange(id, 'priceType', e.target.value)}>
           <option value="open">Open</option>
           <option value="high">High</option>
@@ -385,7 +385,7 @@ export const PriceDataNode = ({ id, data }) => (
         </select>
       </div>
       <div className="border-t border-border pt-3">
-         <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Candle Offset</label>
+         <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Candle Offset</label>
          <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-accent outline-none font-semibold" value={data.offset !== undefined ? data.offset : 0} onChange={(e) => data.onChange(id, 'offset', parseInt(e.target.value))}>
             <option value={0}>Current (Live)</option>
             <option value={1}>Previous (Closed)</option>
@@ -403,13 +403,13 @@ export const ConditionNode = ({ id, data }) => (
     <Handle type="target" position={Position.Left} id="right" style={{ top: '80%' }} className="w-10 h-10 bg-purple border-[4px] border-raised -left-[20px]" />
     
     <div className="bg-overlay/60 px-3 py-2 border-b border-border/50 flex justify-between items-center">
-      <span className="font-bold text-text text-[11px] uppercase tracking-wider">DATA CONDITION</span>
+      <span className="font-bold text-text text-xs uppercase tracking-wider">DATA CONDITION</span>
       {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove condition block" title="Remove block">✕</button>}
     </div>
     
     <div className="p-4 bg-bg/80 rounded-b flex flex-col space-y-4">
       <div className="flex items-center">
-         <span className="text-[10px] text-info font-bold uppercase ml-1">Input A (Signal)</span>
+         <span className="text-2xs text-info font-bold uppercase ml-1">Input A (Signal)</span>
       </div>
       <div className="flex justify-center border-y border-border py-2">
         <select className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag font-bold focus:border-accent outline-none text-center" value={data.operator !== undefined ? data.operator : ">"} onChange={(e) => data.onChange(id, 'operator', e.target.value)}>
@@ -428,9 +428,9 @@ export const ConditionNode = ({ id, data }) => (
         </select>
       </div>
       <div className={`flex items-center justify-between transition-opacity ${['increasing', 'decreasing'].includes(data.operator) ? 'opacity-30 pointer-events-none' : 'opacity-100'}`}>
-         <span className="text-[10px] text-purple font-bold uppercase ml-1">Input B</span>
+         <span className="text-2xs text-purple font-bold uppercase ml-1">Input B</span>
          <div className="flex items-center space-x-2">
-           <span className="text-[9px] text-muted font-bold">OR</span>
+           <span className="text-3xs text-muted font-bold">OR</span>
            <input type="number" placeholder="Static Value" title="Connect a line to Input B or type a static number here." className="w-20 bg-inset border border-border text-text text-xs rounded-md p-1.5 nodrag font-num focus:border-accent outline-none text-center" value={data.rightValue !== undefined ? data.rightValue : ""} onChange={(e) => data.onChange(id, 'rightValue', e.target.value === "" ? "" : parseFloat(e.target.value))} disabled={['increasing', 'decreasing'].includes(data.operator)} />
          </div>
       </div>
@@ -449,7 +449,7 @@ export const LogicNode = ({ id, data }) => {
         <Handle type="target" position={Position.Left} id="in2" style={{ top: '65%' }} className="w-10 h-10 bg-muted border-[4px] border-raised -left-[20px]" />
       )}
       <div className="bg-success/10 px-3 py-2 border-b border-success/30 flex justify-between items-center">
-        <span className="font-bold text-success text-[11px] uppercase tracking-wider">LOGIC GATE</span>
+        <span className="font-bold text-success text-xs uppercase tracking-wider">LOGIC GATE</span>
         {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove logic gate block" title="Remove block">✕</button>}
       </div>
       <div className="p-4 bg-bg/80 rounded-b">
@@ -477,17 +477,17 @@ export const StopLossNode = ({ id, data }) => (
     <Handle type="target" position={Position.Left} style={{ top: '50%' }} className="w-10 h-10 bg-danger border-[4px] border-raised -left-[20px]" />
     
     <div className="bg-danger/10 px-3 py-2 border-b border-danger/30 flex justify-between items-center">
-      <span className="font-bold text-danger text-[11px] uppercase tracking-wider">STOP LOSS (RISK)</span>
+      <span className="font-bold text-danger text-xs uppercase tracking-wider">STOP LOSS (RISK)</span>
       <div className="flex space-x-3 items-center">
-        <span className="text-[9px] text-muted font-num">&larr; IN</span>
+        <span className="text-3xs text-muted font-num">&larr; IN</span>
         {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove stop loss block" title="Remove block">✕</button>}
       </div>
     </div>
     <div className="p-4 bg-bg/80 rounded-b space-y-4">
       <div>
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Trigger Level (Loss)</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Trigger Level (Loss)</label>
         <div className="flex space-x-2">
-            <select className="w-1/2 bg-inset border border-border text-text text-[10px] font-bold rounded-md p-2 nodrag focus:border-danger outline-none" value={data.triggerType !== undefined ? data.triggerType : "percentage"} onChange={(e) => data.onChange(id, 'triggerType', e.target.value)}>
+            <select className="w-1/2 bg-inset border border-border text-text text-2xs font-bold rounded-md p-2 nodrag focus:border-danger outline-none" value={data.triggerType !== undefined ? data.triggerType : "percentage"} onChange={(e) => data.onChange(id, 'triggerType', e.target.value)}>
                 <option value="percentage">Percentage (%)</option>
                 <option value="trailing">Trailing (%)</option>
                 <option value="atr">ATR Trailing (x)</option>
@@ -497,7 +497,7 @@ export const StopLossNode = ({ id, data }) => (
         </div>
       </div>
       <div className="pt-3 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Amount to Close</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Amount to Close</label>
         <div className="flex space-x-2">
             <select className="w-1/2 bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-danger outline-none" value={data.closeType !== undefined ? data.closeType : "percentage"} onChange={(e) => data.onChange(id, 'closeType', e.target.value)}>
                 <option value="percentage">% of Position</option>
@@ -516,17 +516,17 @@ export const TakeProfitNode = ({ id, data }) => (
     <Handle type="target" position={Position.Left} style={{ top: '50%' }} className="w-10 h-10 bg-success border-[4px] border-raised -left-[20px]" />
 
     <div className="bg-success/10 px-3 py-2 border-b border-success/30 flex justify-between items-center">
-      <span className="font-bold text-success text-[11px] uppercase tracking-wider">TAKE PROFIT (TARGET)</span>
+      <span className="font-bold text-success text-xs uppercase tracking-wider">TAKE PROFIT (TARGET)</span>
       <div className="flex space-x-3 items-center">
-        <span className="text-[9px] text-muted font-num">&larr; IN</span>
+        <span className="text-3xs text-muted font-num">&larr; IN</span>
         {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove take profit block" title="Remove block">✕</button>}
       </div>
     </div>
     <div className="p-4 bg-bg/80 rounded-b space-y-4">
       <div>
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Trigger Level (Profit)</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Trigger Level (Profit)</label>
         <div className="flex space-x-2">
-            <select className="w-1/2 bg-inset border border-border text-text text-[10px] font-bold rounded-md p-2 nodrag focus:border-success outline-none" value={data.triggerType !== undefined ? data.triggerType : "percentage"} onChange={(e) => data.onChange(id, 'triggerType', e.target.value)}>
+            <select className="w-1/2 bg-inset border border-border text-text text-2xs font-bold rounded-md p-2 nodrag focus:border-success outline-none" value={data.triggerType !== undefined ? data.triggerType : "percentage"} onChange={(e) => data.onChange(id, 'triggerType', e.target.value)}>
                 <option value="percentage">Percentage (%)</option>
                 <option value="trailing">Trailing (%)</option>
                 <option value="atr">ATR Trailing (x)</option>
@@ -536,7 +536,7 @@ export const TakeProfitNode = ({ id, data }) => (
         </div>
       </div>
       <div className="pt-3 border-t border-border">
-        <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">Amount to Close</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Amount to Close</label>
         <div className="flex space-x-2">
             <select className="w-1/2 bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-success outline-none" value={data.closeType !== undefined ? data.closeType : "percentage"} onChange={(e) => data.onChange(id, 'closeType', e.target.value)}>
                 <option value="percentage">% of Position</option>
@@ -561,7 +561,7 @@ export const ActionNode = ({ id, data }) => {
   return (
     <div className={`bg-raised/90 backdrop-blur-xl border-2 rounded-xl shadow-lg min-w-[320px]`} style={{ borderColor: color }}>
       
-      <div className="px-3 py-2 font-bold text-[11px] uppercase tracking-wider border-b flex justify-between items-center" style={{ backgroundColor: `color-mix(in srgb, ${color} 6%, transparent)`, color: color, borderColor: `color-mix(in srgb, ${color} 19%, transparent)` }}>
+      <div className="px-3 py-2 font-bold text-xs uppercase tracking-wider border-b flex justify-between items-center" style={{ backgroundColor: `color-mix(in srgb, ${color} 6%, transparent)`, color: color, borderColor: `color-mix(in srgb, ${color} 19%, transparent)` }}>
         <span>{isBuy ? 'ORDER ROUTING: LONG ENTRY' : 'ORDER ROUTING: CLOSE POSITION'}</span>
         {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove action block" title="Remove block">✕</button>}
       </div>
@@ -570,18 +570,18 @@ export const ActionNode = ({ id, data }) => {
          
          <div className="relative border border-border rounded-md p-3">
              <Handle type="target" position={Position.Left} id="logic" className="w-10 h-10 bg-muted border-[4px] border-raised -left-[20px]" style={{ top: '50%' }} />
-             <span className="absolute -left-14 top-1/2 -translate-y-1/2 text-[9px] font-bold text-muted -rotate-90">LOGIC</span>
+             <span className="absolute -left-14 top-1/2 -translate-y-1/2 text-3xs font-bold text-muted -rotate-90">LOGIC</span>
              
              <div className="flex space-x-2">
                 <div className="w-1/2">
-                    <label className="text-[9px] text-muted font-bold uppercase mb-1 block">Direction</label>
+                    <label className="text-3xs text-muted font-bold uppercase mb-1 block">Direction</label>
                     <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag font-bold outline-none focus:border-info" style={{ color: color }} value={data.actionType !== undefined ? data.actionType : "buy"} onChange={(e) => data.onChange(id, 'actionType', e.target.value)}>
                         <option value="buy">BUY (Open)</option>
                         <option value="sell">SELL (Close)</option>
                     </select>
                 </div>
                 <div className="w-1/2">
-                    <label className="text-[9px] text-muted font-bold uppercase mb-1 block">Order Type</label>
+                    <label className="text-3xs text-muted font-bold uppercase mb-1 block">Order Type</label>
                     <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag outline-none focus:border-info" value={data.orderType !== undefined ? data.orderType : "market"} onChange={(e) => data.onChange(id, 'orderType', e.target.value)}>
                         <option value="market">Market</option>
                         <option value="limit">Limit</option>
@@ -592,17 +592,17 @@ export const ActionNode = ({ id, data }) => {
 
          <div className="grid grid-cols-2 gap-2">
             <div>
-                <label className="text-[9px] text-muted font-bold uppercase mb-1 block">Slippage (%)</label>
+                <label className="text-3xs text-muted font-bold uppercase mb-1 block">Slippage (%)</label>
                 <input type="number" step="0.01" className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag outline-none focus:border-info font-num" value={data.slippage !== undefined ? data.slippage : 0.05} onChange={(e) => data.onChange(id, 'slippage', e.target.value === "" ? "" : parseFloat(e.target.value))} />
             </div>
             <div>
-                <label className="text-[9px] text-muted font-bold uppercase mb-1 block">Trading Fee (%)</label>
+                <label className="text-3xs text-muted font-bold uppercase mb-1 block">Trading Fee (%)</label>
                 <input type="number" step="0.01" className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag outline-none focus:border-info font-num" value={data.fee !== undefined ? data.fee : 0.1} onChange={(e) => data.onChange(id, 'fee', e.target.value === "" ? "" : parseFloat(e.target.value))} />
             </div>
          </div>
 
          <div className="border border-border rounded-md p-3">
-             <label className="text-[10px] text-muted font-bold uppercase mb-1.5 block">{isBuy ? 'Entry Size' : 'Amount to Close'}</label>
+             <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">{isBuy ? 'Entry Size' : 'Amount to Close'}</label>
              <div className="flex space-x-2">
                  <select className="w-1/2 bg-inset border border-border text-text text-xs rounded-md p-2 nodrag outline-none focus:border-info" value={data.amountType !== undefined ? data.amountType : "percentage"} onChange={(e) => data.onChange(id, 'amountType', e.target.value)}>
                      <option value="percentage">{isBuy ? '% of Capital' : '% of Position'}</option>
@@ -616,12 +616,12 @@ export const ActionNode = ({ id, data }) => {
              <div className="relative border border-border rounded-md p-3 pt-4 pb-4 mt-2">
                  
                  <Handle type="source" position={Position.Right} id="tp" className="w-10 h-10 bg-success border-[4px] border-raised -right-[20px]" style={{ top: '25%' }} />
-                 <span className="absolute right-[13px] top-[25%] -translate-y-1/2 text-[9px] font-bold text-success pointer-events-none">TP</span>
+                 <span className="absolute right-[13px] top-[25%] -translate-y-1/2 text-3xs font-bold text-success pointer-events-none">TP</span>
 
                  <Handle type="source" position={Position.Right} id="sl" className="w-10 h-10 bg-danger border-[4px] border-raised -right-[20px]" style={{ top: '75%' }} />
-                 <span className="absolute right-[13px] top-[75%] -translate-y-1/2 text-[9px] font-bold text-danger pointer-events-none">SL</span>
+                 <span className="absolute right-[13px] top-[75%] -translate-y-1/2 text-3xs font-bold text-danger pointer-events-none">SL</span>
                  
-                 <div className="text-[9px] text-muted italic text-center leading-relaxed">
+                 <div className="text-3xs text-muted italic text-center leading-relaxed">
                      Connect Take Profit or Stop Loss blocks to the <span className="text-success font-bold">TP</span> and <span className="text-danger font-bold">SL</span> ports on the right.
                  </div>
              </div>

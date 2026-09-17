@@ -49,6 +49,12 @@
   --color-info: var(--apx-info);
   --color-purple: var(--apx-purple);
 
+  /* Extra chart-series hues (indicator lines beyond the semantic set).
+     Values stay 6-digit hex: getToken() consumers append hex alpha. */
+  --color-chart-1: var(--apx-chart-1);
+  --color-chart-2: var(--apx-chart-2);
+  --color-chart-3: var(--apx-chart-3);
+
   /* Type ramp — data-dense: xs (11px) is the workhorse table/body size,
      3xs/2xs are micro-labels and captions. */
   --text-3xs: 0.5625rem;
@@ -115,6 +121,9 @@
   --apx-warn: #f0b90b;
   --apx-info: #0ea5e9;
   --apx-purple: #8b5cf6;
+  --apx-chart-1: #d946ef;
+  --apx-chart-2: #ff9800;
+  --apx-chart-3: #00bcd4;
 
   --apx-shadow-card: inset 0 1px 0 rgba(255, 255, 255, 0.02), 0 2px 8px rgba(0, 0, 0, 0.35);
   --apx-shadow-pop: 0 8px 32px rgba(0, 0, 0, 0.55);
@@ -179,6 +188,9 @@ html.light {
   --apx-warn: #b45309;
   --apx-info: #0273b3;
   --apx-purple: #7c3aed;
+  --apx-chart-1: #c026d3;
+  --apx-chart-2: #d97706;
+  --apx-chart-3: #0891b2;
 
   /* Shadows — soft elevation, no glows in light mode */
   --apx-shadow-card: 0 1px 2px rgba(20, 24, 29, 0.05), 0 2px 10px rgba(20, 24, 29, 0.06);
