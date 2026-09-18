@@ -14,8 +14,11 @@ import { toast } from './ui/Toast';
  * @param {Function} onImported  Called after a successful import (refresh list).
  * @param {string}   [size]      Button size ('sm' | 'md' | 'lg').
  * @param {string}   [variant]   Button variant (default 'secondary').
+ * @param {string}   [label]     Button text (default 'Load example strategy').
+ * @param {'center'|'right'} [align]  Menu alignment relative to the button.
+ * @param {string[]} [existingNames]  Bot names already present — marks those examples as imported.
  */
-export default function ExampleLoader({ onImported, size = 'sm', variant = 'secondary' }) {
+export default function ExampleLoader({ onImported, size = 'sm', variant = 'secondary', label = 'Load example strategy', align = 'center', existingNames = [] }) {
   const [open, setOpen] = useState(false);
   const [importing, setImporting] = useState(null); // example id being imported
   const wrapRef = useRef(null);
@@ -58,13 +61,13 @@ export default function ExampleLoader({ onImported, size = 'sm', variant = 'seco
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        Load example strategy
+        {label}
       </Button>
 
       {open && (
         <div
           role="menu"
-          className="absolute left-1/2 -translate-x-1/2 top-full mt-2 w-72 z-50 bg-overlay border border-border rounded-lg shadow-pop overflow-hidden fade-in"
+          className={`absolute top-full mt-2 w-72 z-50 bg-overlay border border-border rounded-lg shadow-pop overflow-hidden fade-in ${align === 'right' ? 'right-0' : 'left-1/2 -translate-x-1/2'}`}
         >
           {EXAMPLE_BOTS.map((ex) => (
             <button
@@ -74,7 +77,12 @@ export default function ExampleLoader({ onImported, size = 'sm', variant = 'seco
               onClick={() => importExample(ex)}
               className="w-full text-left px-4 py-3 hover:bg-raised transition-colors border-b border-border/50 last:border-b-0 disabled:opacity-50"
             >
-              <span className="block text-xs font-semibold text-text">{ex.name}</span>
+              <span className="flex items-center justify-between gap-2 text-xs font-semibold text-text">
+                {ex.name}
+                {existingNames.includes(ex.payload?.bot?.name || ex.name) && (
+                  <span className="text-3xs font-normal text-faint uppercase tracking-wider shrink-0" title="A bot with this name already exists — importing again creates a copy">imported</span>
+                )}
+              </span>
               <span className="block text-2xs text-muted mt-0.5 leading-relaxed">{ex.description}</span>
             </button>
           ))}

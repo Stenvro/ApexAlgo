@@ -674,6 +674,10 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
                 </Button>
               </div>
             )}
+            {bots.length > 0 && (
+              <ExampleLoader onImported={refetchBots} size="md" label="Examples" align="right"
+                existingNames={bots.map(b => b.name)} />
+            )}
             <Button
               variant="secondary"
               size="md"
