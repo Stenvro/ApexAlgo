@@ -24,7 +24,7 @@ https://github.com/user-attachments/assets/f8ed22c3-2d6f-4a8c-8a32-50f451493525
 
 
 
-<sub>Player not showing? [Download the MP4](https://github.com/Stenvro/ApexAlgo/raw/master/docs/screenshots/demo.mp4).</sub>
+<sub>Player not showing? [Download the MP4](docs/screenshots/demo.mp4?raw=true).</sub>
 
 ## Screenshots
 
