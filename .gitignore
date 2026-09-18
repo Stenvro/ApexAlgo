@@ -9,6 +9,7 @@ data/
 .cert
 .cert/
 CLAUDE.md
+brag-output/
 
 # --- DATABASE ---
 *.sqlite

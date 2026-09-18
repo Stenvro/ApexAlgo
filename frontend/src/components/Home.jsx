@@ -163,7 +163,7 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
 
   return (
     <div className="w-full min-h-full relative overflow-y-auto overflow-x-hidden bg-bg grid-background">
-      <div className="relative z-10 max-w-5xl mx-auto px-4 md:px-8 pt-20 md:pt-12 pb-10">
+      <div className="relative z-10 max-w-5xl mx-auto px-4 md:px-8 pt-8 md:pt-12 pb-10">
 
         {/* Hero */}
         <header className="mb-10 fade-in">

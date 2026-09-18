@@ -91,7 +91,9 @@ export default function App() {
       localStorage.setItem('apex_activeView', activeView);
   }, [activeView]);
 
+  const openChartsRef = useRef(openCharts);
   useEffect(() => {
+      openChartsRef.current = openCharts;
       localStorage.setItem('apex_openCharts', JSON.stringify(openCharts));
   }, [openCharts]);
 
@@ -181,6 +183,28 @@ export default function App() {
     };
   }, [refetchBots, hasApiKey]);
 
+  // Chart tabs live in localStorage, so they outlive their candles when data
+  // is deleted. Drop any tab whose (exchange, symbol, timeframe) no longer
+  // exists — on login and whenever the Data Vault deletes something.
+  useEffect(() => {
+    if (!hasApiKey) return;
+    let cancelled = false;
+    const pruneCharts = async () => {
+      let rows;
+      try { rows = (await apiClient.get('/api/data/summary')).data; } catch { return; }
+      if (cancelled || !Array.isArray(rows)) return;
+      const have = new Set(rows.map(r => `${(r.exchange || 'okx').toLowerCase()}_${r.symbol}_${r.timeframe}`));
+      const prev = openChartsRef.current;
+      const kept = prev.filter(c => have.has(c.id));
+      if (kept.length === prev.length) return;
+      setOpenCharts(kept);
+      setActiveView(v => (prev.some(c => c.id === v) && !kept.some(c => c.id === v)) ? 'home' : v);
+    };
+    pruneCharts();
+    window.addEventListener('data-changed', pruneCharts);
+    return () => { cancelled = true; window.removeEventListener('data-changed', pruneCharts); };
+  }, [hasApiKey]);
+
   const handleOpenChart = (dataset) => {
     // Exchange is part of the identity: the same pair can be open
     // for two exchanges side by side
@@ -199,7 +223,7 @@ export default function App() {
       : (bot.settings?.symbol ? [bot.settings.symbol] : []);
 
     const timeframe = bot.settings?.timeframe || "15m";
-    const exchange = (bot.settings?.data_exchange || 'okx').toLowerCase();
+    const exchange = (bot.exchange || bot.settings?.data_exchange || 'okx').toLowerCase();
     let updatedCharts = [...openCharts];
     let lastOpenedChartId = "";
 
@@ -284,16 +308,27 @@ export default function App() {
     settings: 'Exchange Configuration',
   };
 
+  const isChartView = openCharts.some(c => c.id === activeView);
+  // Home keeps its hero on desktop; with the sidebar collapsed (mobile) every
+  // non-chart view gets the same slim top bar so the menu button has a home.
+  const headerTitle = HEADER_TITLES[activeView] || (!sidebarOpen && !isChartView ? 'Dashboard' : null);
+  const menuButton = (
+    <button
+      aria-label="Open sidebar"
+      className="w-8 h-8 flex items-center justify-center rounded-md border border-border bg-raised text-muted hover:text-accent hover:border-accent transition-colors shrink-0"
+      onClick={() => setSidebarOpenUser(true)}
+    >
+      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+    </button>
+  );
+
   return (
     <div className="flex h-[100dvh] bg-bg text-text font-sans overflow-hidden relative">
 
-      <button
-        aria-label="Open sidebar"
-        className={`fixed top-3 left-4 z-[90] p-2 bg-raised border border-border hover:border-accent rounded-md shadow-card text-muted hover:text-accent transition-all duration-300 ${sidebarOpen ? 'opacity-0 pointer-events-none -translate-x-10' : 'opacity-100 translate-x-0'}`}
-        onClick={() => setSidebarOpenUser(true)}
-      >
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
-      </button>
+      {/* Charts have their own toolbar, so the menu button floats there. */}
+      {!sidebarOpen && isChartView && (
+        <div className="fixed top-3 left-3 z-[90] shadow-card fade-in">{menuButton}</div>
+      )}
 
       {sidebarOpen && (
          <div className="fixed inset-0 backdrop z-[70] md:hidden fade-in" onClick={() => setSidebarOpen(false)}></div>
@@ -314,14 +349,13 @@ export default function App() {
 
       <div className={`flex-1 flex flex-col h-full overflow-hidden relative transition-all duration-300 ease-in-out ${sidebarOpen ? 'md:ml-64' : 'ml-0'}`}>
 
-        {HEADER_TITLES[activeView] && (
-          <header className="h-12 bg-raised border-b border-border flex items-center justify-between px-4 md:px-6 shrink-0 relative">
+        {headerTitle && (
+          <header className="h-11 md:h-12 bg-raised border-b border-border flex items-center gap-3 px-3 md:px-6 shrink-0 relative">
             <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-accent/20 to-transparent" />
-            <div className={`transition-all duration-300 ${!sidebarOpen ? 'ml-12' : 'ml-0'}`}>
-              <h2 className="text-xs md:text-sm font-semibold text-text tracking-[0.15em] uppercase">
-                {HEADER_TITLES[activeView]}
-              </h2>
-            </div>
+            {!sidebarOpen && menuButton}
+            <h2 className="text-xs md:text-sm font-semibold text-text tracking-[0.15em] uppercase truncate">
+              {headerTitle}
+            </h2>
           </header>
         )}
 

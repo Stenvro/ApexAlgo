@@ -16,6 +16,18 @@ ApexAlgo is a full-stack algorithmic trading platform for building, backtesting,
 
 ---
 
+## Demo
+
+One command to your first bot — 24 s, with sound.
+
+https://github.com/user-attachments/assets/25d03926-1e88-4749-88d4-b97b14ff9c2b
+
+
+
+
+
+<sub>Player not showing? [Download the MP4](docs/screenshots/demo.mp4?raw=true).</sub>
+
 ## Screenshots
 
 **Chart Engine** — TradingView-grade candles with per-bot overlays: indicator lines, historical/live trade markers and the engine's raw buy/sell "thoughts", all toggled per algorithm.

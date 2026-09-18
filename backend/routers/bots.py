@@ -35,6 +35,22 @@ def _resolve_exchange(settings: dict, db: Session) -> str:
             return key.exchange
     return settings.get("data_exchange", "okx")
 
+
+def _candle_exchange(settings: dict, key_exchange_by_name: dict) -> str:
+    """The exchange this bot's candles (and therefore its signals) come from —
+    the same rule as engine startup: an API key that actually routes orders
+    wins, otherwise the configured data exchange."""
+    settings = settings or {}
+    if settings.get("api_execution") and settings.get("api_key_name"):
+        key_exchange = key_exchange_by_name.get(settings["api_key_name"])
+        if key_exchange:
+            return key_exchange
+    return settings.get("data_exchange") or "okx"
+
+
+def _key_exchanges(db: Session) -> dict:
+    return {name: ex for name, ex in db.query(ExchangeKey.name, ExchangeKey.exchange).all()}
+
 logger = logging.getLogger("apexalgo.bots")
 
 router = APIRouter(
@@ -56,13 +72,22 @@ class BotResponse(BotBase):
     id: int
     is_active: bool
     created_at: datetime
+    # Effective candle/signal exchange (key exchange when orders are routed,
+    # else data_exchange) — the chart uses it to scope overlays to a dataset
+    exchange: Optional[str] = None
 
     class Config:
         from_attributes = True
 
 @router.get("/", response_model=List[BotResponse])
 def get_all_bots(db: Session = Depends(get_db)):
-    return db.query(BotConfig).all()
+    key_exchanges = _key_exchanges(db)
+    out = []
+    for b in db.query(BotConfig).all():
+        item = BotResponse.model_validate(b)
+        item.exchange = _candle_exchange(b.settings, key_exchanges)
+        out.append(item)
+    return out
 
 
 @router.get("/by-id/{bot_id}", response_model=BotResponse)
@@ -90,6 +115,7 @@ def get_bots_summary(db: Session = Depends(get_db)):
     """Lightweight bot list for polling — excludes full settings/node graph."""
     bots = db.query(BotConfig).all()
     sandbox_by_key = {k.name: bool(k.is_sandbox) for k in db.query(ExchangeKey.name, ExchangeKey.is_sandbox).all()}
+    key_exchanges = _key_exchanges(db)
     return [
         {
             "id": b.id,
@@ -98,6 +124,9 @@ def get_bots_summary(db: Session = Depends(get_db)):
             "is_sandbox": b.is_sandbox,
             "created_at": b.created_at.isoformat() if b.created_at else None,
             "execution_mode": _execution_mode(b.settings, sandbox_by_key),
+            # Where this bot's candles come from (key exchange when routing
+            # orders, else data_exchange) — chart-open and Data Vault key on it
+            "exchange": _candle_exchange(b.settings, key_exchanges),
             "settings": {
                 "timeframe": b.settings.get("timeframe") if b.settings else None,
                 "symbols": b.settings.get("symbols", []) if b.settings else [],
@@ -129,12 +158,18 @@ def get_bots_summary(db: Session = Depends(get_db)):
 
 
 @router.get("/signals")
-def get_bot_signals(symbol: str, timeframe: str, limit: int = Query(default=5000, le=200000), since_id: int = Query(default=0, ge=0), db: Session = Depends(get_db)):
+def get_bot_signals(symbol: str, timeframe: str, exchange: str = Query(default="okx"), limit: int = Query(default=5000, le=200000), since_id: int = Query(default=0, ge=0), db: Session = Depends(get_db)):
     bot_rows = db.query(BotConfig.name, BotConfig.settings).all()
+    key_exchanges = _key_exchanges(db)
+    exchange = exchange.lower()
 
+    # Same pair + interval on another exchange is a different dataset: only
+    # bots that trade this exact (exchange, symbol, timeframe) belong on the chart
     valid_bot_names = [
         name for name, settings in bot_rows
-        if settings and settings.get('timeframe') == timeframe and (symbol in settings.get('symbols', []) or symbol == settings.get('symbol'))
+        if settings and settings.get('timeframe') == timeframe
+        and (symbol in settings.get('symbols', []) or symbol == settings.get('symbol'))
+        and _candle_exchange(settings, key_exchanges).lower() == exchange
     ]
 
     if not valid_bot_names:

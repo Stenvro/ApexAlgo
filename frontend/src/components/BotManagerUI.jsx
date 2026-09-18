@@ -662,7 +662,7 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
           : 'Manage, configure, and deploy automated strategies'}
         accentColor="neutral"
         action={
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             {bots.length > 1 && (
               <div className="flex items-center rounded-md border border-border overflow-hidden">
                 <Button variant="ghost" size="md" icon={IconPlay} loading={bulkBusy === 'start'} disabled={!!bulkBusy || runningCount === bots.length} onClick={startAll} title="Start every stopped bot — they backfill in parallel, no waiting">

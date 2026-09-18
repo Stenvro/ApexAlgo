@@ -84,6 +84,9 @@ function ChartEngine({ dataset, openDataVault }) {
   const [themeTick, setThemeTick] = useState(0); // bumps on apex-theme-changed -> chart re-init with new tokens
   const [showMenu, setShowMenu] = useState(false);
   const [expandedMenuBot, setExpandedMenuBot] = useState(null);  
+  // Bots on this pair + interval whose candles come from another exchange —
+  // listed in the menu so "why isn't my bot here?" answers itself
+  const [otherExchangeBots, setOtherExchangeBots] = useState([]);
   const [botConfigs, setBotConfigs] = useState({}); 
 
   const getSnappedTime = useCallback((rawTime) => { 
@@ -150,10 +153,17 @@ function ChartEngine({ dataset, openDataVault }) {
     try { 
       const botRes = await apiClient.get('/api/bots/'); 
        
-      const validBots = botRes.data.filter(b => {
+      // A bot only belongs on this chart when exchange, pair AND interval all
+      // match — its candles (and therefore its signals) come from that exact dataset.
+      const chartExchange = (dataset.exchange || 'okx').toLowerCase();
+      const botExchangeOf = (b) => (b.exchange || b.settings?.data_exchange || 'okx').toLowerCase();
+      const samePairAndInterval = botRes.data.filter(b => {
           const hasSymbol = (b.settings?.symbols && b.settings.symbols.includes(dataset.symbol)) || b.settings?.symbol === dataset.symbol;
           return hasSymbol && b.settings?.timeframe === dataset.timeframe;
       });
+      const validBots = samePairAndInterval.filter(b => botExchangeOf(b) === chartExchange);
+      setOtherExchangeBots(samePairAndInterval.filter(b => botExchangeOf(b) !== chartExchange)
+          .map(b => ({ name: b.name, exchange: botExchangeOf(b) })));
        
       setBotConfigs(prev => { 
          const newConfigs = { ...prev }; 
@@ -196,7 +206,7 @@ function ChartEngine({ dataset, openDataVault }) {
   const pollData = async (signal) => {
     try {
       const safeSymbol = dataset.symbol.replace('/', '-');
-      const sigParams = { symbol: dataset.symbol, timeframe: dataset.timeframe, limit: 200000 };
+      const sigParams = { symbol: dataset.symbol, timeframe: dataset.timeframe, exchange: dataset.exchange || 'okx', limit: 200000 };
       if (lastSignalIdRef.current > 0) sigParams.since_id = lastSignalIdRef.current;
       const cur = tradeCursorRef.current;
       const incremental = cur.since !== null;
@@ -679,7 +689,7 @@ function ChartEngine({ dataset, openDataVault }) {
           {showMenu && (
             <div className="absolute top-12 right-0 w-[calc(100vw-2rem)] sm:w-80 max-h-[70vh] overflow-y-auto custom-scrollbar bg-overlay/95 backdrop-blur-xl border border-border rounded-lg shadow-pop py-2 z-50">
               <div className="px-4 py-3 text-xs font-bold text-muted uppercase border-b border-border mb-1">Algorithm Overlay</div>
-              {Object.keys(botConfigs).length === 0 ? (
+              {Object.keys(botConfigs).length === 0 && otherExchangeBots.length === 0 ? (
                 <div className="px-4 py-3 text-xs text-muted">No algorithms active on this chart.</div>
               ) : (
                 Object.keys(botConfigs).map(botName => {
@@ -717,6 +727,16 @@ function ChartEngine({ dataset, openDataVault }) {
                     </div>
                   );
                 })
+              )}
+              {otherExchangeBots.length > 0 && (
+                <div className="px-4 py-3 border-t border-border/50 space-y-1">
+                  <div className="text-3xs md:text-2xs font-bold text-muted uppercase tracking-wider">Same pair, other exchange</div>
+                  {otherExchangeBots.map(b => (
+                    <div key={b.name} className="text-xs text-muted">
+                      <span className="text-text-secondary">{b.name}</span> runs on {b.exchange.toUpperCase()} — open {dataset.symbol} on {b.exchange.toUpperCase()} to see its overlays.
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           )}
