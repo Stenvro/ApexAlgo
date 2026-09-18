@@ -91,7 +91,9 @@ export default function App() {
       localStorage.setItem('apex_activeView', activeView);
   }, [activeView]);
 
+  const openChartsRef = useRef(openCharts);
   useEffect(() => {
+      openChartsRef.current = openCharts;
       localStorage.setItem('apex_openCharts', JSON.stringify(openCharts));
   }, [openCharts]);
 
@@ -180,6 +182,28 @@ export default function App() {
       window.removeEventListener('refresh-bots', handleRefresh);
     };
   }, [refetchBots, hasApiKey]);
+
+  // Chart tabs live in localStorage, so they outlive their candles when data
+  // is deleted. Drop any tab whose (exchange, symbol, timeframe) no longer
+  // exists — on login and whenever the Data Vault deletes something.
+  useEffect(() => {
+    if (!hasApiKey) return;
+    let cancelled = false;
+    const pruneCharts = async () => {
+      let rows;
+      try { rows = (await apiClient.get('/api/data/summary')).data; } catch { return; }
+      if (cancelled || !Array.isArray(rows)) return;
+      const have = new Set(rows.map(r => `${(r.exchange || 'okx').toLowerCase()}_${r.symbol}_${r.timeframe}`));
+      const prev = openChartsRef.current;
+      const kept = prev.filter(c => have.has(c.id));
+      if (kept.length === prev.length) return;
+      setOpenCharts(kept);
+      setActiveView(v => (prev.some(c => c.id === v) && !kept.some(c => c.id === v)) ? 'home' : v);
+    };
+    pruneCharts();
+    window.addEventListener('data-changed', pruneCharts);
+    return () => { cancelled = true; window.removeEventListener('data-changed', pruneCharts); };
+  }, [hasApiKey]);
 
   const handleOpenChart = (dataset) => {
     // Exchange is part of the identity: the same pair can be open

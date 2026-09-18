@@ -196,10 +196,10 @@ export default function DataManager({ openChart }) {
     setSyncingSymbol(null);
   };
 
-  const executeDelete = async (delSymbol, delTimeframe, beforeDateStr) => {
+  const executeDelete = async (delSymbol, delTimeframe, beforeDateStr, delExchange) => {
     setLoading(true);
     try {
-      let endpoint = `/api/data?symbol=${encodeURIComponent(delSymbol)}&timeframe=${delTimeframe}`;
+      let endpoint = `/api/data?symbol=${encodeURIComponent(delSymbol)}&timeframe=${delTimeframe}&exchange=${encodeURIComponent(delExchange || 'okx')}`;
       if (beforeDateStr && beforeDateStr.trim() !== "") {
           const isoDate = new Date(beforeDateStr).toISOString();
           endpoint += `&before_date=${isoDate}`;
@@ -209,6 +209,7 @@ export default function DataManager({ openChart }) {
       setPruneModalConfig(null);
       toast.success(res.data.message);
       fetchSummary();
+      window.dispatchEvent(new CustomEvent('data-changed'));
     } catch (err) {
       toast.error(humanizeApiError(err, 'Failed to delete candle data.'));
       setPruneModalConfig(null);
@@ -222,7 +223,7 @@ export default function DataManager({ openChart }) {
       return;
     }
     setPruneDate('');
-    setPruneModalConfig({ symbol: row.symbol, timeframe: row.timeframe });
+    setPruneModalConfig({ symbol: row.symbol, timeframe: row.timeframe, exchange: row.exchange || 'okx' });
   };
 
   const uniqueSymbols = useMemo(() => [...new Set(summary.map(r => r.symbol))], [summary]);
@@ -263,9 +264,10 @@ export default function DataManager({ openChart }) {
       setLoading(true);
       try {
           await Promise.all(deletable.map(row =>
-              apiClient.delete(`/api/data?symbol=${encodeURIComponent(row.symbol)}&timeframe=${row.timeframe}`)
+              apiClient.delete(`/api/data?symbol=${encodeURIComponent(row.symbol)}&timeframe=${row.timeframe}&exchange=${encodeURIComponent(row.exchange || 'okx')}`)
           ));
           fetchSummary();
+          window.dispatchEvent(new CustomEvent('data-changed'));
           toast.success('Successfully deleted all data matching your filters.');
       } catch {
           toast.error('Failed to delete some data.');
@@ -372,7 +374,7 @@ export default function DataManager({ openChart }) {
                   variant="danger"
                   size="sm"
                   loading={loading}
-                  onClick={() => executeDelete(pruneModalConfig.symbol, pruneModalConfig.timeframe, '')}
+                  onClick={() => executeDelete(pruneModalConfig.symbol, pruneModalConfig.timeframe, '', pruneModalConfig.exchange)}
                 >
                   Delete All
                 </Button>
@@ -382,7 +384,7 @@ export default function DataManager({ openChart }) {
                   loading={loading}
                   disabled={!pruneDate}
                   className="!bg-danger !text-danger-ink hover:!bg-danger-hover"
-                  onClick={() => executeDelete(pruneModalConfig.symbol, pruneModalConfig.timeframe, pruneDate)}
+                  onClick={() => executeDelete(pruneModalConfig.symbol, pruneModalConfig.timeframe, pruneDate, pruneModalConfig.exchange)}
                 >
                   Prune Date
                 </Button>
