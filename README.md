@@ -18,15 +18,17 @@ ApexAlgo is a full-stack algorithmic trading platform for building, backtesting,
 
 ## Demo
 
+
+https://github.com/user-attachments/assets/0a59a934-89dd-4c48-bf86-6142dc6add98
+
+
+
 <!-- GitHub only renders a video player for files uploaded through its editor,
      not for paths inside the repo. The link below is the in-repo copy; the
      player URL (https://github.com/user-attachments/assets/…) is added once
      the file has been dropped into the README editor on github.com. -->
-[▶ Watch the demo (MP4, with sound)](
 
-https://github.com/user-attachments/assets/94a7adf5-cb83-4b99-aeef-1bff066d328b
 
-)
 
 ## Screenshots
 
