@@ -20,7 +20,9 @@ ApexAlgo is a full-stack algorithmic trading platform for building, backtesting,
 
 One command to your first bot — 24 s, with sound.
 
-https://github.com/user-attachments/assets/0a59a934-89dd-4c48-bf86-6142dc6add98
+https://github.com/user-attachments/assets/f8ed22c3-2d6f-4a8c-8a32-50f451493525
+
+
 
 <sub>Player not showing? [Download the MP4](https://github.com/Stenvro/ApexAlgo/raw/master/docs/screenshots/demo.mp4).</sub>
 
