@@ -26,7 +26,9 @@ const BAR_COLORS = {
 };
 
 const SectionHeader = ({ title, subtitle, action, accentColor = 'neutral' }) => (
-  <div className="flex items-center justify-between gap-4">
+  // Title and actions sit side by side; below `sm` the actions wrap under the
+  // title instead of squeezing it into an ellipsis.
+  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
     <div className="flex items-center gap-3 min-w-0">
       <span className={`w-1 h-8 rounded-full shrink-0 ${BAR_COLORS[accentColor] || BAR_COLORS.neutral}`} />
       <div className="min-w-0">
@@ -38,7 +40,7 @@ const SectionHeader = ({ title, subtitle, action, accentColor = 'neutral' }) => 
         )}
       </div>
     </div>
-    {action && <div className="shrink-0">{action}</div>}
+    {action && <div className="shrink-0 flex flex-wrap gap-2 sm:justify-end">{action}</div>}
   </div>
 );
 

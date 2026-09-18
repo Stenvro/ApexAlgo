@@ -72,6 +72,16 @@ const entryTimeOf = (p, exitTs, entryTsByPos) => {
 const pnlColor = (v) => (v >= 0 ? 'text-success' : 'text-danger');
 const pnlSign = (v) => (v >= 0 ? '+' : '');
 
+// Mode filter values → the label the collapsed (phone) filter summary shows.
+const MODE_LABELS = {
+    real: 'Paper + Live',
+    live: 'Live',
+    paper: 'Paper',
+    forward_test: 'Forward test',
+    backtest: 'Backtest',
+    all: 'All modes',
+};
+
 // ─── Equity Curve SVG ────────────────────────────────────────────────────────
 
 const EquityCurve = ({ data }) => {
@@ -352,6 +362,8 @@ export default function TradeManager({ setError, bots = [], request = null }) {
     const [closingId, setClosingId] = useState(null);
 
     const [filterBot, setFilterBot] = useState(request?.bot || 'all');
+    // Phones start with the filter panel folded to a one-line summary; desktop always shows it.
+    const [filtersOpen, setFiltersOpen] = useState(() => typeof window === 'undefined' || window.innerWidth >= 768);
     const [filterSymbol, setFilterSymbol] = useState('all');
     const [filterExchange, setFilterExchange] = useState('all');
     // null = auto (resolved from the loaded positions, see defaultModeFor)
@@ -1105,7 +1117,27 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         <PageShell>
 
             {/* ── FILTER BAR ─────────────────────────────────────────────────── */}
-            <div className="terminal-card px-3 py-2 sticky top-0 z-20">
+            <div className="terminal-card px-3 py-2 md:sticky md:top-0 z-20">
+                {/* Phone: one summary line that unfolds into the full panel (desktop shows it always). */}
+                <div className="flex items-center justify-between gap-2 md:hidden">
+                    <button type="button" onClick={() => setFiltersOpen(o => !o)} aria-expanded={filtersOpen}
+                        className="flex items-center gap-2 min-w-0 flex-1 text-left py-1 text-muted hover:text-text transition-colors">
+                        <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5h18l-7 8v5l-4 2v-7L3 5z" /></svg>
+                        <span className="text-2xs font-bold uppercase tracking-wider shrink-0">Filters</span>
+                        <span className="text-xs text-text truncate">
+                            {[
+                                filterBot === 'all' ? 'All bots' : filterBot,
+                                MODE_LABELS[filterMode] || filterMode,
+                                filterSymbol === 'all' ? null : filterSymbol,
+                                filterInterval === 'all' ? null : filterInterval,
+                                filterExchange === 'all' ? null : filterExchange.toUpperCase(),
+                            ].filter(Boolean).join(' · ')}
+                        </span>
+                        <svg className={`w-3.5 h-3.5 shrink-0 transition-transform ${filtersOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                    </button>
+                    <Button variant="secondary" size="sm" onClick={() => fetchAllData()} loading={loading}>Sync</Button>
+                </div>
+                <div className={`${filtersOpen ? 'block pt-3 mt-2 border-t border-border' : 'hidden'} md:block md:pt-0 md:mt-0 md:border-0`}>
                 <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
                     <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 flex-1 min-w-[280px] max-w-[880px]">
                         <Select label="Algorithm" value={filterBot} onChange={e => { setFilterBot(e.target.value); resetPage(); }} className="py-1.5! text-xs!">
@@ -1143,18 +1175,21 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                 updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{anyBotActive ? ' · auto' : ''}
                             </span>
                         )}
-                        <Button variant="secondary" size="sm" onClick={() => fetchAllData()} loading={loading}>Sync</Button>
+                        <span className="hidden md:inline-flex">
+                            <Button variant="secondary" size="sm" onClick={() => fetchAllData()} loading={loading}>Sync</Button>
+                        </span>
                     </div>
                 </div>
                 <DateRangeControl bounds={dateBounds} from={dateFrom} to={dateTo}
                     onChange={(f, t) => { setDateFrom(f); setDateTo(t); resetPage(); }} />
                 {serverFrom !== null && (
-                    <div className="flex items-center gap-2 pt-2 text-2xs text-faint font-num">
+                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pt-2 text-2xs text-faint font-num">
                         <span>Loaded trades since {new Date(serverFrom).toISOString().slice(0, 10)} (earliest backtest window of your algorithms; open positions always included)</span>
                         <button type="button" onClick={() => setFullHistory(true)}
                             className="text-accent hover:underline font-bold" disabled={loading}>Load full history</button>
                     </div>
                 )}
+                </div>
             </div>
 
             {/* ── STATS GRID ─────────────────────────────────────────────────── */}
