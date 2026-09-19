@@ -77,6 +77,7 @@ def run_migrations():
                         close     REAL,
                         volume    REAL,
                         marketcap REAL,
+                        fetched_at DATETIME,
                         UNIQUE (exchange, symbol, timeframe, timestamp)
                     )
                 """))
@@ -96,6 +97,9 @@ def run_migrations():
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_candles_timeframe ON candles (timeframe)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_candles_timestamp ON candles (timestamp)"))
                 logger.info("Migration: candles table rebuilt successfully.")
+            elif 'fetched_at' not in can_cols:
+                conn.execute(text("ALTER TABLE candles ADD COLUMN fetched_at DATETIME"))
+                logger.info("Migration: added 'fetched_at' to candles")
 
         # ── signals — deduplicate and add unique constraint ────────────────────
         if "signals" in existing_tables:
@@ -140,6 +144,36 @@ def run_migrations():
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_signals_bot_name  ON signals (bot_name)"))
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_signals_name      ON signals (name)"))
                 logger.info("Migration: signals table rebuilt with unique constraint.")
+
+        # ── bot_config_runs — from "set of configs" to a run log ───────────────
+        # The unique key grew from (bot, config) to (bot, config, slice, data),
+        # which SQLite cannot alter in place. Old rows keep counting as
+        # distinct configs (empty slice/data hash), so the total is unchanged.
+        if "bot_config_runs" in existing_tables:
+            run_cols = {c['name'] for c in inspector.get_columns('bot_config_runs')}
+            if 'slice_key' not in run_cols:
+                logger.info("Migration: rebuilding bot_config_runs table as a run log...")
+                conn.execute(text("""
+                    CREATE TABLE bot_config_runs_migration (
+                        id          INTEGER PRIMARY KEY,
+                        bot_name    VARCHAR NOT NULL,
+                        config_hash VARCHAR(32) NOT NULL,
+                        slice_key   VARCHAR(32) NOT NULL DEFAULT '',
+                        window_from DATETIME,
+                        window_to   DATETIME,
+                        data_hash   VARCHAR(64) NOT NULL DEFAULT '',
+                        run_at      DATETIME NOT NULL,
+                        CONSTRAINT uq_bot_config_runs_run UNIQUE (bot_name, config_hash, slice_key, data_hash)
+                    )
+                """))
+                conn.execute(text("""
+                    INSERT INTO bot_config_runs_migration (id, bot_name, config_hash, run_at)
+                    SELECT id, bot_name, config_hash, first_run_at FROM bot_config_runs
+                """))
+                conn.execute(text("DROP TABLE bot_config_runs"))
+                conn.execute(text("ALTER TABLE bot_config_runs_migration RENAME TO bot_config_runs"))
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_bot_config_runs_bot_name ON bot_config_runs (bot_name)"))
+                logger.info("Migration: bot_config_runs table rebuilt.")
 
         # Composite indexes for hot query paths (idempotent)
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_positions_botname_status ON positions (bot_name, status)"))

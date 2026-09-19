@@ -12,7 +12,10 @@ from sqlalchemy import text
 from backend.models.signals import Signal
 from backend.models.orders import Order
 from backend.models.positions import Position
-from backend.engine.sizing import _num, _int, _naive_utc, sim_frictions, calculate_trade_amount, _record_config_run
+from backend.engine.sizing import (
+    _num, _int, _naive_utc, sim_frictions, calculate_trade_amount, _record_config_run,
+    backtest_pin, combined_fingerprint, slice_key,
+)
 from backend.core import bot_log_buffer as blb
 
 logger = logging.getLogger("apexalgo.bot_manager")
@@ -322,15 +325,34 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
     )
 
 
-def build_summary(db, bot, res: SimResult, sym_contexts) -> dict:
+def build_summary(db, bot, res: SimResult, sym_contexts, exchange_name=None) -> dict:
     """`last_backtest_summary`: the numbers the bot card and analytics show,
     including the drawdown the gate actually enforces (the closed-trade curve
-    in the UI understates intra-trade dips)."""
+    in the UI understates intra-trade dips), plus the run's identity — slice,
+    data hash and both variant counters — for reproducibility."""
     closed_bt = db.query(Position.profit_abs).filter(
         Position.bot_name == bot.name, Position.mode == "backtest", Position.status == "closed"
     ).all()
     pnls = [float(p[0] or 0) for p in closed_bt]
     wins = sum(1 for p in pnls if p > 0)
+
+    data_from = _naive_utc(res.timeline[0][0]) if res.timeline else None
+    data_to = _naive_utc(res.timeline[-1][0]) if res.timeline else None
+    # Slice = the candles walked: the pinned window when there is one, else
+    # the realized range (which moves with every unpinned run)
+    pin_from, pin_to = backtest_pin(bot.settings)
+    pinned = pin_from is not None
+    window_from, window_to = (pin_from, pin_to) if pinned else (data_from, data_to)
+    hash_by_symbol = {c["symbol"]: c["data_hash"] for c in sym_contexts if c.get("data_hash")}
+    data_hash = combined_fingerprint(hash_by_symbol)
+    slice_hash = slice_key(exchange_name or bot.settings.get("data_exchange", "okx"),
+                           [c["symbol"] for c in sym_contexts], bot.settings.get("timeframe"), window_from, window_to)
+    # Same slice as the previous saved run but different candles underneath
+    # (re-download, gap repair, exchange restatement) — None when the slice
+    # moved, because then a differing hash says nothing
+    prev = (bot.settings or {}).get("last_backtest_summary") or {}
+    data_changed = (prev["data_hash"] != data_hash) if prev.get("data_hash") and prev.get("slice_key") == slice_hash else None
+    variants, variants_on_slice = _record_config_run(db, bot.name, bot.settings, slice_hash, data_hash, window_from, window_to)
     summary = {
         "trades": len(pnls),
         "wins": wins,
@@ -344,8 +366,8 @@ def build_summary(db, bot, res: SimResult, sym_contexts) -> dict:
         "candles": sum(len(c["df"]) for c in sym_contexts),
         # Data range the backtest walked — lets the analytics page
         # measure flat periods before the first / after the last trade
-        "data_from": res.timeline[0][0].isoformat() if res.timeline else None,
-        "data_to": res.timeline[-1][0].isoformat() if res.timeline else None,
+        "data_from": data_from.isoformat() if data_from else None,
+        "data_to": data_to.isoformat() if data_to else None,
         # Buy & hold over the same walked range, per symbol — the
         # only fair benchmark for the backtest return above
         "buy_hold": {
@@ -357,9 +379,19 @@ def build_summary(db, bot, res: SimResult, sym_contexts) -> dict:
             }
             for c in sym_contexts if len(c["df"]) > 0
         },
-        # Distinct configurations this bot has backtested — plain
-        # tweak-awareness, no judgement attached
-        "variants": _record_config_run(db, bot.name, bot.settings),
+        # Distinct configurations this bot has backtested — ever, and on
+        # exactly this slice of data — plain tweak-awareness, no judgement
+        "variants": variants,
+        "variants_on_slice": variants_on_slice,
+        # Run identity: pin + slice + raw-candle hash make the run reproducible
+        # and let the next run on the same slice detect altered data
+        "pinned": pinned,
+        "window_from": window_from.isoformat() if window_from else None,
+        "window_to": window_to.isoformat() if window_to else None,
+        "slice_key": slice_hash,
+        "data_hash": data_hash,
+        "data_hash_by_symbol": hash_by_symbol,
+        "data_changed": data_changed,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
     return summary

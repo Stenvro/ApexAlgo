@@ -13,6 +13,7 @@ from backend.core.database import get_db, SessionLocal
 from backend.models.candles import Candle
 from backend.core.security import verify_api_key
 from backend.core.exchange_registry import build_exchange, SUPPORTED_EXCHANGES, get_exchange_timeframes, get_exchange_symbols
+from backend.engine.data_verify import verify_window
 
 logger = logging.getLogger("apexalgo.data")
 
@@ -54,6 +55,42 @@ class HistoricalDataFetch(BaseModel):
     timeframe: str
     start_date: datetime
     end_date: datetime
+
+
+class VerifyRequest(BaseModel):
+    exchange: str = "okx"
+    symbol: str
+    timeframe: str
+    start_date: datetime
+    end_date: datetime
+    accept: bool = False
+
+
+@router.post("/verify")
+async def verify_stored_candles(req: VerifyRequest):
+    """Re-fetch a window from the exchange and diff it against the stored
+    candles (stored rows are never updated on their own, so an exchange
+    restatement is invisible until checked). ``accept`` overwrites restated
+    rows — the deliberate way to change a backtest slice's data."""
+    exchange_id = req.exchange.lower()
+    if exchange_id not in SUPPORTED_EXCHANGES:
+        raise HTTPException(status_code=400, detail=f"Unknown exchange '{exchange_id}'.")
+    if req.end_date <= req.start_date:
+        raise HTTPException(status_code=400, detail="end_date must be after start_date.")
+    symbol = req.symbol.replace('-', '/').upper()
+
+    def _run():
+        db = SessionLocal()
+        try:
+            return verify_window(db, build_exchange(exchange_id), exchange_id, symbol, req.timeframe,
+                                 req.start_date, req.end_date, accept=req.accept)
+        finally:
+            db.close()
+    try:
+        return await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.error("Verify failed for %s/%s/%s: %s", exchange_id, symbol, req.timeframe, e, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Could not verify against {SUPPORTED_EXCHANGES[exchange_id]}: {str(e)[:160]}")
 
 
 @router.post("/fetch/{symbol}")
