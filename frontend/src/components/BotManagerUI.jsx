@@ -174,42 +174,43 @@ function BacktestResult({ bot, updateBotConfig, verifyData, verifying }) {
     : (total > 0 ? `${total} distinct configuration${total === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.` : undefined);
   const pin = () => updateBotConfig(bot.id, bot, { settings: { backtest_from: sm.data_from, backtest_to: sm.data_to } });
   const unpin = () => updateBotConfig(bot.id, bot, { settings: { backtest_from: null, backtest_to: null } });
+  const action = "text-3xs font-bold uppercase tracking-wider transition-colors";
   return (
-    <div className="px-4 py-2 border-b border-border bg-bg/40 flex flex-col gap-1.5">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 min-w-0 text-3xs font-num text-muted" title={counterTitle}>
-          <span className="font-bold uppercase tracking-widest">
-            Backtest{onSlice > 0 && <span className="text-faint"> #{onSlice}</span>}
+    <div className="px-4 py-2 border-b border-border bg-bg/40 flex flex-col gap-1">
+      {/* Row 1: what ran — counter, range, pin state */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-3xs font-num text-muted" title={counterTitle}>
+        <span className="font-bold uppercase tracking-widest">
+          Backtest{onSlice > 0 && <span className="text-faint"> #{onSlice}</span>}
+        </span>
+        {total > onSlice && <span className="text-faint">· {total} total</span>}
+        {sm.data_from && sm.data_to && (
+          <span>{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>
+        )}
+        {pinned && (
+          <span className="rounded-sm border border-info/40 bg-info/10 px-1 py-px font-bold uppercase tracking-wider text-info"
+            title="Every start replays exactly this range of candles, so the result stays reproducible. Use 'Rerun latest' to slide the window to the newest data.">
+            Pinned
           </span>
-          {total > onSlice && <span className="text-faint">· {total} total</span>}
-          {sm.data_from && sm.data_to && (
-            <span className="truncate">{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>
-          )}
-          {pinned && (
-            <span className="shrink-0 rounded-sm border border-info/40 bg-info/10 px-1 py-px text-3xs font-bold uppercase tracking-wider text-info"
-              title="Every start replays exactly this range of candles, so the result stays reproducible. Use 'Rerun latest' to slide the window to the newest data.">
-              Pinned
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-3 shrink-0">
-          {canPin && (pinned
-            ? <button type="button" onClick={unpin} title="Drop the pin: the next start walks the newest candles again"
-                className="text-3xs font-bold uppercase tracking-wider text-muted hover:text-text transition-colors">Rerun latest</button>
-            : <button type="button" onClick={pin} title="Pin this range: every next start replays exactly these candles (reproducible result)"
-                className="text-3xs font-bold uppercase tracking-wider text-muted hover:text-text transition-colors">Pin range</button>)}
-          {canVerify && (
-            <button type="button" onClick={() => verifyData(bot)}
-              title="Re-fetch this range from the exchange and compare it with the stored candles. Exchanges (Binance most of all) silently restate history; the local snapshot is never changed unless you accept the exchange data."
-              className="text-3xs font-bold uppercase tracking-wider text-muted hover:text-text transition-colors">Verify data</button>
-          )}
-          {verifying && <span className="text-3xs text-faint">verifying…</span>}
-          <button type="button"
-            onClick={() => window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: bot.name, mode: 'backtest' } }))}
-            className="text-3xs font-bold uppercase tracking-wider text-info hover:text-text transition-colors">
-            View in Analytics →
-          </button>
-        </div>
+        )}
+      </div>
+      {/* Row 2: actions — wrap instead of squeezing the range on narrow cards */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        {canPin && (pinned
+          ? <button type="button" onClick={unpin} title="Drop the pin: the next start walks the newest candles again"
+              className={`${action} text-muted hover:text-text`}>Rerun latest</button>
+          : <button type="button" onClick={pin} title="Pin this range: every next start replays exactly these candles (reproducible result)"
+              className={`${action} text-muted hover:text-text`}>Pin range</button>)}
+        {canVerify && (
+          <button type="button" onClick={() => verifyData(bot)}
+            title="Re-fetch this range from the exchange and compare it with the stored candles. Exchanges (Binance most of all) silently restate history; the local snapshot is never changed unless you accept the exchange data."
+            className={`${action} text-muted hover:text-text`}>Verify data</button>
+        )}
+        {verifying && <span className="text-3xs text-faint">verifying…</span>}
+        <button type="button"
+          onClick={() => window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: bot.name, mode: 'backtest' } }))}
+          className={`${action} text-info hover:text-text ml-auto`}>
+          View in Analytics →
+        </button>
       </div>
       {sm.data_changed === true && (
         <p className="text-3xs text-warn leading-snug"
