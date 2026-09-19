@@ -17,7 +17,7 @@ from backend.models.positions import Position
 from backend.models.exchange_keys import ExchangeKey
 from backend.engine.evaluator import NodeEvaluator
 from backend.engine import backtest
-from backend.engine.sizing import _num, _int, _tf_seconds, _naive_utc
+from backend.engine.sizing import _num, _int, _tf_seconds, _naive_utc, backtest_pin, data_fingerprint
 from backend.core.exchange_registry import get_exchange_timeframes
 from backend.core import bot_log_buffer as blb
 
@@ -104,6 +104,11 @@ def execute_sync_backfill(engine, bot_id: int):
         exit_node = bot.settings.get("exit_node")
         run_backtest = bot.settings.get("backtest_on_start", False)
         lookback_limit = _int(bot.settings.get("backtest_lookback"), 150)
+        # A pinned window replays exactly the candles of a saved run instead
+        # of the newest `lookback` ones, so the result is reproducible until
+        # the user explicitly reruns against the latest data
+        pin_from, pin_to = backtest_pin(bot.settings) if run_backtest else (None, None)
+        pinned = pin_from is not None
 
         if run_backtest:
             # A backtest is deterministic, so always simulate the whole
@@ -123,7 +128,8 @@ def execute_sync_backfill(engine, bot_id: int):
         empty_symbols = []
 
         for symbol in symbols:
-            blb.push(bot.name, "INFO", f"Starting: {symbol} | {timeframe} | {live_mode} | lookback={lookback_limit}")
+            _window = f"pinned {pin_from:%Y-%m-%d} → {pin_to:%Y-%m-%d}" if pinned else f"lookback={lookback_limit}"
+            blb.push(bot.name, "INFO", f"Starting: {symbol} | {timeframe} | {live_mode} | {_window}")
             tf_seconds = 60
             if timeframe.endswith('m'): tf_seconds = int(timeframe[:-1]) * 60
             elif timeframe.endswith('h'): tf_seconds = int(timeframe[:-1]) * 3600
@@ -232,17 +238,25 @@ def execute_sync_backfill(engine, bot_id: int):
             try:
                 query = candle_db.query(Candle.id, Candle.timestamp, Candle.open, Candle.high, Candle.low, Candle.close, Candle.volume).filter(
                     Candle.exchange == exchange_name, Candle.symbol == symbol, Candle.timeframe == timeframe
-                ).order_by(Candle.timestamp.desc()).limit(lookback_limit).statement
-                df = pd.read_sql(query, candle_db.bind)
+                )
+                if pinned:
+                    query = query.filter(Candle.timestamp >= pin_from, Candle.timestamp <= pin_to).order_by(Candle.timestamp.asc())
+                else:
+                    query = query.order_by(Candle.timestamp.desc()).limit(lookback_limit)
+                df = pd.read_sql(query.statement, candle_db.bind)
             finally:
                 candle_db.close()
 
             if df.empty or len(df) < 20:
                 logger.info("Skipping backfill for %s: insufficient data (%d candles, minimum 20 required).", symbol, len(df))
-                blb.push(bot.name, "WARN", f"Skipping backtest: {symbol} — only {len(df)} candles available (minimum 20)")
+                _hint = " in the pinned window — rerun against latest or re-download the range" if pinned else ""
+                blb.push(bot.name, "WARN", f"Skipping backtest: {symbol} — only {len(df)} candles available (minimum 20){_hint}")
                 continue
 
             df = df.sort_values('timestamp').reset_index(drop=True)
+            # Hash of the raw candles before any indicator touches them: the
+            # summary compares it with the previous run on the same slice
+            data_hash = data_fingerprint(df) if run_backtest else None
 
             evaluator = NodeEvaluator(bot.settings)
             evaluator.df = df.copy()
@@ -278,6 +292,7 @@ def execute_sync_backfill(engine, bot_id: int):
                 "atr_arr": evaluator.df['atr'].values if 'atr' in evaluator.df.columns else None,
                 "indicator_cols": [c for c in evaluator.df.columns if c not in _standard_cols],
                 "existing_timestamps": existing_timestamps,
+                "data_hash": data_hash,
                 "last_bt_ts": last_bt_ts,
                 "open_positions": open_bt_positions,  # pyramided up to max_positions
                 "original_amount": {},  # pos.id -> entry size, for weighted profit_pct / partial exits
@@ -323,12 +338,20 @@ def execute_sync_backfill(engine, bot_id: int):
             # Persist the engine's measured drawdown so the analytics UI
             # can show the number the gate actually enforces
             try:
-                summary = backtest.build_summary(db, bot, res, sym_contexts)
+                summary = backtest.build_summary(db, bot, res, sym_contexts, exchange_name)
                 bot.settings = {**bot.settings, "last_backtest_max_drawdown": round(res.max_dd, 2), "last_backtest_summary": summary}
                 flag_modified(bot, "settings")
                 db.commit()
-            except Exception:
+                _sl = summary.get("variants_on_slice") or 0
+                _tot = summary.get("variants") or 0
+                blb.push(bot.name, "INFO", f"Backtest variant #{_sl} on this slice ({_tot} distinct config{'s' if _tot != 1 else ''} for this bot in total)")
+                if summary.get("data_changed"):
+                    blb.push(bot.name, "WARN", "Historical data changed since the previous run on this slice — the candles "
+                                               "underneath differ (re-download, gap repair or exchange restatement), so the "
+                                               "results are not directly comparable")
+            except Exception as _exc:
                 db.rollback()
+                logger.warning("Bot '%s': could not persist backtest summary: %s", bot.name, _exc)
 
             engine._drawdown_cache.pop((bot.name, "backtest"), None)
             stop_reason = backtest.gate_stop_reason(bot, res)

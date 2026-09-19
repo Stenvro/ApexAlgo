@@ -1,5 +1,6 @@
 import logging
 import re
+from datetime import datetime
 
 from backend.core.exchange_registry import get_exchange_timeframes
 from backend.engine.indicator_registry import get_spec
@@ -196,6 +197,20 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
     if longest and lookback and lookback < longest + LOOKBACK_MARGIN:
         warnings.append(f"backtest_lookback ({lookback}) is short for the longest indicator window ({longest}): the first "
                         f"~{longest} candles are warm-up, leaving little to trade on. Use at least {longest + LOOKBACK_MARGIN}.")
+
+    # Pinned backtest window: both ends or neither, valid ISO, from < to
+    pin_raw = {k: settings.get(k) for k in ("backtest_from", "backtest_to")}
+    if any(pin_raw.values()):
+        if not all(pin_raw.values()):
+            errors.append("backtest_from and backtest_to must be set together (or both cleared to rerun against the latest data).")
+        else:
+            try:
+                _pf = datetime.fromisoformat(str(pin_raw["backtest_from"]).replace("Z", "+00:00"))
+                _pt = datetime.fromisoformat(str(pin_raw["backtest_to"]).replace("Z", "+00:00"))
+                if _pf >= _pt:
+                    errors.append("backtest_from must be before backtest_to.")
+            except (ValueError, TypeError):
+                errors.append("backtest_from / backtest_to must be ISO 8601 timestamps.")
 
     # Trade settings
     trade_settings = settings.get("trade_settings", {})

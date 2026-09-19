@@ -2,7 +2,7 @@
 and the live tick. Pure functions over settings + DB — no engine state."""
 import json
 import logging
-from hashlib import md5
+from hashlib import md5, sha256
 from datetime import datetime, timezone
 from sqlalchemy import text, func
 from backend.models.bots import BotConfig
@@ -59,10 +59,12 @@ def _naive_utc(ts):
 
 
 # Settings that do not change what the strategy does on the data: layout,
-# order routing, live sizing and the engine's own runtime bookkeeping.
+# order routing, live sizing, the pinned backtest window (which data, not
+# what the strategy does on it) and the engine's own runtime bookkeeping.
 _NON_STRATEGY_KEYS = frozenset({
     "ui_layout", "api_execution", "api_key_name", "live_allocation_pct", "max_order_value",
-    "backtest_on_start", "last_backtest_summary", "last_backtest_max_drawdown",
+    "backtest_on_start", "backtest_from", "backtest_to",
+    "last_backtest_summary", "last_backtest_max_drawdown",
     "last_stop_reason", "drawdown_peak_reset_at", "live_starting_capital",
 })
 
@@ -74,14 +76,72 @@ def _config_fingerprint(settings: dict) -> str:
     return md5(json.dumps(relevant, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def _record_config_run(db, bot_name: str, settings: dict) -> int:
-    """Register this configuration as backtested and return the number of
-    distinct configurations the bot has run so far (this one included)."""
+def data_fingerprint(df) -> str:
+    """sha256 of the raw OHLCV rows a backtest walked (sorted by timestamp).
+    `repr` on the floats makes it byte-stable across runs, so two runs on the
+    same slice hash equal unless a candle was actually altered — the check
+    behind the "historical data changed" warning."""
+    h = sha256()
+    if df is None or len(df) == 0:
+        return h.hexdigest()
+    cols = ["timestamp", "open", "high", "low", "close", "volume"]
+    for ts, o, hi, lo, c, v in df.sort_values("timestamp")[cols].itertuples(index=False, name=None):
+        ts = _naive_utc(ts)
+        h.update(f"{ts.isoformat() if ts is not None else ''},{o!r},{hi!r},{lo!r},{c!r},{v!r}\n".encode())
+    return h.hexdigest()
+
+
+def backtest_pin(settings) -> tuple:
+    """``(window_from, window_to)`` as naive UTC datetimes when the bot's
+    backtest window is pinned (``backtest_from``/``backtest_to`` ISO strings),
+    else ``(None, None)``. A half or malformed pin counts as no pin."""
+    out = []
+    for key in ("backtest_from", "backtest_to"):
+        raw = (settings or {}).get(key)
+        if not raw:
+            return None, None
+        try:
+            out.append(_naive_utc(datetime.fromisoformat(str(raw).replace("Z", "+00:00"))))
+        except (TypeError, ValueError):
+            return None, None
+    if out[0] >= out[1]:
+        return None, None
+    return out[0], out[1]
+
+
+def combined_fingerprint(by_symbol: dict) -> str:
+    """One hash over the per-symbol data hashes (sorted by symbol)."""
+    return sha256("|".join(f"{s}:{by_symbol[s]}" for s in sorted(by_symbol)).encode()).hexdigest()
+
+
+def slice_key(exchange: str, symbols, timeframe: str, window_from, window_to) -> str:
+    """Identity of a backtest slice: which candles were walked. Same pairs,
+    timeframe and window on the same exchange = same slice, whatever the
+    strategy settings are."""
+    f = _naive_utc(window_from)
+    t = _naive_utc(window_to)
+    parts = [str(exchange or ""), ",".join(sorted(str(s) for s in (symbols or []))), str(timeframe or ""),
+             f.isoformat() if f else "", t.isoformat() if t else ""]
+    return md5("|".join(parts).encode()).hexdigest()
+
+
+def _record_config_run(db, bot_name: str, settings: dict, slice_hash: str = "", data_hash: str = "",
+                       window_from=None, window_to=None) -> tuple:
+    """Log this backtest run and return ``(variants_total, variants_on_slice)``:
+    distinct configurations the bot has ever run, and distinct configurations
+    run on exactly this slice of data (this one included). One row per
+    (config, slice, data) — a rerun on unchanged data is a no-op."""
     db.execute(
-        text("INSERT OR IGNORE INTO bot_config_runs (bot_name, config_hash, first_run_at) VALUES (:bn, :h, :ts)"),
-        {"bn": bot_name, "h": _config_fingerprint(settings), "ts": datetime.now(timezone.utc).replace(tzinfo=None)},
+        text("INSERT OR IGNORE INTO bot_config_runs (bot_name, config_hash, slice_key, window_from, window_to, data_hash, run_at) "
+             "VALUES (:bn, :h, :sk, :wf, :wt, :dh, :ts)"),
+        {"bn": bot_name, "h": _config_fingerprint(settings), "sk": slice_hash or "", "wf": _naive_utc(window_from),
+         "wt": _naive_utc(window_to), "dh": data_hash or "", "ts": datetime.now(timezone.utc).replace(tzinfo=None)},
     )
-    return int(db.execute(text("SELECT COUNT(*) FROM bot_config_runs WHERE bot_name = :bn"), {"bn": bot_name}).scalar() or 0)
+    total = int(db.execute(text("SELECT COUNT(DISTINCT config_hash) FROM bot_config_runs WHERE bot_name = :bn"),
+                           {"bn": bot_name}).scalar() or 0)
+    on_slice = int(db.execute(text("SELECT COUNT(DISTINCT config_hash) FROM bot_config_runs WHERE bot_name = :bn AND slice_key = :sk"),
+                              {"bn": bot_name, "sk": slice_hash or ""}).scalar() or 0)
+    return total, on_slice
 
 
 def sim_frictions(settings):

@@ -229,17 +229,29 @@
    }
   },
   "candles": 1800,
+  "data_changed": null,
   "data_from": "2023-01-17T16:00:00",
+  "data_hash": "029f65508f491446b68415a4a6b52a1e613e5d2ffd4198b65ad6c3946fff68f1",
+  "data_hash_by_symbol": {
+   "BTC/USDC": "1937175c21ac086ef4fc2c946ffcef3458fc744dc1382edd55d1dc48c9bfa9fb",
+   "ETH/USDC": "68f4d0bbed5a5484e8b3c431553d50155be2d6de93a0b3dfc60cb7cc629d4f3d",
+   "SOL/USDC": "d3d21ada4a1c114fdc56c9026ff97bd48a8be283bc317817394d09bafa76ec8f"
+  },
   "data_to": "2023-04-27T12:00:00",
   "entries_blocked_count": 0,
   "entries_blocked_days": 0.0,
   "max_capital_loss": 6.26,
   "max_drawdown": 7.76,
   "net_pnl": 194.09,
+  "pinned": false,
   "return_pct": 19.41,
+  "slice_key": "8e989ab1a778fc89be31d955f7cdcb3d",
   "trades": 13,
   "variants": 1,
+  "variants_on_slice": 1,
   "win_rate": 46.2,
+  "window_from": "2023-01-17T16:00:00",
+  "window_to": "2023-04-27T12:00:00",
   "wins": 6
  }
 }

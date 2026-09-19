@@ -156,26 +156,80 @@ const fmtDay = (iso) => {
 };
 
 /* One slim line: how many configurations of this strategy have been
-   backtested, the range the last one walked, and a jump to Analytics — the
-   performance numbers themselves live there, not on the card */
-function BacktestResult({ bot }) {
+   backtested (on this slice of data / ever), the range the last one walked,
+   whether that range is pinned, and a jump to Analytics — the performance
+   numbers themselves live there, not on the card */
+function BacktestResult({ bot, updateBotConfig, verifyData, verifying }) {
   const sm = bot.last_backtest_summary ?? bot.settings?.last_backtest_summary;
   if (!sm || typeof sm.trades !== 'number') return null;
-  const variants = Number(sm.variants) || 0;
+  const restated = Number(sm.restated_candles) || 0;
+  const verifiedAt = sm.verified_at ? new Date(sm.verified_at) : null;
+  const canVerify = !!sm.data_from && !!sm.data_to && !verifying;
+  const total = Number(sm.variants) || 0;
+  const onSlice = Number(sm.variants_on_slice) || 0;
+  const pinned = !!(bot.settings?.backtest_from && bot.settings?.backtest_to);
+  const canPin = !bot.is_active && !!sm.data_from && !!sm.data_to;
+  const counterTitle = onSlice > 0
+    ? `Variant #${onSlice} on this slice of data (same pairs, timeframe and range) — ${total} distinct configuration${total === 1 ? '' : 's'} of this strategy backtested in total. Switching pairs or range starts a new slice; the total keeps counting. Reset the bot to start over.`
+    : (total > 0 ? `${total} distinct configuration${total === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.` : undefined);
+  const pin = () => updateBotConfig(bot.id, bot, { settings: { backtest_from: sm.data_from, backtest_to: sm.data_to } });
+  const unpin = () => updateBotConfig(bot.id, bot, { settings: { backtest_from: null, backtest_to: null } });
+  const action = "text-3xs font-bold uppercase tracking-wider transition-colors";
   return (
-    <div className="px-4 py-2 border-b border-border bg-bg/40 flex items-center justify-between gap-3">
-      <div className="flex items-center gap-2 min-w-0 text-3xs font-num text-muted"
-        title={variants > 0 ? `${variants} distinct configuration${variants === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.` : undefined}>
-        <span className="font-bold uppercase tracking-widest">Backtest{variants > 0 && <span className="text-faint"> #{variants}</span>}</span>
+    <div className="px-4 py-2 border-b border-border bg-bg/40 flex flex-col gap-1">
+      {/* Row 1: what ran — counter, range, pin state */}
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-3xs font-num text-muted" title={counterTitle}>
+        <span className="font-bold uppercase tracking-widest">
+          Backtest{onSlice > 0 && <span className="text-faint"> #{onSlice}</span>}
+        </span>
+        {total > onSlice && <span className="text-faint">· {total} total</span>}
         {sm.data_from && sm.data_to && (
-          <span className="truncate">{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>
+          <span>{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>
+        )}
+        {pinned && (
+          <span className="rounded-sm border border-info/40 bg-info/10 px-1 py-px font-bold uppercase tracking-wider text-info"
+            title="Every start replays exactly this range of candles, so the result stays reproducible. Use 'Rerun latest' to slide the window to the newest data.">
+            Pinned
+          </span>
         )}
       </div>
-      <button type="button"
-        onClick={() => window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: bot.name, mode: 'backtest' } }))}
-        className="text-3xs font-bold uppercase tracking-wider text-info hover:text-text transition-colors shrink-0">
-        View in Analytics →
-      </button>
+      {/* Row 2: actions — wrap instead of squeezing the range on narrow cards */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        {canPin && (pinned
+          ? <button type="button" onClick={unpin} title="Drop the pin: the next start walks the newest candles again"
+              className={`${action} text-muted hover:text-text`}>Rerun latest</button>
+          : <button type="button" onClick={pin} title="Pin this range: every next start replays exactly these candles (reproducible result)"
+              className={`${action} text-muted hover:text-text`}>Pin range</button>)}
+        {canVerify && (
+          <button type="button" onClick={() => verifyData(bot)}
+            title="Re-fetch this range from the exchange and compare it with the stored candles. Exchanges (Binance most of all) silently restate history; the local snapshot is never changed unless you accept the exchange data."
+            className={`${action} text-muted hover:text-text`}>Verify data</button>
+        )}
+        {verifying && <span className="text-3xs text-faint">verifying…</span>}
+        <button type="button"
+          onClick={() => window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: bot.name, mode: 'backtest' } }))}
+          className={`${action} text-info hover:text-text ml-auto`}>
+          View in Analytics →
+        </button>
+      </div>
+      {sm.data_changed === true && (
+        <p className="text-3xs text-warn leading-snug"
+          title="The raw candles in this range hash differently than in the previous run on the same slice — a re-download, gap repair or an exchange restatement changed them. The two results are not directly comparable.">
+          <span className="font-bold uppercase tracking-wider mr-1">Data changed</span>
+          historical candles differ from the previous run on this slice
+        </p>
+      )}
+      {verifiedAt && (restated > 0 ? (
+        <p className="text-3xs text-warn leading-snug"
+          title="The exchange now reports different OHLCV values for these candles than the local snapshot. The backtest still uses the local snapshot (reproducible); run 'Verify data' again and accept the exchange data to overwrite them.">
+          <span className="font-bold uppercase tracking-wider mr-1">Exchange restated {restated} candle{restated === 1 ? '' : 's'}</span>
+          local snapshot kept · verified {fmtDay(sm.verified_at)} {verifiedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        </p>
+      ) : (
+        <p className="text-3xs text-faint leading-snug" title="The stored candles in this range match what the exchange reports today.">
+          Matches exchange · verified {fmtDay(sm.verified_at)} {verifiedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+        </p>
+      ))}
     </div>
   );
 }
@@ -186,7 +240,7 @@ const runtimeKey = (rt) => {
   return JSON.stringify(rest);
 };
 
-const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, openConsoles, clearSignals, toggleBotState, restartBot, handleExport, handleDuplicate, handleClearCacheClick, handleDeleteClick, updateBotConfig, toggleConsole }) {
+const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, openConsoles, clearSignals, toggleBotState, restartBot, handleExport, handleDuplicate, handleClearCacheClick, handleDeleteClick, updateBotConfig, toggleConsole, verifyData, verifyingBot }) {
   const isBacktestOn     = bot.settings?.backtest_on_start === true;
   const isApiExecutionOn = bot.settings?.api_execution === true;
   const hasApiKey        = !!bot.settings?.api_key_name;
@@ -264,7 +318,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
 
       <RuntimeStrip bot={bot} />
       <StopReason bot={bot} />
-      <BacktestResult bot={bot} />
+      <BacktestResult bot={bot} updateBotConfig={updateBotConfig} verifyData={verifyData} verifying={verifyingBot === bot.id} />
 
       {/* ── Card Body ── */}
       <div className="px-4 py-3 flex-1 flex flex-col space-y-4">
@@ -385,6 +439,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
   prev.bot.execution_mode === next.bot.execution_mode &&
   prev.busyAction === next.busyAction &&
   (prev.togglingBot === prev.bot.id) === (next.togglingBot === next.bot.id) &&
+  (prev.verifyingBot === prev.bot.id) === (next.verifyingBot === next.bot.id) &&
   prev.openConsoles[prev.bot.id] === next.openConsoles[next.bot.id] &&
   prev.clearSignals[prev.bot.name] === next.clearSignals[next.bot.name] &&
   // Runtime timestamps tick on every poll but are never rendered — strip
@@ -460,6 +515,7 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
   const [openConsoles, setOpenConsoles] = useState({});
   const [busyAction, setBusyAction]     = useState(null);  // 'delete:ID' or 'wipe:name'
   const [togglingBot, setTogglingBot]   = useState(null);  // bot id being started/stopped
+  const [verifyingBot, setVerifyingBot] = useState(null);  // bot id whose candles are being verified
   const [clearSignals, setClearSignals] = useState({});
   const fileInputRef                    = useRef(null);
 
@@ -590,6 +646,38 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
     }
   }, [refetchBots]);
 
+  /* Verify the last backtest range against the exchange. The local snapshot
+     is never touched unless the user explicitly accepts the exchange data */
+  const verifyData = useCallback(async (bot) => {
+    setVerifyingBot(bot.id);
+    try {
+      const { data } = await apiClient.post(`/api/bots/${bot.id}/verify-data`);
+      const n = data.restated || 0;
+      if (n === 0) {
+        toast.success(`'${bot.name}': stored candles match ${data.exchange}${data.missing_local ? ` (${data.missing_local} candles missing locally)` : ''}`);
+        refetchBots();
+        return;
+      }
+      refetchBots();
+      const accept = await confirmDialog({
+        title: 'Exchange restated candles',
+        message: `${data.exchange} now reports different values for ${n} candle${n === 1 ? '' : 's'} in ${data.from?.slice(0, 10)} → ${data.to?.slice(0, 10)}. Keep the local snapshot (backtest stays reproducible) or overwrite it with the exchange data (the next run on this slice will be flagged as "data changed")?`,
+        confirmText: 'Accept exchange data',
+        cancelText: 'Keep local snapshot',
+        type: 'warning',
+      });
+      if (!accept) return;
+      setVerifyingBot(bot.id);
+      const res = await apiClient.post(`/api/bots/${bot.id}/verify-data`, null, { params: { accept: true } });
+      toast.success(`'${bot.name}': ${res.data.accepted} candle${res.data.accepted === 1 ? '' : 's'} overwritten with ${res.data.exchange} data`);
+      refetchBots();
+    } catch (err) {
+      toast.error(humanizeApiError(err, 'Failed to verify candles against the exchange.'));
+    } finally {
+      setVerifyingBot(null);
+    }
+  }, [refetchBots]);
+
   const handleExport = useCallback(async (bot) => {
     try {
       const res = await apiClient.get(`/api/bots/${bot.id}/export`, { responseType: 'blob' });
@@ -674,6 +762,10 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
                 </Button>
               </div>
             )}
+            {bots.length > 0 && (
+              <ExampleLoader onImported={refetchBots} size="md" label="Examples" align="right"
+                existingNames={bots.map(b => b.name)} />
+            )}
             <Button
               variant="secondary"
               size="md"
@@ -739,6 +831,8 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
               index={index}
               busyAction={busyAction}
               togglingBot={togglingBot}
+              verifyingBot={verifyingBot}
+              verifyData={verifyData}
               openConsoles={openConsoles}
               clearSignals={clearSignals}
               toggleBotState={toggleBotState}

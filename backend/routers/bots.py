@@ -20,6 +20,9 @@ from backend.core.events import event_bus
 from backend.core.security import verify_api_key
 from backend.engine.settings_validator import validate_bot_settings
 from backend.engine.bot_manager import bot_manager, _config_fingerprint
+from backend.engine.sizing import backtest_pin
+from backend.engine.data_verify import verify_window
+from backend.core.exchange_registry import build_exchange
 from backend.core import bot_log_buffer as blb
 from backend.models.bot_logs import BotLog
 from backend.models.bot_config_runs import BotConfigRun
@@ -135,6 +138,8 @@ def get_bots_summary(db: Session = Depends(get_db)):
                 "api_key_name": b.settings.get("api_key_name") if b.settings else None,
                 "backtest_on_start": b.settings.get("backtest_on_start", False) if b.settings else False,
                 "backtest_capital": b.settings.get("backtest_capital", 1000) if b.settings else 1000,
+                "backtest_from": b.settings.get("backtest_from") if b.settings else None,
+                "backtest_to": b.settings.get("backtest_to") if b.settings else None,
                 # Needed by chart-open and the Data Vault live-guard: the
                 # same pair on another exchange is a different dataset
                 "data_exchange": b.settings.get("data_exchange", "okx") if b.settings else "okx",
@@ -631,6 +636,65 @@ def duplicate_bot(bot_id: int, db: Session = Depends(get_db)):
         "is_active": new_bot.is_active, "created_at": new_bot.created_at.isoformat() if new_bot.created_at else None,
     }
 
+@router.post("/{bot_id}/verify-data")
+async def verify_bot_data(bot_id: int, accept: bool = Query(default=False), db: Session = Depends(get_db)):
+    """Check the candles of the bot's last backtest window (pinned window or
+    the range the last run walked) against the exchange, per whitelist
+    symbol. Stored candles never change on their own, so this is the only way
+    to learn about an exchange restatement. ``accept=true`` overwrites the
+    restated rows — after which the next run on that slice will flag
+    'data changed'. The outcome is kept in ``last_backtest_summary``."""
+    bot = db.query(BotConfig).filter(BotConfig.id == bot_id).first()
+    if not bot:
+        raise HTTPException(status_code=404, detail="Bot not found.")
+    settings = bot.settings or {}
+    summary = settings.get("last_backtest_summary") or {}
+    pin_from, pin_to = backtest_pin(settings)
+    start = pin_from or summary.get("window_from") or summary.get("data_from")
+    end = pin_to or summary.get("window_to") or summary.get("data_to")
+    if not start or not end:
+        raise HTTPException(status_code=400, detail="No backtest window to verify yet — run a backtest first.")
+    if isinstance(start, str):
+        start, end = datetime.fromisoformat(start), datetime.fromisoformat(end)
+    symbols = settings.get("symbols") or ([settings["symbol"]] if settings.get("symbol") else [])
+    timeframe = settings.get("timeframe")
+    exchange_id = _candle_exchange(settings, _key_exchanges(db))
+
+    def _run():
+        _db = SessionLocal()
+        try:
+            exch = build_exchange(exchange_id)
+            return [verify_window(_db, exch, exchange_id, str(s).replace('-', '/').upper(), timeframe, start, end, accept=accept)
+                    for s in symbols]
+        finally:
+            _db.close()
+    try:
+        results = await asyncio.to_thread(_run)
+    except Exception as e:
+        logger.error("Verify failed for bot '%s': %s", bot.name, e, exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Could not verify against {exchange_id}: {str(e)[:160]}")
+
+    restated = sum(r["restated_count"] for r in results)
+    accepted = sum(r["accepted"] for r in results)
+    missing = sum(r["missing_local"] for r in results)
+    verified_at = datetime.now(timezone.utc).isoformat()
+    if summary:
+        bot.settings = {**settings, "last_backtest_summary": {
+            **summary, "verified_at": verified_at, "restated_candles": restated - accepted, "missing_local": missing,
+        }}
+        flag_modified(bot, "settings")
+        db.commit()
+    for r in results:
+        if r["restated_count"]:
+            blb.push(bot.name, "WARN" if not accept else "INFO",
+                     f"{exchange_id} restated {r['restated_count']} candle(s) of {r['symbol']} {timeframe} in "
+                     f"{r['from'][:10]} → {r['to'][:10]}" + (f" — {r['accepted']} overwritten locally" if accept else " — local snapshot kept"))
+        else:
+            blb.push(bot.name, "INFO", f"Verified {r['symbol']} {timeframe}: {r['checked']} candles match {exchange_id}")
+    return {"exchange": exchange_id, "from": results[0]["from"] if results else None, "to": results[0]["to"] if results else None,
+            "restated": restated, "accepted": accepted, "missing_local": missing, "verified_at": verified_at, "symbols": results}
+
+
 @router.get("/{bot_id}/export")
 def export_bot(bot_id: int, db: Session = Depends(get_db)):
     bot = db.query(BotConfig).filter(BotConfig.id == bot_id).first()
@@ -643,7 +707,10 @@ def export_bot(bot_id: int, db: Session = Depends(get_db)):
             "name": bot.name,
             "is_sandbox": bot.is_sandbox,
             "strategy": bot.strategy,
-            "settings": bot.settings or {}
+            # The pinned backtest window belongs to this machine's candle
+            # store; on another install it would replay a range that may
+            # not exist there
+            "settings": {k: v for k, v in (bot.settings or {}).items() if k not in ("backtest_from", "backtest_to")},
         }
     }
     safe_name = re.sub(r'[^A-Za-z0-9_-]', '_', bot.name).strip('_') or f"bot_{bot.id}"

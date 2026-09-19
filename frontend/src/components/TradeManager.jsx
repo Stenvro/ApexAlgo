@@ -1303,7 +1303,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                     <StatCard
                         label="Avg Trade"
                         value={stats.total > 0 ? `${stats.avgTrade >= 0 ? '+' : '-'}$${safeNum(Math.abs(stats.avgTrade))}` : '—'}
-                        sub="net PnL per closed trade"
+                        sub="expectancy · net PnL per closed trade"
                         color={stats.total > 0 ? (stats.avgTrade >= 0 ? 'success' : 'danger') : 'neutral'}
                     />
                 </div>
