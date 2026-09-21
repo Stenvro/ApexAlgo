@@ -155,81 +155,89 @@ const fmtDay = (iso) => {
   return Number.isNaN(d.getTime()) ? '?' : d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: '2-digit' });
 };
 
-/* One slim line: how many configurations of this strategy have been
+/* Two slim rows: (1) how many configurations of this strategy have been
    backtested (on this slice of data / ever), the range the last one walked,
-   whether that range is pinned, and a jump to Analytics — the performance
-   numbers themselves live there, not on the card */
+   whether it is locked, and a jump to Analytics — the performance numbers
+   themselves live there, not on the card; (2) whether that range has been
+   verified against the exchange, with the verify/lock actions */
 function BacktestResult({ bot, updateBotConfig, verifyData, verifying }) {
   const sm = bot.last_backtest_summary ?? bot.settings?.last_backtest_summary;
   if (!sm || typeof sm.trades !== 'number') return null;
-  const restated = Number(sm.restated_candles) || 0;
-  const verifiedAt = sm.verified_at ? new Date(sm.verified_at) : null;
-  const canVerify = !!sm.data_from && !!sm.data_to && !verifying;
   const total = Number(sm.variants) || 0;
   const onSlice = Number(sm.variants_on_slice) || 0;
-  const pinned = !!(bot.settings?.backtest_from && bot.settings?.backtest_to);
-  const canPin = !bot.is_active && !!sm.data_from && !!sm.data_to;
+  const locked = !!(bot.settings?.backtest_from && bot.settings?.backtest_to);
+  const verified = !!sm.verified_at;
+  const restated = Number(sm.restated_candles) || 0;
+  const hasRange = !!sm.data_from && !!sm.data_to;
+  // Lock only after a verify: the snapshot you freeze should be one you have
+  // compared with the exchange. Unlocking is always allowed.
+  const canLock = !bot.is_active && hasRange && (locked || verified);
   const counterTitle = onSlice > 0
     ? `Variant #${onSlice} on this slice of data (same pairs, timeframe and range) — ${total} distinct configuration${total === 1 ? '' : 's'} of this strategy backtested in total. Switching pairs or range starts a new slice; the total keeps counting. Reset the bot to start over.`
     : (total > 0 ? `${total} distinct configuration${total === 1 ? '' : 's'} of this strategy have been backtested. Reset the bot to start counting again.` : undefined);
-  const pin = () => updateBotConfig(bot.id, bot, { settings: { backtest_from: sm.data_from, backtest_to: sm.data_to } });
-  const unpin = () => updateBotConfig(bot.id, bot, { settings: { backtest_from: null, backtest_to: null } });
-  const action = "text-3xs font-bold uppercase tracking-wider transition-colors";
+  const lock = () => updateBotConfig(bot.id, bot, { settings: { backtest_from: sm.data_from, backtest_to: sm.data_to } });
+  const unlock = () => updateBotConfig(bot.id, bot, { settings: { backtest_from: null, backtest_to: null } });
+  const action = "text-3xs font-bold uppercase tracking-wider transition-colors shrink-0";
+  const exchange = (bot.settings?.data_exchange || 'exchange').toString();
+  const verifiedTime = verified ? new Date(sm.verified_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
   return (
-    <div className="px-4 py-2 border-b border-border bg-bg/40 flex flex-col gap-1">
-      {/* Row 1: what ran — counter, range, pin state */}
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-3xs font-num text-muted" title={counterTitle}>
-        <span className="font-bold uppercase tracking-widest">
-          Backtest{onSlice > 0 && <span className="text-faint"> #{onSlice}</span>}
-        </span>
-        {total > onSlice && <span className="text-faint">· {total} total</span>}
-        {sm.data_from && sm.data_to && (
-          <span>{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>
-        )}
-        {pinned && (
-          <span className="rounded-sm border border-info/40 bg-info/10 px-1 py-px font-bold uppercase tracking-wider text-info"
-            title="Every start replays exactly this range of candles, so the result stays reproducible. Use 'Rerun latest' to slide the window to the newest data.">
-            Pinned
+    <div className="px-4 py-2 border-b border-border bg-bg/40 flex flex-col gap-1 text-3xs">
+      {/* Row 1: what ran */}
+      <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 min-w-0 font-num text-muted" title={counterTitle}>
+          <span className="font-bold uppercase tracking-widest shrink-0">
+            Backtest{onSlice > 0 && <span className="text-faint"> #{onSlice}</span>}
           </span>
-        )}
-      </div>
-      {/* Row 2: actions — wrap instead of squeezing the range on narrow cards */}
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
-        {canPin && (pinned
-          ? <button type="button" onClick={unpin} title="Drop the pin: the next start walks the newest candles again"
-              className={`${action} text-muted hover:text-text`}>Rerun latest</button>
-          : <button type="button" onClick={pin} title="Pin this range: every next start replays exactly these candles (reproducible result)"
-              className={`${action} text-muted hover:text-text`}>Pin range</button>)}
-        {canVerify && (
-          <button type="button" onClick={() => verifyData(bot)}
-            title="Re-fetch this range from the exchange and compare it with the stored candles. Exchanges (Binance most of all) silently restate history; the local snapshot is never changed unless you accept the exchange data."
-            className={`${action} text-muted hover:text-text`}>Verify data</button>
-        )}
-        {verifying && <span className="text-3xs text-faint">verifying…</span>}
+          {total > onSlice && <span className="text-faint shrink-0">· {total} total</span>}
+          {hasRange && <span className="truncate">{fmtDay(sm.data_from)} → {fmtDay(sm.data_to)}</span>}
+          {locked && (
+            <span className="shrink-0 rounded-sm border border-info/40 bg-info/10 px-1 py-px font-bold uppercase tracking-wider text-info"
+              title="Every start replays exactly this range of candles, so the result stays reproducible. Unlock to slide the window to the newest data.">
+              Locked
+            </span>
+          )}
+        </div>
         <button type="button"
           onClick={() => window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: bot.name, mode: 'backtest' } }))}
           className={`${action} text-info hover:text-text ml-auto`}>
           View in Analytics →
         </button>
       </div>
+      {/* Row 2: is the data trustworthy, and freeze it */}
+      {hasRange && (
+        <div className="flex items-center gap-3">
+          <span className={`min-w-0 truncate ${restated > 0 ? 'text-warn' : 'text-faint'}`}
+            title={!verified
+              ? 'The stored candles have not been compared with the exchange yet. Exchanges (Binance most of all) silently restate history.'
+              : restated > 0
+                ? 'The exchange now reports different values for these candles. The backtest keeps using the local snapshot (reproducible); verify again and accept the exchange data to overwrite it.'
+                : 'The stored candles in this range match what the exchange reports.'}>
+            {verifying ? 'Verifying against exchange…'
+              : !verified ? 'Not verified against exchange'
+              : restated > 0 ? `${exchange} restated ${restated} candle${restated === 1 ? '' : 's'} · local snapshot kept · ${verifiedTime}`
+              : `Matches ${exchange} · verified ${verifiedTime}`}
+          </span>
+          <div className="flex items-center gap-3 ml-auto shrink-0">
+            {!verifying && (
+              <button type="button" onClick={() => verifyData(bot)}
+                title="Re-fetch this range from the exchange and compare it with the stored candles. Nothing is changed unless you accept the exchange data."
+                className={`${action} text-muted hover:text-text`}>Verify data</button>
+            )}
+            {canLock && (locked
+              ? <button type="button" onClick={unlock} title="Unlock: the next start walks the newest candles again"
+                  className={`${action} text-muted hover:text-text`}>Unlock</button>
+              : <button type="button" onClick={lock} title="Lock this range: every next start replays exactly these candles (reproducible result)"
+                  className={`${action} text-muted hover:text-text`}>Lock range</button>)}
+          </div>
+        </div>
+      )}
       {sm.data_changed === true && (
-        <p className="text-3xs text-warn leading-snug"
-          title="The raw candles in this range hash differently than in the previous run on the same slice — a re-download, gap repair or an exchange restatement changed them. The two results are not directly comparable.">
+        <p className="text-warn leading-snug"
+          title="The raw candles in this range hash differently than in the previous run on the same slice — a re-download, gap repair or an accepted exchange restatement changed them. The two results are not directly comparable.">
           <span className="font-bold uppercase tracking-wider mr-1">Data changed</span>
           historical candles differ from the previous run on this slice
         </p>
       )}
-      {verifiedAt && (restated > 0 ? (
-        <p className="text-3xs text-warn leading-snug"
-          title="The exchange now reports different OHLCV values for these candles than the local snapshot. The backtest still uses the local snapshot (reproducible); run 'Verify data' again and accept the exchange data to overwrite them.">
-          <span className="font-bold uppercase tracking-wider mr-1">Exchange restated {restated} candle{restated === 1 ? '' : 's'}</span>
-          local snapshot kept · verified {fmtDay(sm.verified_at)} {verifiedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </p>
-      ) : (
-        <p className="text-3xs text-faint leading-snug" title="The stored candles in this range match what the exchange reports today.">
-          Matches exchange · verified {fmtDay(sm.verified_at)} {verifiedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-        </p>
-      ))}
     </div>
   );
 }

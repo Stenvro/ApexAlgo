@@ -758,7 +758,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             const groups = new Map();
             for (const p of closedPositions) {
                 const key = keyFn(p);
-                if (!groups.has(key)) groups.set(key, { key, label: labelFn(p), trades: 0, wins: 0, gross: 0, loss: 0, net: 0, modes: new Set(), fees: 0, holdMs: 0, holdN: 0, best: -Infinity, worst: Infinity, spans: [], botNames: new Set() });
+                if (!groups.has(key)) groups.set(key, { key, label: labelFn(p), trades: 0, wins: 0, gross: 0, loss: 0, net: 0, modes: new Set(), fees: 0, holdMs: 0, holdN: 0, best: -Infinity, worst: Infinity, spans: [], botNames: new Set(), returns: [] });
                 const g = groups.get(key);
                 const pnl = p.profit_abs || 0;
                 g.trades += 1;
@@ -768,6 +768,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                 g.fees += feesByPosId[p.id] || 0;
                 g.best = Math.max(g.best, pnl);
                 g.worst = Math.min(g.worst, pnl);
+                g.returns.push(p.profit_pct || 0);
                 if (p.closed_at && p.created_at) {
                     const h = new Date(p.closed_at) - new Date(p.created_at);
                     if (h > 0) { g.holdMs += h; g.holdN += 1; }
@@ -800,11 +801,19 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                     if (!Number.isNaN(t) && (dataTo === null || t > dataTo)) dataTo = t;
                 }
                 const longestFlat = longestFlatGap(g.spans, dateFrom ?? dataFrom, dateTo ?? dataTo);
+                // Same per-trade Sharpe as the Return / Risk tile: mean trade
+                // return ÷ sample std dev, not annualised
+                const n = g.returns.length;
+                const mean = n ? g.returns.reduce((a, b) => a + b, 0) / n : 0;
+                const sd = n > 1 ? Math.sqrt(g.returns.reduce((a, r) => a + (r - mean) ** 2, 0) / (n - 1)) : 0;
+                const sharpe = n > 1 && sd > 0 ? mean / sd : null;
                 return {
                     ...g,
                     spans: undefined,
                     botNames: undefined,
+                    returns: undefined,
                     longestFlat,
+                    sharpe,
                     modes: [...g.modes],
                     winRate: g.trades ? (g.wins / g.trades) * 100 : 0,
                     profitFactor: g.loss > 0 ? g.gross / g.loss : (g.gross > 0 ? Infinity : 0),
@@ -1475,6 +1484,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         <th className={`${thClass} text-right`}>Net PNL</th>
                                         {breakdownView === 'bot' && <th className={`${thClass} text-right`}>Return</th>}
                                         <th className={`${thClass} text-right`}>PF</th>
+                                        <th className={`${thClass} text-right`} title="Return / Risk: mean trade return ÷ std dev of trade returns (per-trade Sharpe, not annualised)">Sharpe</th>
                                         {breakdownView === 'bot' && <th className={`${thClass} text-right`}>Max DD</th>}
                                         <th className={`${thClass} text-right`}>Best / Worst</th>
                                         <th className={`${thClass} text-right`}>Avg hold</th>
@@ -1503,6 +1513,10 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                 </td>
                                             )}
                                             <td className="px-3 py-1.5 text-right font-num text-muted">{r.profitFactor === Infinity ? '∞' : safeNum(r.profitFactor)}</td>
+                                            <td className={`px-3 py-1.5 text-right font-num ${r.sharpe === null ? 'text-faint' : r.sharpe > 1 ? 'text-success' : r.sharpe > 0 ? 'text-accent' : 'text-danger'}`}
+                                                title={r.sharpe === null ? 'needs at least two closed trades with different returns' : undefined}>
+                                                {r.sharpe === null ? '—' : safeNum(r.sharpe)}
+                                            </td>
                                             {breakdownView === 'bot' && (
                                                 <td className="px-3 py-1.5 text-right font-num text-danger">{r.engineDD !== null ? `-${safeNum(r.engineDD, 1)}%` : '—'}</td>
                                             )}
