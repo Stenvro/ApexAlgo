@@ -9,7 +9,7 @@ from itertools import pairwise
 from sqlalchemy.orm import Session
 
 from backend.core.database import SessionLocal
-from backend.core.exchange_registry import build_exchange
+from backend.core.exchange_registry import build_exchange, exchange_spec
 from backend.core.events import event_bus
 from backend.models.bots import BotConfig
 from backend.models.candles import Candle
@@ -455,7 +455,8 @@ class CandlePoller:
             if oldest_have is not None and oldest_have > requested_start + 2 * tf_ms and known_start != oldest_have:
                 self._listing_start[(exchange_name, symbol, timeframe)] = oldest_have
                 available = (now_ms - oldest_have) // tf_ms
-                cap_note = " (Kraken only serves its most recent 720 candles per timeframe)" if exchange_name == "kraken" else ""
+                spec = exchange_spec(exchange_name)
+                cap_note = f" ({spec.candle_limit_note})" if spec and spec.candle_limit_note else ""
                 logger.warning(
                     "Back-fill: %s/%s/%s — exchange has no data before %s%s; %d of the requested %d candles are available. "
                     "Use a larger timeframe or another data exchange for a longer backtest.",

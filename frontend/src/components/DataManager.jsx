@@ -14,16 +14,7 @@ import { Input, Select } from './ui/Input';
 import { Skeleton } from './ui/Skeleton';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
-
-const EXCHANGES = [
-  { id: 'okx', name: 'OKX' },
-  { id: 'binance', name: 'Binance' },
-  { id: 'bitvavo', name: 'Bitvavo' },
-  { id: 'coinbase', name: 'Coinbase' },
-  { id: 'cryptocom', name: 'Crypto.com' },
-  { id: 'kraken', name: 'Kraken' },
-  { id: 'kucoin', name: 'KuCoin' },
-];
+import { useExchanges } from '../api/exchanges';
 
 /* ── Inline icons (stroke 1.8) ── */
 const IconSync = (
@@ -83,6 +74,7 @@ export default function DataManager({ openChart }) {
   const [syncingSymbol, setSyncingSymbol] = useState(null);
 
   const [symbol, setSymbol] = useState('BTC-USDC');
+  const exchanges = useExchanges();
   const [exchange, setExchange] = useState('okx');
   const [timeframe, setTimeframe] = useState('1d');
   const [startDate, setStartDate] = useState('2024-01-01T00:00');
@@ -431,7 +423,7 @@ export default function DataManager({ openChart }) {
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <Select label="Exchange" value={exchange} onChange={e => setExchange(e.target.value)}>
-                  {EXCHANGES.map(ex => (
+                  {exchanges.map(ex => (
                     <option key={ex.id} value={ex.id}>{ex.name}</option>
                   ))}
                 </Select>

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
 import { useIndicators } from './indicatorConfig';
+import { useExchanges } from '../../api/exchanges';
 import { DEFAULT_PAIR, parsePairs } from './pairs';
 
 // All known timeframes with display labels
@@ -236,17 +237,8 @@ export const BacktestNode = ({ id, data }) => (
   </div>
 );
 
-const API_KEY_NODE_EXCHANGES = [
-  { id: 'okx', name: 'OKX' },
-  { id: 'binance', name: 'Binance' },
-  { id: 'bitvavo', name: 'Bitvavo' },
-  { id: 'coinbase', name: 'Coinbase' },
-  { id: 'cryptocom', name: 'Crypto.com' },
-  { id: 'kraken', name: 'Kraken' },
-  { id: 'kucoin', name: 'KuCoin' },
-];
-
 export const ApiKeyNode = ({ id, data }) => {
+  const exchanges = useExchanges();
   const selectedKey = data.apiKeyName || '';
   const keyRecord = data.availableKeys?.find(k => k.name === selectedKey);
   const derivedExchange = keyRecord?.exchange || null;
@@ -276,7 +268,7 @@ export const ApiKeyNode = ({ id, data }) => {
           <div>
             <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Data Exchange</label>
             <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-info outline-none" value={data.dataExchange || 'okx'} onChange={(e) => data.onChange(id, 'dataExchange', e.target.value)}>
-              {API_KEY_NODE_EXCHANGES.map(ex => (
+              {exchanges.map(ex => (
                 <option key={ex.id} value={ex.id}>{ex.name}</option>
               ))}
             </select>

@@ -11,19 +11,9 @@ import { Input, Select } from './ui/Input';
 import { SkeletonCard } from './ui/Skeleton';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
+import { useExchanges } from '../api/exchanges';
 
-/* Static fallback until /api/keys/exchanges answers */
-const FALLBACK_EXCHANGES = [
-  { id: 'okx', name: 'OKX', needs_passphrase: true, has_sandbox: true },
-  { id: 'binance', name: 'Binance', needs_passphrase: false, has_sandbox: true },
-  { id: 'bitvavo', name: 'Bitvavo', needs_passphrase: false, has_sandbox: false },
-  { id: 'coinbase', name: 'Coinbase', needs_passphrase: false, has_sandbox: false },
-  { id: 'cryptocom', name: 'Crypto.com', needs_passphrase: false, has_sandbox: true },
-  { id: 'kraken', name: 'Kraken', needs_passphrase: false, has_sandbox: false },
-  { id: 'kucoin', name: 'KuCoin', needs_passphrase: true, has_sandbox: false },
-];
-
-/* Deterministic avatar color per exchange (token values) */
+/* Deterministic avatar color per exchange (token values); unknown ids get the neutral class in the avatar */
 const AVATAR_COLORS = {
   okx: 'text-info border-info/30 bg-info/10',
   binance: 'text-accent border-accent/30 bg-accent/10',
@@ -32,6 +22,12 @@ const AVATAR_COLORS = {
   cryptocom: 'text-purple border-purple/30 bg-purple/10',
   kraken: 'text-purple border-purple/30 bg-purple/10',
   kucoin: 'text-success border-success/30 bg-success/10',
+  bybit: 'text-accent border-accent/30 bg-accent/10',
+  gateio: 'text-info border-info/30 bg-info/10',
+  bitget: 'text-info border-info/30 bg-info/10',
+  mexc: 'text-success border-success/30 bg-success/10',
+  htx: 'text-purple border-purple/30 bg-purple/10',
+  bingx: 'text-info border-info/30 bg-info/10',
 };
 
 const IconKeyEmpty = (
@@ -139,7 +135,7 @@ function WalletPanel({ wallet }) {
 
 export default function Settings() {
   const [keys, setKeys] = useState([]);
-  const [exchanges, setExchanges] = useState(FALLBACK_EXCHANGES);
+  const exchanges = useExchanges();
   const [initialLoading, setInitialLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -156,7 +152,7 @@ export default function Settings() {
   const [passphrase, setPassphrase] = useState('');
   const [isSandbox, setIsSandbox] = useState(true);
 
-  const exchangeInfo = exchanges.find(e => e.id === selectedExchange) || FALLBACK_EXCHANGES[0];
+  const exchangeInfo = exchanges.find(e => e.id === selectedExchange) || exchanges[0];
   const exchangeNames = useMemo(() => Object.fromEntries(exchanges.map(e => [e.id, e.name])), [exchanges]);
   const needsPassphrase = !!exchangeInfo.needs_passphrase;
   const hasSandbox = !!exchangeInfo.has_sandbox;
@@ -182,9 +178,6 @@ export default function Settings() {
 
   useEffect(() => {
     fetchKeys(); // eslint-disable-line react-hooks/set-state-in-effect -- initial data fetch on mount
-    apiClient.get('/api/keys/exchanges')
-      .then(res => { if (Array.isArray(res.data) && res.data.length) setExchanges(res.data); })
-      .catch(() => { /* keep fallback list */ });
   }, [fetchKeys]);
 
   // Exchanges without a testnet can only be added as Live

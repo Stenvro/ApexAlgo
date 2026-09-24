@@ -523,11 +523,17 @@ Click **Duplicate** on any stopped bot card to create a clone with `(copy)` appe
 | Binance | No | Yes | |
 | Bitvavo | No | No | EU exchange |
 | Coinbase | No | No | |
-| Crypto.com | No | No | |
+| Crypto.com | No | Yes | UAT environment |
 | Kraken | No | No | |
-| KuCoin | Yes | Yes | |
+| KuCoin | Yes | No | |
+| Bybit | No | Yes | testnet.bybit.com |
+| Gate | No | Yes | testnet.gate.io |
+| Bitget | Yes | Yes | Demo trading (request header) |
+| MEXC | No | No | |
+| HTX | No | No | |
+| BingX | No | Yes | VST demo trading |
 
-Adding support for any other CCXT-compatible exchange requires only adding it to the frontend dropdowns and `SUPPORTED_EXCHANGES` in `exchange_registry.py`.
+Adding another CCXT-compatible exchange is one `ExchangeSpec` entry in `backend/core/exchange_registry.py`; the key form, the data manager and the builder read the list from `GET /api/keys/exchanges`.
 
 ### Historical data per exchange
 

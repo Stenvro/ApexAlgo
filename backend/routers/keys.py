@@ -14,7 +14,10 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.models.bots import BotConfig
 from backend.core.security import verify_api_key
 from backend.core.encryption import encrypt_data
-from backend.core.exchange_registry import build_exchange, get_authenticated_exchange, invalidate_authenticated_exchange, SUPPORTED_EXCHANGES
+from backend.core.exchange_registry import (
+    build_exchange, get_authenticated_exchange, invalidate_authenticated_exchange,
+    exchange_has_sandbox, EXCHANGES, SUPPORTED_EXCHANGES,
+)
 
 logger = logging.getLogger("apexalgo.keys")
 
@@ -33,37 +36,20 @@ class ExchangeKeyCreate(BaseModel):
     is_sandbox: bool = True
 
 
-# Where to create API keys + what the user must switch off. Shown in the UI
-# next to the form so nobody has to leave the app to figure this out.
-_EXCHANGE_GUIDE = {
-    "okx":       {"keys_url": "https://www.okx.com/account/my-api",            "sandbox_note": "Demo trading keys are created under Trade → Demo trading → API."},
-    "binance":   {"keys_url": "https://www.binance.com/en/my/settings/api-management", "sandbox_note": "Spot testnet keys come from testnet.binance.vision (separate account)."},
-    "bitvavo":   {"keys_url": "https://account.bitvavo.com/user/api",           "sandbox_note": None},
-    "coinbase":  {"keys_url": "https://www.coinbase.com/settings/api",          "sandbox_note": None},
-    "cryptocom": {"keys_url": "https://crypto.com/exchange/user/settings/api-management", "sandbox_note": "UAT sandbox keys are issued via the Crypto.com Exchange UAT environment."},
-    "kraken":    {"keys_url": "https://www.kraken.com/u/security/api",          "sandbox_note": None},
-    "kucoin":    {"keys_url": "https://www.kucoin.com/account/api",             "sandbox_note": None},
-}
-
-
 @router.get("/exchanges")
 def list_exchanges():
-    """Static capabilities per supported exchange for the connection form."""
+    """Capabilities per supported exchange (from the registry spec) for the
+    connection form, the data manager and the builder. `has_sandbox` is
+    probed from ccxt so it tracks the installed version."""
     out = []
-    for ex_id, name in SUPPORTED_EXCHANGES.items():
-        has_sandbox = False
-        try:
-            has_sandbox = bool(getattr(ccxt, ex_id)().urls.get("test"))
-        except Exception:
-            pass
-        guide = _EXCHANGE_GUIDE.get(ex_id, {})
+    for ex_id, spec in EXCHANGES.items():
         out.append({
             "id": ex_id,
-            "name": name,
-            "needs_passphrase": ex_id in ("okx", "kucoin"),
-            "has_sandbox": has_sandbox,
-            "keys_url": guide.get("keys_url"),
-            "sandbox_note": guide.get("sandbox_note"),
+            "name": spec.name,
+            "needs_passphrase": spec.needs_passphrase,
+            "has_sandbox": exchange_has_sandbox(ex_id),
+            "keys_url": spec.keys_url,
+            "sandbox_note": spec.sandbox_note,
         })
     return out
 
@@ -304,6 +290,8 @@ def execute_quick_swap(name: str, payload: SwapRequest, db: Session = Depends(ge
             return JSONResponse(status_code=404, content={"detail": f"API Wallet '{name}' not found"})
 
         exchange = get_authenticated_exchange(key_record)
+        ex_id = str(key_record.exchange or "").lower()
+        ex_name = SUPPORTED_EXCHANGES.get(ex_id, ex_id)
 
         from_asset = payload.from_asset
         to_asset = payload.to_asset
@@ -349,7 +337,7 @@ def execute_quick_swap(name: str, payload: SwapRequest, db: Session = Depends(ge
         fetched_order = exchange.fetch_order(order['id'], order['symbol'])
 
         if fetched_order['status'] == 'canceled':
-            return JSONResponse(status_code=400, content={"detail": f"OKX canceled the order. Reason: Zero liquidity for {order['symbol']} on the Testnet."})
+            return JSONResponse(status_code=400, content={"detail": f"{ex_name} canceled the order. Reason: Zero liquidity for {order['symbol']} on the testnet."})
         if fetched_order['status'] == 'open':
             exchange.cancel_order(order['id'], order['symbol'])
             return JSONResponse(status_code=400, content={"detail": f"Order stuck. No volume for {order['symbol']} on the Sandbox. Order auto-canceled to prevent stuck balance."})
@@ -358,7 +346,7 @@ def execute_quick_swap(name: str, payload: SwapRequest, db: Session = Depends(ge
 
     except ccxt.ExchangeError as e:
         error_msg = str(e)
-        if "51155" in error_msg or "compliance" in error_msg.lower():
+        if ex_id == "okx" and ("51155" in error_msg or "compliance" in error_msg.lower()):
             return JSONResponse(status_code=400, content={"detail": "European Compliance Error (MiCA): You cannot trade USDT on OKX in Europe. Please swap to USDC or EUR instead."})
         return JSONResponse(status_code=400, content={"detail": "Exchange rejected the order. Please check your assets and try again."})
     except ccxt.InsufficientFunds:
