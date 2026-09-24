@@ -18,6 +18,7 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.core.security import verify_api_key
 from backend.core.exchange_registry import get_authenticated_exchange
 from backend.engine.bot_manager import bot_manager
+from backend.engine.symbols import is_derivative
 
 logger = logging.getLogger("apexalgo.trades")
 
@@ -307,13 +308,22 @@ def _execute_live_close(pos: Position, db: Session):
 
     ccxt_symbol = pos.symbol.replace('-', '/').upper()
     close_side = "sell" if pos.side == "long" else "buy"
+    derivative = is_derivative(ccxt_symbol)
 
     try:
         exchange = get_authenticated_exchange(key_record)
-        close_qty = float(exchange.amount_to_precision(ccxt_symbol, pos.amount))
+        if derivative:
+            # Derivatives: amount in contracts, reduce-only so a stale record
+            # can never open the opposite position
+            close_qty = float(exchange.amount_to_precision(ccxt_symbol, bot_manager._to_contracts(exchange, ccxt_symbol, pos.amount)))
+        else:
+            close_qty = float(exchange.amount_to_precision(ccxt_symbol, pos.amount))
         if close_qty <= 0:
             raise HTTPException(status_code=400, detail="Position amount rounds to zero at exchange precision; cannot place a close order.")
-        exch_order = exchange.create_order(ccxt_symbol, "market", close_side, close_qty)
+        if derivative:
+            exch_order = exchange.create_order(ccxt_symbol, "market", close_side, close_qty, None, {"reduceOnly": True})
+        else:
+            exch_order = exchange.create_order(ccxt_symbol, "market", close_side, close_qty)
     except HTTPException:
         raise
     except Exception as e:
@@ -326,6 +336,8 @@ def _execute_live_close(pos: Position, db: Session):
     order_id = exch_order.get("id")
     order_status = exch_order.get("status")
     filled_amount = float(exch_order.get("filled") or 0)
+    if derivative and filled_amount > 0:
+        filled_amount = bot_manager._from_contracts(exchange, ccxt_symbol, filled_amount)
 
     if filled_amount <= 0:
         if order_status not in ("closed", "canceled", "rejected", "expired") and order_id:
@@ -379,6 +391,8 @@ def _record_unfilled_close_order(db: Session, pos: Position, close_side: str, or
             timestamp=datetime.now(timezone.utc),
             exchange_order_id=order_id,
             status=order_status or "unknown",
+            market_type=pos.market_type or "spot",
+            reduce_only=1 if is_derivative(pos.symbol) else 0,
         ))
         db.commit()
     except Exception as exc:
@@ -443,7 +457,9 @@ def close_position_now(pos: Position, db: Session) -> float:
             fee=exit_fee,
             timestamp=datetime.now(timezone.utc),
             exchange_order_id=exchange_order_id,
-            status="filled"
+            status="filled",
+            market_type=pos.market_type or "spot",
+            reduce_only=1 if is_derivative(pos.symbol) else 0,
         )
         db.add(close_order)
         db.commit()

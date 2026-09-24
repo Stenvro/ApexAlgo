@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import text, func
 from backend.models.bots import BotConfig
 from backend.models.positions import Position
+from backend.engine.symbols import cash_currency, is_derivative
 
 logger = logging.getLogger("apexalgo.bot_manager")
 
@@ -69,11 +70,31 @@ _NON_STRATEGY_KEYS = frozenset({
 })
 
 
+# Phase-2 (derivatives) settings at their default are dropped from the
+# fingerprint: a spot bot saved by a newer UI must hash exactly like the
+# same bot saved before these keys existed, or every variant counter bumps.
+_DEFAULT_MARKET_KEYS = {"market_type": "spot", "leverage": 1, "margin_mode": "isolated"}
+
+
 def _config_fingerprint(settings: dict) -> str:
     """Stable hash of the strategy-relevant part of a bot's settings, used to
     count how many distinct variants have been backtested."""
     relevant = {k: v for k, v in (settings or {}).items() if k not in _NON_STRATEGY_KEYS}
+    for k, default in _DEFAULT_MARKET_KEYS.items():
+        if k in relevant and _is_default_market_setting(relevant[k], default):
+            del relevant[k]
     return md5(json.dumps(relevant, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _is_default_market_setting(value, default) -> bool:
+    if value in (None, ""):
+        return True
+    if isinstance(default, (int, float)):
+        try:
+            return float(value) == float(default)
+        except (TypeError, ValueError):
+            return False
+    return str(value).lower() == default
 
 
 def data_fingerprint(df) -> str:
@@ -158,14 +179,23 @@ def sim_frictions(settings):
 
 
 def deployed_capital(db, bot_names, quote, modes=("paper", "live")):
-    """Quote-currency cost (entry price x amount) of the open positions of
-    the given bots in the given modes, in pairs quoted in `quote`."""
+    """Cash locked by the open positions of the given bots in the given
+    modes, in pairs funded in `quote`: entry price x amount on spot, the
+    margin (notional / leverage) on derivatives."""
     if not bot_names:
         return 0.0
-    rows = db.query(Position.entry_price, Position.amount, Position.symbol).filter(
+    rows = db.query(Position.entry_price, Position.amount, Position.symbol, Position.leverage).filter(
         Position.bot_name.in_(list(bot_names)), Position.status == "open",
         Position.mode.in_(list(modes))).all()
-    return sum((r[0] or 0.0) * (r[1] or 0.0) for r in rows if (r[2] or "").replace('-', '/').upper().endswith('/' + quote))
+    total = 0.0
+    for entry, amount, sym, lev in rows:
+        if cash_currency(sym) != quote:
+            continue
+        cost = (entry or 0.0) * (amount or 0.0)
+        if is_derivative(sym) and lev and lev > 1:
+            cost /= lev
+        total += cost
+    return total
 
 
 def forward_pool(db, bot, quote):
@@ -198,10 +228,20 @@ def live_allocation(db, bot, quote, free_balance):
     return max(bot_total - deployed_bot, 0.0), wallet_total, bot_total
 
 
-def calculate_trade_amount(current_price, bot_settings, current_equity=None):
+def calculate_trade_amount(current_price, bot_settings, current_equity=None, leverage=1):
+    """Base amount to buy. `amount_value` is what the bot puts up (percentage
+    of its pool, or a fixed cash amount); on derivatives that is the margin,
+    so the notional — and the returned amount — is `leverage` times bigger.
+    Spot callers never pass leverage and get the pre-existing sizing."""
     if not current_price or current_price <= 0:
         logger.warning("Invalid current_price (%s), cannot calculate trade amount", current_price)
         return None
+    try:
+        leverage = float(leverage or 1)
+    except (TypeError, ValueError):
+        leverage = 1.0
+    if leverage < 1:
+        leverage = 1.0
 
     entry_settings = bot_settings.get("trade_settings", {}).get("entry", {})
     amount_type = entry_settings.get("amount_type", "percentage")
@@ -214,6 +254,8 @@ def calculate_trade_amount(current_price, bot_settings, current_equity=None):
 
     if amount_type == "fixed":
         trade_amount = amount_value / current_price
+        if leverage != 1.0:
+            trade_amount *= leverage
         return max(trade_amount, 0.0001)
     else:
         capital = current_equity if current_equity is not None else _num(bot_settings.get("backtest_capital"), 1000)
@@ -221,4 +263,6 @@ def calculate_trade_amount(current_price, bot_settings, current_equity=None):
             return None
         investment = capital * (amount_value / 100)
         trade_amount = investment / current_price
+        if leverage != 1.0:
+            trade_amount *= leverage
         return max(trade_amount, 0.0001)

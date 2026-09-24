@@ -18,6 +18,7 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.engine.evaluator import NodeEvaluator
 from backend.engine import backtest
 from backend.engine.sizing import _num, _int, _tf_seconds, _naive_utc, backtest_pin, data_fingerprint
+from backend.engine.symbols import DEFAULT_MARGIN_MODE, base_of, cash_currency, is_derivative, leverage_for, market_type_for
 from backend.core.exchange_registry import get_exchange_timeframes
 from backend.core import bot_log_buffer as blb
 
@@ -377,14 +378,15 @@ def execute_sync_backfill(engine, bot_id: int):
                     blb.push(bot.name, "WARN", f"Not listed on {api_key.exchange.upper()}{' demo' if api_key.is_sandbox else ''} for key '{api_key.name}': {', '.join(_missing)} — {live_mode} entries on these pairs will be skipped")
                 _tokens = []
                 for _p in _pairs:
-                    for _t in _p.split('/'):
+                    # Derivatives hold no base coin: only the settle currency matters
+                    for _t in ([cash_currency(_p)] if is_derivative(_p) else [base_of(_p), cash_currency(_p)]):
                         if _t not in _tokens:
                             _tokens.append(_t)
                 def _free(t):
                     v = _bal.get(t)
                     return float((v or {}).get("free") or 0) if isinstance(v, dict) else float((_bal.get("free") or {}).get(t) or 0)
                 _parts = [f"{_free(t):,.4f}".rstrip('0').rstrip('.') + f" {t}" for t in _tokens]
-                _quote = _pairs[0].split('/')[-1] if _pairs else "USDT"
+                _quote = cash_currency(_pairs[0]) if _pairs else "USDT"
                 _pool, _wallet_total, _bot_total = engine._live_allocation(db, bot, _quote, _free(_quote))
                 _pct = _num(bot.settings.get("live_allocation_pct"), 100)
                 blb.push(bot.name, "INFO", f"Wallet '{api_key.name}' ({live_mode}): {', '.join(_parts)} free — this bot: {_pct:.0f}% = {_bot_total:,.2f} {_quote} ({_pool:,.2f} still deployable)")
@@ -407,7 +409,12 @@ def execute_sync_backfill(engine, bot_id: int):
             # coins that are no longer there
             if _bal is not None:
                 try:
-                    _problems = engine._reconcile_positions_with_wallet(db, bot, _ccxt, _bal, live_mode)
+                    if market_type_for(bot.settings, api_key) != "spot":
+                        # A perp position is not a coin in the wallet: compare
+                        # against the exchange's open positions instead
+                        _problems = engine._reconcile_positions_with_exchange(db, bot, _ccxt, live_mode)
+                    else:
+                        _problems = engine._reconcile_positions_with_wallet(db, bot, _ccxt, _bal, live_mode)
                 except Exception as _exc:
                     logger.warning("Bot '%s': position reconciliation failed: %s", bot.name, _exc)
                     _problems = []
@@ -417,6 +424,27 @@ def execute_sync_backfill(engine, bot_id: int):
                     engine._engine_stop(bot, db, f"{_problems[0]} — reconcile manually")
                     db.commit()
                     return
+
+            # Derivatives: confirm leverage and margin mode on the exchange
+            # for every pair before the first order — a bot that cannot set
+            # what it backtested with must not trade
+            _mt = market_type_for(bot.settings, api_key)
+            if _mt != "spot":
+                _lev = leverage_for(bot.settings, _mt)
+                _mm = bot.settings.get("margin_mode") or DEFAULT_MARGIN_MODE
+                try:
+                    _ccxt = engine._get_ccxt_instance(api_key)
+                    for _p in [str(s).replace('-', '/').upper() for s in symbols]:
+                        if _ccxt.markets and _p not in _ccxt.markets:
+                            continue
+                        engine._ensure_leverage(_ccxt, api_key, _p, _lev, _mm, bot.name)
+                except Exception as _exc:
+                    logger.error("Bot '%s': could not apply leverage: %s", bot.name, _exc)
+                    blb.push(bot.name, "ERROR", f"Could not set {_lev:g}x {_mm} on {api_key.exchange.upper()}: {_exc}")
+                    engine._engine_stop(bot, db, f"Could not set {_lev:g}x {_mm} leverage on the exchange: {_exc}")
+                    db.commit()
+                    return
+                blb.push(bot.name, "INFO", f"Perpetual swap ({live_mode}): {_lev:g}x {_mm} confirmed on {api_key.exchange.upper()} for {len(symbols)} pair(s) — funding payments are not modelled")
 
         # Make the backtest→live handover visible in the console: the next
         # tick only arrives when the current candle closes on the exchange

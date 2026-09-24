@@ -14,7 +14,7 @@ import { Input, Select } from './ui/Input';
 import { Skeleton } from './ui/Skeleton';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
-import { useExchanges } from '../api/exchanges';
+import { useExchanges, marketCaps } from '../api/exchanges';
 
 /* ── Inline icons (stroke 1.8) ── */
 const IconSync = (
@@ -76,6 +76,11 @@ export default function DataManager({ openChart }) {
   const [symbol, setSymbol] = useState('BTC-USDC');
   const exchanges = useExchanges();
   const [exchange, setExchange] = useState('okx');
+  // Perpetual swaps live under the BASE/QUOTE:SETTLE symbol; the backend
+  // picks the swap market from the ':' so this select only steers the form
+  const [marketChoice, setMarketType] = useState('spot');
+  const hasSwap = !!marketCaps(exchange, 'swap');
+  const marketType = hasSwap ? marketChoice : 'spot';  // a swap choice falls back on a spot-only exchange
   const [timeframe, setTimeframe] = useState('1d');
   const [startDate, setStartDate] = useState('2024-01-01T00:00');
   const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 16));
@@ -156,7 +161,9 @@ export default function DataManager({ openChart }) {
       };
 
       // Accept both BTC/USDC and BTC-USDC — the API path expects the dash form.
-      const normalizedSymbol = symbol.trim().toUpperCase().replace(/\//g, '-');
+      let normalizedSymbol = symbol.trim().toUpperCase().replace(/\//g, '-');
+      // Perps: BTC-USDT → BTC-USDT:USDT (settle = quote) unless already given
+      if (marketType === 'swap' && !normalizedSymbol.includes(':')) normalizedSymbol = `${normalizedSymbol}:${normalizedSymbol.split('-')[1] || ''}`;
       const response = await apiClient.post(`/api/data/fetch/${normalizedSymbol}`, payload);
       toast.success(response.data.new_saved != null
         ? `${response.data.message} ${response.data.new_saved} new candles added.`
@@ -421,11 +428,16 @@ export default function DataManager({ openChart }) {
                 <span className="w-5 h-5 rounded-full bg-accent/10 border border-accent/30 text-accent text-2xs font-num font-bold flex items-center justify-center">1</span>
                 <span className="text-2xs font-bold uppercase tracking-wider text-muted">Source</span>
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 <Select label="Exchange" value={exchange} onChange={e => setExchange(e.target.value)}>
                   {exchanges.map(ex => (
                     <option key={ex.id} value={ex.id}>{ex.name}</option>
                   ))}
+                </Select>
+                <Select label="Market" value={marketType} onChange={e => setMarketType(e.target.value)} disabled={!hasSwap}
+                  hint={hasSwap ? undefined : 'Spot only on this exchange'}>
+                  <option value="spot">Spot</option>
+                  <option value="swap" disabled={!hasSwap}>Perpetual swaps</option>
                 </Select>
                 <Input
                   label="Asset Pair"
@@ -433,8 +445,8 @@ export default function DataManager({ openChart }) {
                   required
                   value={symbol}
                   onChange={e => setSymbol(e.target.value.toUpperCase())}
-                  placeholder="BTC-USDC or BTC/USDC"
-                  hint="Both BTC-USDC and BTC/USDC work"
+                  placeholder={marketType === 'swap' ? 'BTC-USDT:USDT' : 'BTC-USDC or BTC/USDC'}
+                  hint={marketType === 'swap' ? 'Stored as BTC/USDT:USDT — separate from spot candles' : 'Both BTC-USDC and BTC/USDC work'}
                 />
               </div>
             </div>

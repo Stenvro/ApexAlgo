@@ -25,6 +25,8 @@ class Order(Base):
     fee = Column(Float, nullable=True)
 
     status = Column(String, default="open")             # "open", "filled", "canceled", "rejected"
+    market_type = Column(String, default="spot")        # "spot" | "swap"
+    reduce_only = Column(Integer, default=0)            # 1 for derivative close orders
 
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 

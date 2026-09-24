@@ -289,18 +289,24 @@ def test_symbols_endpoint_lists_active_spot_markets_and_degrades_to_unknown(clie
     class Ex:
         def load_markets(self):
             return {"BTC/USDT": {"spot": True, "active": True}, "ETH/USDT": {"spot": True},
-                    "OLD/USDT": {"spot": True, "active": False}, "BTC/USDT:USDT": {"spot": False, "swap": True}}
+                    "OLD/USDT": {"spot": True, "active": False},
+                    "BTC/USDT:USDT": {"spot": False, "swap": True, "type": "swap", "linear": True, "active": True},
+                    "BTC/USD:BTC": {"spot": False, "swap": True, "type": "swap", "linear": False, "inverse": True}}
     monkeypatch.setattr(reg, "_markets_cache", {})
-    monkeypatch.setattr(reg, "build_exchange", lambda exchange_id: Ex())
+    monkeypatch.setattr(reg, "build_exchange", lambda exchange_id, **kw: Ex())
     r = client.get("/api/data/symbols/okx", headers=HEADERS)
-    assert r.status_code == 200 and r.json() == {"exchange": "okx", "symbols": ["BTC/USDT", "ETH/USDT"], "known": True}
+    assert r.status_code == 200 and r.json() == {"exchange": "okx", "market_type": "spot", "symbols": ["BTC/USDT", "ETH/USDT"], "known": True}
+    # Phase 2: swap listing = linear perpetuals only, cached separately from spot
+    r = client.get("/api/data/symbols/okx?market_type=swap", headers=HEADERS)
+    assert r.status_code == 200 and r.json() == {"exchange": "okx", "market_type": "swap", "symbols": ["BTC/USDT:USDT"], "known": True}
+    assert client.get("/api/data/symbols/bitvavo?market_type=swap", headers=HEADERS).status_code == 400
 
-    def boom(exchange_id):
+    def boom(exchange_id, **kw):
         raise RuntimeError("offline")
     monkeypatch.setattr(reg, "_markets_cache", {})
     monkeypatch.setattr(reg, "build_exchange", boom)
     r = client.get("/api/data/symbols/kraken", headers=HEADERS)
-    assert r.status_code == 200 and r.json() == {"exchange": "kraken", "symbols": [], "known": False}
+    assert r.status_code == 200 and r.json() == {"exchange": "kraken", "market_type": "spot", "symbols": [], "known": False}
     assert client.get("/api/data/symbols/nope", headers=HEADERS).status_code == 400
 
 

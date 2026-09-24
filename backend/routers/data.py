@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from backend.core.database import get_db, SessionLocal
 from backend.models.candles import Candle
 from backend.core.security import verify_api_key
-from backend.core.exchange_registry import build_exchange, SUPPORTED_EXCHANGES, get_exchange_timeframes, get_exchange_symbols
+from backend.core.exchange_registry import build_exchange_for_symbol, SUPPORTED_EXCHANGES, get_exchange_timeframes, get_exchange_symbols, market_caps
 from backend.engine.data_verify import verify_window
 
 logger = logging.getLogger("apexalgo.data")
@@ -39,15 +39,19 @@ async def get_timeframes(exchange_id: str):
 
 
 @router.get("/symbols/{exchange_id}")
-async def get_symbols(exchange_id: str):
-    """Tradeable spot symbols on an exchange — the builder validates the
-    whitelist against this. ``symbols`` is empty (and ``known`` false) when the
-    exchange could not be reached, so callers do not reject every pair."""
+async def get_symbols(exchange_id: str, market_type: str = Query(default="spot")):
+    """Tradeable symbols on an exchange (spot pairs, or linear perpetuals with
+    ``?market_type=swap``) — the builder validates the whitelist against this.
+    ``symbols`` is empty (and ``known`` false) when the exchange could not be
+    reached, so callers do not reject every pair."""
     exchange_id = exchange_id.lower()
+    market_type = (market_type or "spot").lower()
     if exchange_id not in SUPPORTED_EXCHANGES:
         raise HTTPException(status_code=400, detail=f"Unknown exchange '{exchange_id}'.")
-    symbols = await asyncio.to_thread(get_exchange_symbols, exchange_id)
-    return {"exchange": exchange_id, "symbols": symbols, "known": bool(symbols)}
+    if market_caps(exchange_id, market_type) is None:
+        raise HTTPException(status_code=400, detail=f"{SUPPORTED_EXCHANGES[exchange_id]} has no '{market_type}' market in ApexAlgo.")
+    symbols = await asyncio.to_thread(get_exchange_symbols, exchange_id, market_type)
+    return {"exchange": exchange_id, "market_type": market_type, "symbols": symbols, "known": bool(symbols)}
 
 
 class HistoricalDataFetch(BaseModel):
@@ -82,7 +86,7 @@ async def verify_stored_candles(req: VerifyRequest):
     def _run():
         db = SessionLocal()
         try:
-            return verify_window(db, build_exchange(exchange_id), exchange_id, symbol, req.timeframe,
+            return verify_window(db, build_exchange_for_symbol(exchange_id, symbol), exchange_id, symbol, req.timeframe,
                                  req.start_date, req.end_date, accept=req.accept)
         finally:
             db.close()
@@ -127,7 +131,7 @@ async def fetch_historical_data(
 
 
 def _fetch_and_save_data(formatted_symbol: str, exchange_id: str, req: HistoricalDataFetch):
-    exch = build_exchange(exchange_id)
+    exch = build_exchange_for_symbol(exchange_id, formatted_symbol)
 
     start_ts = int(req.start_date.timestamp() * 1000)
     end_ts = int(req.end_date.timestamp() * 1000)
@@ -368,7 +372,7 @@ def get_market_info(symbol: str, exchange: str = "okx"):
         if cached and (now - cached[0]) < _TICKER_TTL:
             return cached[1]
 
-        exch = build_exchange(exchange_id)
+        exch = build_exchange_for_symbol(exchange_id, formatted_symbol)
         ticker = exch.fetch_ticker(formatted_symbol)
         result = {
             "symbol": formatted_symbol,

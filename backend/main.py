@@ -32,7 +32,7 @@ from backend.routers import auth, keys, data, bots, trades, indicators
 # Import the background services
 from backend.engine.candle_poller import candle_poller
 from backend.engine.bot_manager import bot_manager
-from backend.core.exchange_registry import build_exchange
+from backend.core.exchange_registry import build_exchange_for_symbol
 
 # Create database tables and run migrations for existing DBs
 Base.metadata.create_all(bind=engine)
@@ -105,8 +105,8 @@ def read_root():
 @app.get("/api/price/{symbol}", dependencies=[Depends(verify_api_key)])
 def get_price(symbol: str, exchange: str = Query(default="okx")):
     try:
-        exch = build_exchange(exchange.lower())
         formatted_symbol = symbol.replace('-', '/').upper()
+        exch = build_exchange_for_symbol(exchange.lower(), formatted_symbol)
         ticker = exch.fetch_ticker(formatted_symbol)
         return {
             "exchange": exchange.upper(),

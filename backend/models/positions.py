@@ -27,6 +27,11 @@ class Position(Base):
     closed_at = Column(DateTime, nullable=True)
 
     highest_price = Column(Float, nullable=True)
+    # Derivatives: "swap" positions carry leverage (margin = entry x amount /
+    # leverage) and the ccxt contract count behind `amount` (base units)
+    market_type = Column(String, default="spot")
+    leverage = Column(Float, default=1.0)
+    contracts = Column(Float, nullable=True)
     triggered_exits = Column(JSON, nullable=True, default=list)
 
     orders = relationship("Order", back_populates="position", cascade="all, delete-orphan")

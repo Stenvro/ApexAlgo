@@ -9,7 +9,8 @@ from itertools import pairwise
 from sqlalchemy.orm import Session
 
 from backend.core.database import SessionLocal
-from backend.core.exchange_registry import build_exchange, exchange_spec
+from backend.core.exchange_registry import build_exchange_for_symbol, exchange_spec
+from backend.engine.symbols import market_type_of
 from backend.core.events import event_bus
 from backend.models.bots import BotConfig
 from backend.models.candles import Candle
@@ -36,7 +37,7 @@ class CandlePoller:
         self.running = False
         self.needs_reconnect = False
         self._poll_tasks: list[asyncio.Task] = []
-        self._exchange_cache: dict[str, tuple[float, object, threading.Lock]] = {}  # exchange_id → (created_at, ccxt instance, lock)
+        self._exchange_cache: dict[tuple[str, str], tuple[float, object, threading.Lock]] = {}  # (exchange_id, market type) → (created_at, ccxt instance, lock)
         self._exchange_cache_ttl = 3600  # rebuild exchange instances after 1 hour
         # Last closed candle ts per (exchange, symbol, timeframe), kept across
         # reconnects so a restarted poll task does not re-publish the same candle.
@@ -261,7 +262,7 @@ class CandlePoller:
         lookback_limit: int,
     ):
         # Fresh instance per thread to avoid shared rate-limit state
-        exchange = build_exchange(exchange_name)
+        exchange = build_exchange_for_symbol(exchange_name, symbol)
 
         # Validate timeframe before attempting fetch
         try:
@@ -515,7 +516,7 @@ class CandlePoller:
         are not epoch-aligned (1w/1M) fall back to a fixed interval of
         max(10s, min(60s, tf_seconds / 4)).
         """
-        exchange, ex_lock = self._get_public_exchange(exchange_name)
+        exchange, ex_lock = self._get_public_exchange(exchange_name, symbol)
 
         # Validate timeframe
         def _load_markets():
@@ -565,7 +566,7 @@ class CandlePoller:
         def _fetch(limit):
             # Re-resolve from the cache every call so the TTL rebuild takes effect,
             # and hold the per-exchange lock: sync CCXT instances are not thread-safe.
-            inst, lock = self._get_public_exchange(exchange_name)
+            inst, lock = self._get_public_exchange(exchange_name, symbol)
             with lock:
                 return inst.fetch_ohlcv(symbol, timeframe, None, limit)
 
@@ -688,18 +689,20 @@ class CandlePoller:
     # Internal helpers
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _get_public_exchange(self, exchange_name: str):
+    def _get_public_exchange(self, exchange_name: str, symbol: str = ""):
         """Return (instance, lock) for a cached unauthenticated exchange used for
-        public market data. Callers must hold the lock around every fetch since
-        sync CCXT instances are not thread-safe."""
+        public market data. Spot and swap symbols get separate instances (the
+        market type is read off the symbol). Callers must hold the lock around
+        every fetch since sync CCXT instances are not thread-safe."""
+        cache_key = (exchange_name, market_type_of(symbol))
         now = time.monotonic()
-        cached = self._exchange_cache.get(exchange_name)
+        cached = self._exchange_cache.get(cache_key)
         if cached and (now - cached[0]) < self._exchange_cache_ttl:
             return cached[1], cached[2]
-        instance = build_exchange(exchange_name)
+        instance = build_exchange_for_symbol(exchange_name, symbol)
         # Keep the existing lock across rebuilds so in-flight fetches stay serialized
         lock = cached[2] if cached else threading.Lock()
-        self._exchange_cache[exchange_name] = (now, instance, lock)
+        self._exchange_cache[cache_key] = (now, instance, lock)
         return instance, lock
 
 

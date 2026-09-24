@@ -16,8 +16,9 @@ from backend.core.security import verify_api_key
 from backend.core.encryption import encrypt_data
 from backend.core.exchange_registry import (
     build_exchange, get_authenticated_exchange, invalidate_authenticated_exchange,
-    exchange_has_sandbox, EXCHANGES, SUPPORTED_EXCHANGES,
+    exchange_has_sandbox, EXCHANGES, SUPPORTED_EXCHANGES, market_caps,
 )
+from backend.engine.symbols import DEFAULT_MARKET_TYPE, MARKET_TYPES
 
 logger = logging.getLogger("apexalgo.keys")
 
@@ -34,13 +35,16 @@ class ExchangeKeyCreate(BaseModel):
     api_secret: str
     passphrase: str = ""
     is_sandbox: bool = True
+    # A key is bound to one market: spot keys and swap keys are separate records
+    market_type: str = DEFAULT_MARKET_TYPE
 
 
 @router.get("/exchanges")
 def list_exchanges():
     """Capabilities per supported exchange (from the registry spec) for the
     connection form, the data manager and the builder. `has_sandbox` is
-    probed from ccxt so it tracks the installed version."""
+    probed from ccxt so it tracks the installed version. `markets` lists the
+    market types ApexAlgo can trade on the exchange with their limits."""
     out = []
     for ex_id, spec in EXCHANGES.items():
         out.append({
@@ -50,6 +54,15 @@ def list_exchanges():
             "has_sandbox": exchange_has_sandbox(ex_id),
             "keys_url": spec.keys_url,
             "sandbox_note": spec.sandbox_note,
+            "markets": {
+                mt: {
+                    "has_sandbox": exchange_has_sandbox(ex_id, mt),
+                    "max_leverage": caps.max_leverage,
+                    "leverage_in_order": caps.leverage_in_order,
+                    "note": caps.note,
+                }
+                for mt, caps in spec.markets.items()
+            },
         })
     return out
 
@@ -59,6 +72,19 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
     exchange_id = req.exchange.lower()
     if exchange_id not in SUPPORTED_EXCHANGES:
         raise HTTPException(status_code=400, detail=f"Unsupported exchange '{exchange_id}'.")
+    market_type = (req.market_type or DEFAULT_MARKET_TYPE).strip().lower()
+    if market_type not in MARKET_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid market_type '{req.market_type}'. Use one of: {', '.join(MARKET_TYPES)}.")
+    if market_caps(exchange_id, market_type) is None:
+        raise HTTPException(status_code=400, detail=f"{SUPPORTED_EXCHANGES[exchange_id]} has no '{market_type}' market in ApexAlgo.")
+    # Bots keep trading the market their key was verified on: re-saving a
+    # key under another market type is refused while bots still reference it
+    existing = db.query(ExchangeKey).filter(ExchangeKey.name == req.name).first()
+    if existing and (getattr(existing, "market_type", None) or DEFAULT_MARKET_TYPE) != market_type:
+        linked = [b_name for b_name, b_settings in db.query(BotConfig.name, BotConfig.settings).all()
+                  if (b_settings or {}).get("api_key_name") == req.name]
+        if linked:
+            raise HTTPException(status_code=409, detail=f"Key '{req.name}' is a {existing.market_type or DEFAULT_MARKET_TYPE} key linked to {', '.join(linked)}; save the {market_type} key under a new name.")
     try:
         test_exchange = build_exchange(
             exchange_id,
@@ -66,6 +92,7 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
             api_secret=req.api_secret,
             passphrase=req.passphrase or None,
             sandbox=req.is_sandbox,
+            market_type=market_type,
         )
         test_exchange.fetch_balance()
     except Exception as e:
@@ -77,14 +104,13 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
         enc_secret = encrypt_data(req.api_secret)
         enc_passphrase = encrypt_data(req.passphrase)
 
-        existing = db.query(ExchangeKey).filter(ExchangeKey.name == req.name).first()
-
         if existing:
             existing.api_key = enc_key
             existing.api_secret = enc_secret
             existing.passphrase = enc_passphrase
             existing.is_sandbox = req.is_sandbox
             existing.exchange = req.exchange
+            existing.market_type = market_type
         else:
             new_key = ExchangeKey(
                 name=req.name,
@@ -92,7 +118,8 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
                 api_key=enc_key,
                 api_secret=enc_secret,
                 passphrase=enc_passphrase,
-                is_sandbox=req.is_sandbox
+                is_sandbox=req.is_sandbox,
+                market_type=market_type,
             )
             db.add(new_key)
 
@@ -149,6 +176,7 @@ def get_exchange_keys_status(db: Session = Depends(get_db)):
             "name": k.name,
             "exchange": k.exchange,
             "is_sandbox": k.is_sandbox,
+            "market_type": getattr(k, "market_type", None) or DEFAULT_MARKET_TYPE,
             "is_active": is_active,
             "error_msg": error_msg,
             "latency_ms": latency_ms,

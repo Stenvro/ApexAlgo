@@ -19,9 +19,54 @@ from backend.models.positions import Position
 from backend.models.exchange_keys import ExchangeKey
 from backend.engine.evaluator import NodeEvaluator
 from backend.engine.sizing import _indicator_fingerprint, _num, _int, _tf_seconds, _naive_utc
+from backend.engine.symbols import base_of, cash_currency, is_derivative, leverage_for, market_type_for, normalize
+from backend.engine import broker
+from backend.core.exchange_registry import market_caps
 from backend.core import bot_log_buffer as blb
 
 logger = logging.getLogger("apexalgo.bot_manager")
+
+
+# ── Derivative order plumbing ─────────────────────────────────────────────
+# Spot orders keep their literal create_market_buy/sell_order calls; the
+# helpers below only run for `BASE/QUOTE:SETTLE` symbols, where ccxt wants
+# the amount in contracts, closes must be reduce-only, and a few exchanges
+# take the leverage per order.
+
+def _precise_amount(ccxt_inst, ccxt_symbol, base_amount):
+    """Round a base amount to the market's precision. On derivatives the
+    precision is defined in contracts, so convert, round, convert back."""
+    if not is_derivative(ccxt_symbol):
+        return float(ccxt_inst.amount_to_precision(ccxt_symbol, base_amount))
+    contracts = float(ccxt_inst.amount_to_precision(ccxt_symbol, broker.to_contracts(ccxt_inst, ccxt_symbol, base_amount)))
+    return broker.from_contracts(ccxt_inst, ccxt_symbol, contracts)
+
+
+def _place_market_order(ccxt_inst, api_key_record, ccxt_symbol, side, base_amount, *, reduce_only, leverage=1):
+    """Market order in base units. Spot: the pre-existing ccxt shortcuts.
+    Derivatives: `create_order` in contracts, reduce-only on closes and,
+    where the exchange wants it, the leverage in the params."""
+    if not is_derivative(ccxt_symbol):
+        if side == "buy":
+            return ccxt_inst.create_market_buy_order(ccxt_symbol, base_amount)
+        return ccxt_inst.create_market_sell_order(ccxt_symbol, base_amount)
+    contracts = broker.to_contracts(ccxt_inst, ccxt_symbol, base_amount)
+    params = {}
+    if reduce_only:
+        params["reduceOnly"] = True
+    caps = market_caps(getattr(api_key_record, "exchange", ""), "swap")
+    if caps is not None and caps.leverage_in_order:
+        params["leverage"] = int(float(leverage or 1))
+    return ccxt_inst.create_order(ccxt_symbol, "market", side, contracts, None, params)
+
+
+def _filled_base(ccxt_inst, ccxt_symbol, ex_order) -> float:
+    """`filled` of a ccxt order in base units (contracts x contract size on
+    derivatives)."""
+    filled = float(ex_order.get("filled") or 0)
+    if filled > 0 and is_derivative(ccxt_symbol):
+        return broker.from_contracts(ccxt_inst, ccxt_symbol, filled)
+    return filled
 
 
 def close_all_open_positions(engine, bot, db, key_records):
@@ -61,7 +106,8 @@ def close_all_open_positions(engine, bot, db, key_records):
         actual_price = close_price
         actual_fee = 0.0
         order_id = f"local_{int(time.time())}_{uuid.uuid4().hex[:8]}"
-        ccxt_symbol = pos.symbol.replace('-', '/').upper()
+        ccxt_symbol = normalize(pos.symbol)
+        _close_cols = {"market_type": "swap", "reduce_only": 1} if is_derivative(ccxt_symbol) else {}
 
         if pos.mode in ("paper", "live"):
             if ccxt_inst is None:
@@ -69,14 +115,14 @@ def close_all_open_positions(engine, bot, db, key_records):
                 blb.push(bot.name, "ERROR", f"Could not close {pos.mode} position on {pos.symbol}: exchange unavailable — close it manually!")
                 continue
             try:
-                sell_qty = float(ccxt_inst.amount_to_precision(ccxt_symbol, close_qty))
+                sell_qty = _precise_amount(ccxt_inst, ccxt_symbol, close_qty)
                 if sell_qty <= 0:
                     continue
-                ex_order = ccxt_inst.create_market_sell_order(ccxt_symbol, sell_qty)
+                ex_order = _place_market_order(ccxt_inst, api_key_record, ccxt_symbol, "sell", sell_qty, reduce_only=True, leverage=pos.leverage)
                 ex_order = engine._reconcile_order(ccxt_inst, ex_order, ccxt_symbol)
-                filled_qty = float(ex_order.get("filled") or 0)
+                filled_qty = _filled_base(ccxt_inst, ccxt_symbol, ex_order)
                 if filled_qty <= 0 and ex_order.get("status") != "closed":
-                    db.add(Order(position_id=pos.id, exchange=pos.exchange, bot_name=bot.name, mode=pos.mode, symbol=pos.symbol, side="sell", order_type="market", price=close_price, amount=sell_qty, timestamp=now_ts, exchange_order_id=ex_order.get("id"), status="canceled"))
+                    db.add(Order(position_id=pos.id, exchange=pos.exchange, bot_name=bot.name, mode=pos.mode, symbol=pos.symbol, side="sell", order_type="market", price=close_price, amount=sell_qty, timestamp=now_ts, exchange_order_id=ex_order.get("id"), status="canceled", **_close_cols))
                     db.commit()
                     blb.push(bot.name, "ERROR", f"Forced close on {pos.symbol} did not fill; position left open — close it manually!")
                     continue
@@ -94,7 +140,7 @@ def close_all_open_positions(engine, bot, db, key_records):
         if pos.entry_price and pos.amount:
             pos.profit_pct = (pos.profit_pct or 0.0) + ((actual_price - pos.entry_price) / pos.entry_price) * 100 * (close_qty / pos.amount)
 
-        db.add(Order(position_id=pos.id, exchange=pos.exchange, bot_name=bot.name, mode=pos.mode, symbol=pos.symbol, side="sell", order_type="market", price=actual_price, amount=close_qty, timestamp=now_ts, exchange_order_id=order_id, status="filled", fee=actual_fee))
+        db.add(Order(position_id=pos.id, exchange=pos.exchange, bot_name=bot.name, mode=pos.mode, symbol=pos.symbol, side="sell", order_type="market", price=actual_price, amount=close_qty, timestamp=now_ts, exchange_order_id=order_id, status="filled", fee=actual_fee, **_close_cols))
 
         if close_qty >= pos.amount - 0.00001:
             pos.status = "closed"
@@ -119,7 +165,13 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
     None when no entry was made (no signal, blocked, skipped, or failed).
     Kept separate from the exit loop on purpose: bailing out of the entry
     must never skip the SL/TP evaluation of the positions already open."""
-    ccxt_symbol = symbol.replace('-', '/').upper()
+    ccxt_symbol = normalize(symbol)
+    # Derivatives: leverage from the bot (the linked key fixes the market
+    # type); every spot bot goes through the unchanged branches below
+    _market_type = market_type_for(bot.settings, api_key_record)
+    _derivative = is_derivative(ccxt_symbol)
+    _leverage = leverage_for(bot.settings, _market_type) if _derivative else 1.0
+    _open_cols = {"market_type": _market_type} if _derivative else {}
     if is_buy and entries_blocked:
         blb.push(bot.name, "INFO", f"BUY signal on {symbol} skipped — entries blocked by max drawdown")
     elif is_buy and open_count >= max_pos:
@@ -127,7 +179,10 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
         # global: the whole portfolio)
         blb.push(bot.name, "INFO", f"BUY signal on {symbol} skipped — max_positions ({max_pos}) reached")
     elif is_buy and can_buy_cooldown:
-        trade_amount = engine._calculate_trade_amount(current_price, bot.settings)
+        if _derivative:
+            trade_amount = engine._calculate_trade_amount(current_price, bot.settings, leverage=_leverage)
+        else:
+            trade_amount = engine._calculate_trade_amount(current_price, bot.settings)
         if trade_amount is None:
             logger.warning("Skipping buy for %s: invalid trade amount", symbol)
         else:
@@ -141,22 +196,36 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                     # pool, pay entry slippage and fee. A forward test that
                     # trades frictionless on the original capital would
                     # confirm a strategy the backtest never ran.
-                    _quote = ccxt_symbol.split('/')[-1]
+                    _quote = cash_currency(ccxt_symbol)
                     pool = engine._forward_pool(db, bot, _quote)
                     if pool <= 0:
                         blb.push(bot.name, "WARN", f"BUY signal on {symbol} skipped — forward-test pool depleted ({pool:,.2f} {_quote})")
                         return None
                     entry_fee_pct, _, entry_slip, _ = engine._sim_frictions(bot.settings)
-                    trade_amount = engine._calculate_trade_amount(current_price, bot.settings, current_equity=pool)
-                    if trade_amount is None:
-                        return None
-                    actual_price = current_price * (1 + entry_slip)
-                    if bot.settings.get("trade_settings", {}).get("entry", {}).get("amount_type", "percentage") != "fixed":
-                        trade_amount = min(trade_amount, pool / (actual_price * (1 + entry_fee_pct)))
-                    if trade_amount <= 0 or actual_price * trade_amount * (1 + entry_fee_pct) > pool + 1e-9:
-                        blb.push(bot.name, "WARN", f"BUY signal on {symbol} skipped — entry does not fit the forward-test pool ({pool:,.2f} {_quote})")
-                        return None
-                    buy_fee = actual_price * trade_amount * entry_fee_pct
+                    if _derivative:
+                        # Margin (notional / leverage) + fee on the notional must fit the pool
+                        trade_amount = engine._calculate_trade_amount(current_price, bot.settings, current_equity=pool, leverage=_leverage)
+                        if trade_amount is None:
+                            return None
+                        actual_price = current_price * (1 + entry_slip)
+                        _unit_cost = actual_price * (1 / _leverage + entry_fee_pct)
+                        if bot.settings.get("trade_settings", {}).get("entry", {}).get("amount_type", "percentage") != "fixed":
+                            trade_amount = min(trade_amount, pool / _unit_cost)
+                        if trade_amount <= 0 or trade_amount * _unit_cost > pool + 1e-9:
+                            blb.push(bot.name, "WARN", f"BUY signal on {symbol} skipped — entry does not fit the forward-test pool ({pool:,.2f} {_quote})")
+                            return None
+                        buy_fee = actual_price * trade_amount * entry_fee_pct
+                    else:
+                        trade_amount = engine._calculate_trade_amount(current_price, bot.settings, current_equity=pool)
+                        if trade_amount is None:
+                            return None
+                        actual_price = current_price * (1 + entry_slip)
+                        if bot.settings.get("trade_settings", {}).get("entry", {}).get("amount_type", "percentage") != "fixed":
+                            trade_amount = min(trade_amount, pool / (actual_price * (1 + entry_fee_pct)))
+                        if trade_amount <= 0 or actual_price * trade_amount * (1 + entry_fee_pct) > pool + 1e-9:
+                            blb.push(bot.name, "WARN", f"BUY signal on {symbol} skipped — entry does not fit the forward-test pool ({pool:,.2f} {_quote})")
+                            return None
+                        buy_fee = actual_price * trade_amount * entry_fee_pct
                 elif mode in ["paper", "live"] and api_key_record:
                     ccxt_inst = get_ccxt()
 
@@ -190,7 +259,7 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                         sizing_capital = _num(bot.settings.get("backtest_capital"), 1000)
                         logger.info("Bot '%s': sandbox balance unavailable, sizing paper entry from backtest capital $%.2f", bot.name, sizing_capital)
                     else:
-                        _quote = ccxt_symbol.split('/')[-1]
+                        _quote = cash_currency(ccxt_symbol)
                         pool, wallet_total, bot_total = engine._live_allocation(db, bot, _quote, free_balance)
                         if pool <= 0:
                             blb.push(bot.name, "WARN", f"BUY signal on {symbol} skipped — allocation fully deployed ({bot_total:,.0f} {_quote} = {_num(bot.settings.get('live_allocation_pct'), 100):.0f}% of wallet {wallet_total:,.0f})")
@@ -198,11 +267,15 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                         sizing_capital = min(free_balance, pool)
                         logger.info("Bot '%s': sizing %s entry from $%.2f (free=$%.2f, pool remaining=$%.2f of allocation $%.2f, wallet=$%.2f)",
                             bot.name, mode, sizing_capital, free_balance, pool, bot_total, wallet_total)
-                    trade_amount = engine._calculate_trade_amount(current_price, bot.settings, current_equity=sizing_capital)
+                    if _derivative:
+                        # sizing_capital is margin; the order is leverage x bigger
+                        trade_amount = engine._calculate_trade_amount(current_price, bot.settings, current_equity=sizing_capital, leverage=_leverage)
+                    else:
+                        trade_amount = engine._calculate_trade_amount(current_price, bot.settings, current_equity=sizing_capital)
                     if trade_amount is None:
                         logger.warning("Skipping buy for %s: no capital available to size trade", symbol)
                         return None
-                    trade_amount = float(ccxt_inst.amount_to_precision(ccxt_symbol, trade_amount))
+                    trade_amount = _precise_amount(ccxt_inst, ccxt_symbol, trade_amount)
                     if trade_amount <= 0:
                         logger.warning("Trade amount rounded to zero for %s after precision, skipping", ccxt_symbol)
                         return None
@@ -218,24 +291,28 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                     if max_order_usd > 0:
                         order_value_usd = trade_amount * current_price
                         if order_value_usd > max_order_usd:
-                            capped = float(ccxt_inst.amount_to_precision(ccxt_symbol, max_order_usd / current_price))
+                            capped = _precise_amount(ccxt_inst, ccxt_symbol, max_order_usd / current_price)
                             logger.warning("SAFETY: BUY order $%.2f exceeds max_order_value $%.2f for %s — capped to %s", order_value_usd, max_order_usd, symbol, capped)
-                            blb.push(bot.name, "WARN", f"BUY on {symbol} capped by max_order_value: {order_value_usd:,.0f} → {max_order_usd:,.0f} {ccxt_symbol.split('/')[-1]} (raise max_order_value or lower the entry amount to match the backtest)")
+                            blb.push(bot.name, "WARN", f"BUY on {symbol} capped by max_order_value: {order_value_usd:,.0f} → {max_order_usd:,.0f} {cash_currency(ccxt_symbol)} (raise max_order_value or lower the entry amount to match the backtest)")
                             trade_amount = capped
                             min_violation = engine._below_market_minimum(ccxt_inst, ccxt_symbol, trade_amount, current_price)
                             if trade_amount <= 0 or min_violation:
                                 blb.push(bot.name, "WARN", f"Capped order on {symbol} is below the exchange minimum ({min_violation or 'zero amount'}) — entry skipped")
                                 return None
-                    okx_order = ccxt_inst.create_market_buy_order(ccxt_symbol, trade_amount)
+                    if _derivative:
+                        # Leverage/margin mode must be confirmed on the exchange
+                        # before the first contract is bought (raises on failure)
+                        engine._ensure_leverage(ccxt_inst, api_key_record, ccxt_symbol, _leverage, bot.settings.get("margin_mode"), bot.name)
+                    okx_order = _place_market_order(ccxt_inst, api_key_record, ccxt_symbol, "buy", trade_amount, reduce_only=False, leverage=_leverage)
                     logger.info("%s BUY response: id=%s status=%s filled=%s avg=%s fee=%s",
                         mode.upper(), okx_order.get("id"), okx_order.get("status"),
                         okx_order.get("filled"), okx_order.get("average"), okx_order.get("fee"))
                     okx_order = engine._reconcile_order(ccxt_inst, okx_order, ccxt_symbol)
-                    filled_qty = float(okx_order.get("filled") or 0)
+                    filled_qty = _filled_base(ccxt_inst, ccxt_symbol, okx_order)
                     if filled_qty <= 0 and okx_order.get("status") != "closed":
                         if engine._cancel_unfilled_order(ccxt_inst, okx_order.get("id"), ccxt_symbol):
                             logger.warning("%s BUY unfilled (status=%s), canceled on exchange.", mode.upper(), okx_order.get("status"))
-                            db.add(Order(exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=current_price, amount=trade_amount, timestamp=latest_time, exchange_order_id=okx_order.get("id"), status="canceled"))
+                            db.add(Order(exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=current_price, amount=trade_amount, timestamp=latest_time, exchange_order_id=okx_order.get("id"), status="canceled", **_open_cols))
                             db.commit()
                             return None
                         # Cancel did not go through: the order may have filled
@@ -253,8 +330,8 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                     # A fee charged in base currency comes out of the bought
                     # amount itself; only the net amount is actually held
                     fee_info = okx_order.get("fee") or {}
-                    base_ccy = ccxt_symbol.split('/')[0]
-                    if fee_info.get("currency") and str(fee_info["currency"]).upper() == base_ccy.upper():
+                    base_ccy = base_of(ccxt_symbol)
+                    if not _derivative and fee_info.get("currency") and str(fee_info["currency"]).upper() == base_ccy.upper():
                         try:
                             base_fee_cost = float(fee_info.get("cost") or 0)
                         except (TypeError, ValueError):
@@ -263,14 +340,19 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                             net_amount = float(ccxt_inst.amount_to_precision(ccxt_symbol, max(trade_amount - base_fee_cost, 0)))
                             if net_amount > 0:
                                 trade_amount = net_amount
-                    engine._balance_cache.pop((api_key_record.name, ccxt_symbol.split('/')[-1]), None)
+                    engine._balance_cache.pop((api_key_record.name, cash_currency(ccxt_symbol)), None)
 
                 # Position created after successful exchange order
                 open_position = Position(exchange=exchange, bot_name=bot.name, symbol=symbol, mode=mode, status="open", side="long", entry_price=actual_price, amount=trade_amount)
+                if _derivative:
+                    open_position.market_type = _market_type
+                    open_position.leverage = _leverage
+                    if mode in ["paper", "live"]:
+                        open_position.contracts = broker.to_contracts(get_ccxt(), ccxt_symbol, trade_amount)
                 db.add(open_position)
                 db.flush()
 
-                db.add(Order(position_id=open_position.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=actual_price, amount=trade_amount, timestamp=latest_time, exchange_order_id=order_id, status="filled", fee=buy_fee))
+                db.add(Order(position_id=open_position.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=actual_price, amount=trade_amount, timestamp=latest_time, exchange_order_id=order_id, status="filled", fee=buy_fee, **_open_cols))
                 if mode in ["paper", "live"]:
                     # A real exchange fill must be persisted immediately —
                     # a later rollback may not erase the record of it
@@ -282,7 +364,7 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
             except ccxt.InsufficientFunds as e:
                 logger.warning("%s BUY rejected (insufficient funds): %s", mode.upper(), e)
                 blb.push(bot.name, "WARN", f"{mode.upper()} BUY rejected: insufficient funds")
-                db.add(Order(exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=current_price, amount=trade_amount, timestamp=latest_time, status="rejected"))
+                db.add(Order(exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=current_price, amount=trade_amount, timestamp=latest_time, status="rejected", **_open_cols))
                 if mode in ["paper", "live"]:
                     db.commit()
             except Exception as e:
@@ -291,7 +373,7 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                 # implies an order that existed
                 logger.error("%s BUY failed for %s: %s: %s", mode.upper(), symbol, type(e).__name__, e, exc_info=True)
                 blb.push(bot.name, "ERROR", f"{mode.upper()} BUY {symbol} rejected — {type(e).__name__}: {str(e)[:200]}")
-                db.add(Order(exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=current_price, amount=trade_amount, timestamp=latest_time, status="rejected"))
+                db.add(Order(exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="buy", order_type="market", price=current_price, amount=trade_amount, timestamp=latest_time, status="rejected", **_open_cols))
                 if mode in ["paper", "live"]:
                     db.commit()
     return None
@@ -592,7 +674,8 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                     # position left open by the backtest must not take a live slot
                     open_count = len(_positions_by_bot_mode.get((bot.name, mode), []))
 
-                ccxt_symbol = symbol.replace('-', '/').upper()
+                ccxt_symbol = normalize(symbol)
+                _close_cols = {"market_type": "swap", "reduce_only": 1} if is_derivative(ccxt_symbol) else {}
                 just_opened_ids = set()
 
                 # Cooldown check using pre-loaded counts
@@ -651,7 +734,7 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                 actual_fee = actual_price * close_qty * exit_fee_pct
                             elif mode in ["paper", "live"] and api_key_record:
                                 ccxt_inst = get_ccxt()
-                                close_qty = float(ccxt_inst.amount_to_precision(ccxt_symbol, close_qty))
+                                close_qty = _precise_amount(ccxt_inst, ccxt_symbol, close_qty)
                                 if close_qty <= 0:
                                     logger.warning("Sell amount rounded to zero for %s after precision, skipping", ccxt_symbol)
                                     continue
@@ -673,16 +756,16 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                     logger.warning("%s SELL skipped for %s: %s", mode.upper(), symbol, min_violation)
                                     blb.push(bot.name, "WARN", f"Sell on {symbol} skipped: {min_violation}")
                                     continue
-                                okx_order = ccxt_inst.create_market_sell_order(ccxt_symbol, close_qty)
+                                okx_order = _place_market_order(ccxt_inst, api_key_record, ccxt_symbol, "sell", close_qty, reduce_only=True, leverage=pos.leverage)
                                 logger.info("%s SELL response: id=%s status=%s filled=%s avg=%s fee=%s",
                                     mode.upper(), okx_order.get("id"), okx_order.get("status"),
                                     okx_order.get("filled"), okx_order.get("average"), okx_order.get("fee"))
                                 okx_order = engine._reconcile_order(ccxt_inst, okx_order, ccxt_symbol)
-                                filled_qty = float(okx_order.get("filled") or 0)
+                                filled_qty = _filled_base(ccxt_inst, ccxt_symbol, okx_order)
                                 if filled_qty <= 0 and okx_order.get("status") != "closed":
                                     if engine._cancel_unfilled_order(ccxt_inst, okx_order.get("id"), ccxt_symbol):
                                         logger.warning("%s SELL unfilled (status=%s), canceled on exchange.", mode.upper(), okx_order.get("status"))
-                                        db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="sell", order_type="market", price=ev['price'], amount=close_qty, timestamp=latest_time, exchange_order_id=okx_order.get("id"), status="canceled"))
+                                        db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="sell", order_type="market", price=ev['price'], amount=close_qty, timestamp=latest_time, exchange_order_id=okx_order.get("id"), status="canceled", **_close_cols))
                                         db.commit()
                                         continue
                                     # Cancel did not go through: the sell may still fill on
@@ -690,7 +773,7 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                     # stop the bot — a second sell here could double-sell.
                                     logger.error("%s SELL state unknown for %s (id=%s) — stopping bot '%s'", mode.upper(), symbol, okx_order.get("id"), bot.name)
                                     blb.push(bot.name, "ERROR", f"Order state unknown on {symbol} — verify manually on the exchange before restarting")
-                                    db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="sell", order_type="market", price=ev['price'], amount=close_qty, timestamp=latest_time, exchange_order_id=okx_order.get("id"), status="unknown"))
+                                    db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="sell", order_type="market", price=ev['price'], amount=close_qty, timestamp=latest_time, exchange_order_id=okx_order.get("id"), status="unknown", **_close_cols))
                                     engine._engine_stop(bot, db, f"Sell order state unknown on {symbol} — verify on the exchange before restarting")
                                     db.commit()
                                     break
@@ -702,9 +785,9 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                 actual_price = okx_order.get("average") or okx_order.get("price") or ev['price']
                                 order_id = okx_order.get("id")
                                 actual_fee = engine._fee_in_quote(okx_order.get("fee"), ccxt_symbol, actual_price)
-                                engine._balance_cache.pop((api_key_record.name, ccxt_symbol.split('/')[-1]), None)
+                                engine._balance_cache.pop((api_key_record.name, cash_currency(ccxt_symbol)), None)
 
-                            db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="sell", order_type="market", price=actual_price, amount=close_qty, timestamp=latest_time, exchange_order_id=order_id, status="filled", fee=actual_fee))
+                            db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="sell", order_type="market", price=actual_price, amount=close_qty, timestamp=latest_time, exchange_order_id=order_id, status="filled", fee=actual_fee, **_close_cols))
 
                             # Fee-adjusted P&L: subtract proportional entry fee + exit fee
                             total_buy_fees = sum((o.fee or 0.0) for o in (pos.orders or []) if o.side == "buy" and o.status == "filled")
@@ -743,7 +826,7 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                         except Exception as e:
                             logger.error("%s SELL failed: %s", mode.upper(), e, exc_info=True)
                             blb.push(bot.name, "ERROR", f"{mode.upper()} SELL failed: {e}")
-                            db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="sell", order_type="market", price=current_price, amount=close_qty, timestamp=latest_time, status="rejected"))
+                            db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side="sell", order_type="market", price=current_price, amount=close_qty, timestamp=latest_time, status="rejected", **_close_cols))
                             if mode in ["paper", "live"]:
                                 db.commit()
 

@@ -49,6 +49,16 @@ def run_migrations():
             if 'exchange' not in pos_cols:
                 conn.execute(text("ALTER TABLE positions ADD COLUMN exchange TEXT DEFAULT 'okx'"))
                 logger.info("Migration: added 'exchange' to positions")
+            # Derivatives support: existing rows are spot at 1x
+            if 'market_type' not in pos_cols:
+                conn.execute(text("ALTER TABLE positions ADD COLUMN market_type TEXT DEFAULT 'spot'"))
+                logger.info("Migration: added 'market_type' to positions")
+            if 'leverage' not in pos_cols:
+                conn.execute(text("ALTER TABLE positions ADD COLUMN leverage REAL DEFAULT 1"))
+                logger.info("Migration: added 'leverage' to positions")
+            if 'contracts' not in pos_cols:
+                conn.execute(text("ALTER TABLE positions ADD COLUMN contracts REAL"))
+                logger.info("Migration: added 'contracts' to positions")
 
         # ── orders ───────────────────────────────────────────────────────────────
         if "orders" in existing_tables:
@@ -56,6 +66,19 @@ def run_migrations():
             if 'exchange' not in ord_cols:
                 conn.execute(text("ALTER TABLE orders ADD COLUMN exchange TEXT DEFAULT 'okx'"))
                 logger.info("Migration: added 'exchange' to orders")
+            if 'market_type' not in ord_cols:
+                conn.execute(text("ALTER TABLE orders ADD COLUMN market_type TEXT DEFAULT 'spot'"))
+                logger.info("Migration: added 'market_type' to orders")
+            if 'reduce_only' not in ord_cols:
+                conn.execute(text("ALTER TABLE orders ADD COLUMN reduce_only INTEGER DEFAULT 0"))
+                logger.info("Migration: added 'reduce_only' to orders")
+
+        # ── exchange_keys ────────────────────────────────────────────────────────
+        if "exchange_keys" in existing_tables:
+            key_cols = {c['name'] for c in inspector.get_columns('exchange_keys')}
+            if 'market_type' not in key_cols:
+                conn.execute(text("ALTER TABLE exchange_keys ADD COLUMN market_type TEXT DEFAULT 'spot'"))
+                logger.info("Migration: added 'market_type' to exchange_keys")
 
         # ── candles ──────────────────────────────────────────────────────────────
         # The unique constraint must include 'exchange'. SQLite cannot alter

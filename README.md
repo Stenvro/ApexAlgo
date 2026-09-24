@@ -74,9 +74,10 @@ https://github.com/user-attachments/assets/25d03926-1e88-4749-88d4-b97b14ff9c2b
 - **Async Event-Driven Architecture** — FastAPI backend with concurrent bot management via asyncio
 - **Multi-Exchange Market Data** — universal REST polling via CCXT; each `(exchange, symbol, timeframe)` gets its own independent polling stream
 - **CCXT Integration** — exchange-agnostic order execution with market precision handling
+- **Perpetual swaps with leverage** — a bot trades spot or USDT/USDC-settled perpetuals (long-only, 1–10×, isolated or cross margin); backtest, forward test and live share the same margin/liquidation model, and spot bots are untouched
 
 ### Multi-Exchange Support
-- **7 Exchanges out of the box** — OKX, Binance, Bitvavo, Coinbase, Crypto.com, Kraken, KuCoin
+- **13 Exchanges out of the box** — OKX, Binance, Bitvavo, Coinbase, Crypto.com, Kraken, KuCoin, Bybit, Gate, Bitget, MEXC, HTX, BingX; perpetual swaps on nine of them
 - **Isolated data streams** — bots on different exchanges poll independently and store candles separately; no cross-exchange data mixing
 - **Exchange Registry** — centralized `exchange_registry.py` handles per-exchange config (OKX EU hostname, passphrase exchanges, sandbox modes)
 - **Automatic migration** — existing databases are upgraded non-destructively on startup; all historical data is preserved
@@ -517,23 +518,29 @@ Click **Duplicate** on any stopped bot card to create a clone with `(copy)` appe
 
 ## Supported Exchanges
 
-| Exchange | Passphrase | Sandbox | Notes |
-| :--- | :--- | :--- | :--- |
-| OKX | Yes | Yes | EU hostname (eea.okx.com) |
-| Binance | No | Yes | |
-| Bitvavo | No | No | EU exchange |
-| Coinbase | No | No | |
-| Crypto.com | No | Yes | UAT environment |
-| Kraken | No | No | |
-| KuCoin | Yes | No | |
-| Bybit | No | Yes | testnet.bybit.com |
-| Gate | No | Yes | testnet.gate.io |
-| Bitget | Yes | Yes | Demo trading (request header) |
-| MEXC | No | No | |
-| HTX | No | No | |
-| BingX | No | Yes | VST demo trading |
+| Exchange | Passphrase | Spot sandbox | Perpetual swaps | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| OKX | Yes | Yes | up to 10× (sandbox) | EU hostname (eea.okx.com); net (one-way) position mode |
+| Binance | No | Yes | up to 10× (sandbox) | USDⓈ-M futures, one-way position mode |
+| Bitvavo | No | No | — | EU exchange |
+| Coinbase | No | No | — | |
+| Crypto.com | No | Yes | — | UAT environment |
+| Kraken | No | No | up to 5× (demo) | Kraken Futures uses its own keys (futures.kraken.com / demo-futures.kraken.com) |
+| KuCoin | Yes | No | up to 10× | KuCoin Futures uses its own keys (Futures → API management) |
+| Bybit | No | Yes | up to 10× (testnet) | Unified trading account, one-way position mode |
+| Gate | No | Yes | up to 10× (testnet) | |
+| Bitget | Yes | Yes | up to 10× (demo) | USDT-M futures, one-way position mode |
+| MEXC | No | No | — | Futures API is closed to the public |
+| HTX | No | No | up to 10× | |
+| BingX | No | Yes | up to 10× (demo) | Perpetual futures, one-way position mode |
 
 Adding another CCXT-compatible exchange is one `ExchangeSpec` entry in `backend/core/exchange_registry.py`; the key form, the data manager and the builder read the list from `GET /api/keys/exchanges`.
+
+### Perpetual swaps
+
+An API key is bound to one market: save a second key with **Market: Perpetual swaps** for derivatives (the same exchange login, with futures/derivatives trade permission; Kraken and KuCoin issue separate futures keys). A bot on a swap key trades the `BASE/QUOTE:SETTLE` symbols (`BTC/USDT:USDT`) — only USDT/USDC-settled linear perpetuals, long-only in this release — with the leverage and margin mode set in the builder's Exchange Routing block (1–10×, isolated by default). The engine confirms leverage and margin mode on the exchange before the first order and refuses to start when that fails; on start-up, open swap positions are reconciled against `fetch_positions` instead of the wallet.
+
+Economics are identical across backtest, forward test and live: an entry locks `notional / leverage` plus fees, PnL is on the full notional, and a position whose candle low reaches `entry × (1 − (1 − 0.5%) / leverage)` is liquidated for its margin (`liquidation` in the exit list, `liquidations` in the backtest summary). Funding payments are **not** modelled (`funding: "ignored"` in the summary). `Max Order Value` caps the notional, i.e. margin × leverage. Exchanges without a swap testnet (KuCoin, HTX) can only forward test or trade real money.
 
 ### Historical data per exchange
 

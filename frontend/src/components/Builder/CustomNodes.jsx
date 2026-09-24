@@ -1,7 +1,7 @@
 import React from 'react';
 import { Handle, Position } from 'reactflow';
 import { useIndicators } from './indicatorConfig';
-import { useExchanges } from '../../api/exchanges';
+import { useExchanges, marketCaps } from '../../api/exchanges';
 import { DEFAULT_PAIR, parsePairs } from './pairs';
 
 // All known timeframes with display labels
@@ -115,9 +115,10 @@ export const BotConfigNode = ({ id, data }) => (
 );
 
 // Execution mode + go-live checklist. `data.liveContext` is pushed in by the
-// builder: { keyName, exchange, isSandbox, entryFee } — null key = no
-// exchange orders possible, so the "exchange" option is disabled rather than
-// silently saving a bot that would fall back to forward test at start.
+// builder: { keyName, exchange, isSandbox, entryFee, marketType, leverage,
+// marginMode } — null key = no exchange orders possible, so the "exchange"
+// option is disabled rather than silently saving a bot that would fall back
+// to forward test at start.
 const ExecutionModeSection = ({ id, data }) => {
   const ctx = data.liveContext || {};
   const hasKey = !!ctx.keyName;
@@ -126,10 +127,16 @@ const ExecutionModeSection = ({ id, data }) => {
   const isLiveMoney = wantsExchange && hasKey && !ctx.isSandbox;
   const cap = Number(data.maxOrderValue) || 0;
   const fee = Number(ctx.entryFee);
+  const isSwap = ctx.marketType === 'swap';
+  const lev = isSwap ? (Number(ctx.leverage) || 1) : 1;
+  // Isolated-margin liquidation sits roughly one margin's worth of adverse
+  // move away: −100%/leverage on the notional (maintenance margin ignored)
+  const liqPct = Math.round(100 / lev);
   const checks = [
     { ok: hasKey, label: hasKey ? `Key "${ctx.keyName}" on ${String(ctx.exchange || '').toUpperCase()} (${ctx.isSandbox ? 'sandbox → paper' : 'real → live'})` : 'Select an API key in the Exchange Routing block' },
-    { ok: cap > 0, label: cap > 0 ? `Max order value $${cap} caps every order` : 'Set Max Order Value USD above (required for live orders)' },
+    { ok: cap > 0, label: cap > 0 ? `Max order value $${cap} caps every order${isSwap ? ' (notional = margin × leverage)' : ''}` : `Set Max Order Value USD above (required for live orders${isSwap ? '; caps the notional, i.e. margin × leverage' : ''})` },
     { ok: fee > 0, label: fee > 0 ? `Entry fee ${fee}% modelled` : 'Entry fee is 0% — the backtest ignores what the exchange will charge' },
+    ...(isSwap ? [{ ok: lev <= 3, label: `Perpetuals ${lev}× ${ctx.marginMode || 'isolated'} · liquidation ≈ −${liqPct}% from entry · funding not modelled` }] : []),
   ];
   return (
     <div className={`pt-2 border-t ${isLiveMoney ? 'border-accent/40' : 'border-border'}`}>
@@ -171,6 +178,10 @@ export const WhitelistNode = ({ id, data }) => {
   const listed = market?.known ? new Set(market.symbols) : null;
   const unknown = listed ? pairs.filter(p => !listed.has(p)) : [];
   const exch = String(market?.exchange || '').toUpperCase();
+  // Perpetual swaps use ccxt's BASE/QUOTE:SETTLE form; a spot pair on a swap
+  // bot (or vice versa) is flagged before the validator would reject it
+  const isSwap = market?.marketType === 'swap';
+  const wrongForm = market ? pairs.filter(p => p.includes(':') !== isSwap) : [];
   return (
     <div className={`bg-raised/90 backdrop-blur-xl border rounded-xl shadow-lg min-w-[260px] max-w-[340px] ${unknown.length ? 'border-danger' : 'border-warn'}`}>
       <div className="bg-warn/10 px-3 py-2 border-b border-warn/30 flex justify-between items-center">
@@ -181,7 +192,7 @@ export const WhitelistNode = ({ id, data }) => {
         <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Tradeable Pairs (Comma Separated)</label>
         <textarea
           className={`w-full bg-inset border text-text text-xs rounded-md p-2 nodrag outline-none min-h-[60px] resize-none font-num ${unknown.length ? 'border-danger focus:border-danger' : 'border-border focus:border-warn'}`}
-          placeholder="BTC/USDT, ETH/USDT, SOL/USDT"
+          placeholder={isSwap ? 'BTC/USDT:USDT, ETH/USDT:USDT' : 'BTC/USDT, ETH/USDT, SOL/USDT'}
           value={data.pairs !== undefined ? data.pairs : DEFAULT_PAIR}
           onChange={(e) => data.onChange(id, 'pairs', e.target.value)}
           onBlur={(e) => data.onChange(id, 'pairs', parsePairs(e.target.value).join(', '))}
@@ -200,11 +211,15 @@ export const WhitelistNode = ({ id, data }) => {
             })}
           </div>
         )}
-        <span className={`text-3xs block ${unknown.length ? 'text-danger' : 'text-muted'}`}>
-          {unknown.length
+        <span className={`text-3xs block ${unknown.length || wrongForm.length ? 'text-danger' : 'text-muted'}`}>
+          {wrongForm.length
+            ? (isSwap
+                ? `${wrongForm.join(', ')}: perpetual swaps use the BASE/QUOTE:SETTLE form (e.g. BTC/USDT:USDT).`
+                : `${wrongForm.join(', ')} are perpetual swaps — a spot bot needs BASE/QUOTE pairs (or pick a perps market in the routing block).`)
+            : unknown.length
             ? `${unknown.join(', ')} not listed on ${exch} — the bot cannot start with these.`
             : listed
-              ? `${pairs.length} pair${pairs.length === 1 ? '' : 's'} · all listed on ${exch}`
+              ? `${pairs.length} ${isSwap ? 'perpetual' : 'pair'}${pairs.length === 1 ? '' : 's'} · all listed on ${exch}${isSwap ? ' perps' : ''}`
               : (market ? `Could not load ${exch} markets — pairs are checked when the bot starts.` : 'Checked against the exchange in the routing block.')}
         </span>
       </div>
@@ -242,6 +257,21 @@ export const ApiKeyNode = ({ id, data }) => {
   const selectedKey = data.apiKeyName || '';
   const keyRecord = data.availableKeys?.find(k => k.name === selectedKey);
   const derivedExchange = keyRecord?.exchange || null;
+  // A key is bound to one market on the backend, so with a key selected the
+  // market is read-only; without one the block picks it (swap only where the
+  // registry says the data exchange has perps)
+  const exchangeId = derivedExchange || data.dataExchange || 'okx';
+  const keyMarket = keyRecord ? (keyRecord.market_type || 'spot') : null;
+  const marketType = keyMarket || data.marketType || 'spot';
+  const swapCaps = marketCaps(exchangeId, 'swap');
+  const hasSwap = !!swapCaps;
+  const isSwap = marketType === 'swap';
+  const maxLev = Math.max(1, Number(swapCaps?.max_leverage) || 1);
+  const leverage = Number(data.leverage) || 1;
+  React.useEffect(() => {
+    // Exchange or key changed underneath a swap choice the new one cannot serve
+    if (!keyMarket && data.marketType === 'swap' && !hasSwap) data.onChange(id, 'marketType', 'spot');
+  }, [keyMarket, data.marketType, hasSwap, id]); // eslint-disable-line react-hooks/exhaustive-deps -- data.onChange is stable
 
   return (
     <div className="bg-raised/90 backdrop-blur-xl border border-info rounded-xl shadow-lg min-w-[260px]">
@@ -262,7 +292,7 @@ export const ApiKeyNode = ({ id, data }) => {
         {derivedExchange ? (
           <div className="flex items-center space-x-2 px-1">
             <div className="w-1.5 h-1.5 rounded-full bg-success shadow-[0_0_6px_var(--color-success)]" />
-            <span className="text-2xs text-muted uppercase font-bold">Exchange: <span className="text-success">{derivedExchange.toUpperCase()}</span></span>
+            <span className="text-2xs text-muted uppercase font-bold">Exchange: <span className="text-success">{derivedExchange.toUpperCase()}</span>{isSwap && <span className="text-warn"> · Perps</span>}</span>
           </div>
         ) : (
           <div>
@@ -273,6 +303,47 @@ export const ApiKeyNode = ({ id, data }) => {
               ))}
             </select>
           </div>
+        )}
+        <div>
+          <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Market</label>
+          <select
+            className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-info outline-none disabled:opacity-60"
+            value={marketType}
+            disabled={!!keyMarket || !hasSwap}
+            onChange={(e) => data.onChange(id, 'marketType', e.target.value)}
+          >
+            <option value="spot">Spot</option>
+            <option value="swap" disabled={!hasSwap}>Perpetual swaps (USDT/USDC-settled)</option>
+          </select>
+          <span className="text-3xs text-muted block mt-1">
+            {keyMarket
+              ? `Follows the key — "${selectedKey}" is a ${keyMarket === 'swap' ? 'perpetuals' : 'spot'} key.`
+              : hasSwap ? 'Perps trade the BASE/QUOTE:SETTLE form (e.g. BTC/USDT:USDT).' : `${exchangeId.toUpperCase()} has spot only in ApexAlgo.`}
+          </span>
+        </div>
+        {isSwap && (
+          <div className="flex space-x-2">
+            <div className="w-1/2">
+              <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Leverage</label>
+              <input type="number" step="1" min="1" max={maxLev}
+                className={`w-full bg-inset border text-xs rounded-md p-2 nodrag outline-none font-num text-center ${leverage > 3 ? 'border-warn text-warn focus:border-warn' : 'border-border text-accent focus:border-info'}`}
+                value={data.leverage !== undefined && data.leverage !== '' ? data.leverage : 1}
+                onChange={(e) => data.onChange(id, 'leverage', e.target.value === '' ? '' : Math.min(maxLev, Math.max(1, parseInt(e.target.value) || 1)))}
+              />
+            </div>
+            <div className="w-1/2">
+              <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Margin mode</label>
+              <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-info outline-none" value={data.marginMode || 'isolated'} onChange={(e) => data.onChange(id, 'marginMode', e.target.value)}>
+                <option value="isolated">Isolated</option>
+                <option value="cross">Cross</option>
+              </select>
+            </div>
+          </div>
+        )}
+        {isSwap && (
+          <span className="text-3xs text-muted block">
+            Up to {maxLev}× on {exchangeId.toUpperCase()}. {leverage > 3 ? `${leverage}× liquidates after a ≈ −${Math.round(100 / leverage)}% move — ` : ''}Position size = margin × leverage; funding payments are not modelled.
+          </span>
         )}
       </div>
     </div>

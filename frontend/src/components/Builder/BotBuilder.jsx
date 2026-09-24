@@ -105,7 +105,10 @@ function rebuildLayoutFromSettings(settings, updateNodeData, deleteNode) {
         nodes.push({ id: 'rebuilt_apikey', type: 'apiKey', position: { x: ctxX, y: ctxY },
             data: { onChange: updateNodeData, onDelete: deleteNode,
                 apiKeyName: settings.api_key_name || null,
-                dataExchange: settings.data_exchange || 'okx' } });
+                dataExchange: settings.data_exchange || 'okx',
+                marketType: settings.market_type || 'spot',
+                leverage: settings.leverage ?? 1,
+                marginMode: settings.margin_mode || 'isolated' } });
     }
 
     // ── AREA 2: Strategy logic ──
@@ -314,7 +317,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
             { id: getId(), type: 'botConfig', position: { x: 50, y: 50 }, data: { onChange: updateNodeData, onDelete: deleteNode, botName: editingBot ? editingBot.name : 'Apex Strategy Alpha', timeframe: editingBot?.settings?.timeframe || '1m', executionMode: 'paper', maxPositions: 1, maxPositionsScope: 'per_pair', cooldownTrades: 0, cooldownCandles: 0 } },
             { id: getId(), type: 'whitelist', position: { x: 470, y: 50 }, data: { onChange: updateNodeData, onDelete: deleteNode, pairs: editingBot?.settings?.symbols?.join(', ') || editingBot?.settings?.symbol || DEFAULT_PAIR } },
             { id: getId(), type: 'backtest', position: { x: 470, y: 320 }, data: { onChange: updateNodeData, onDelete: deleteNode, runOnStart: true, capital: 1000, lookback: 150 } },
-            { id: getId(), type: 'apiKey', position: { x: 470, y: 610 }, data: { onChange: updateNodeData, onDelete: deleteNode, apiKeyName: null, dataExchange: 'okx' } }
+            { id: getId(), type: 'apiKey', position: { x: 470, y: 610 }, data: { onChange: updateNodeData, onDelete: deleteNode, apiKeyName: null, dataExchange: 'okx', marketType: 'spot', leverage: 1, marginMode: 'isolated' } }
         ]);
         initRef.current = true;
     }
@@ -334,6 +337,11 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   const activeApiKeyNode = nodes.find(n => n.type === 'apiKey');
   const activeApiKeyName = activeApiKeyNode?.data.apiKeyName;
   const activeDataExchange = activeApiKeyNode?.data.dataExchange;
+  // Market type: the linked key decides (a key is bound to one market),
+  // otherwise the routing block's own choice. Swap symbols are a separate
+  // market list (BASE/QUOTE:SETTLE).
+  const activeKeyMarketType = activeApiKeyName ? (availableKeys?.find(k => k.name === activeApiKeyName)?.market_type || null) : null;
+  const activeMarketType = activeKeyMarketType || activeApiKeyNode?.data.marketType || 'spot';
   useEffect(() => {
       if (!initRef.current) return;
       let exchange = activeDataExchange || 'okx';
@@ -345,11 +353,11 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
           setSupportedTimeframes(res.data.timeframes);
       }).catch(() => setSupportedTimeframes(null));
       let cancelled = false;
-      apiClient.get(`/api/data/symbols/${exchange}`).then(res => {
-          if (!cancelled) setKnownSymbols({ exchange, symbols: res.data.symbols || [], known: !!res.data.known });
-      }).catch(() => { if (!cancelled) setKnownSymbols({ exchange, symbols: [], known: false }); });
+      apiClient.get(`/api/data/symbols/${exchange}`, { params: { market_type: activeMarketType } }).then(res => {
+          if (!cancelled) setKnownSymbols({ exchange, marketType: activeMarketType, symbols: res.data.symbols || [], known: !!res.data.known });
+      }).catch(() => { if (!cancelled) setKnownSymbols({ exchange, marketType: activeMarketType, symbols: [], known: false }); });
       return () => { cancelled = true; };
-  }, [activeApiKeyName, activeDataExchange, availableKeys]);
+  }, [activeApiKeyName, activeDataExchange, activeMarketType, availableKeys]);
 
   // Pass supported timeframes to config node
   useEffect(() => {
@@ -378,16 +386,20 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   const liveKeySandbox = !!activeKeyRecord?.is_sandbox;
   const entryActionNode = nodes.find(n => n.type === 'action' && n.data.actionType === 'buy');
   const entryFee = entryActionNode ? (entryActionNode.data.fee === '' || entryActionNode.data.fee === undefined ? 0.1 : Number(entryActionNode.data.fee)) : null;
+  const liveLeverage = activeMarketType === 'swap' ? (Number(activeApiKeyNode?.data.leverage) || 1) : 1;
+  const liveMarginMode = activeApiKeyNode?.data.marginMode || 'isolated';
   useEffect(() => {
       if (!initRef.current) return;
-      const liveContext = { keyName: liveKeyName, exchange: liveKeyExchange, isSandbox: liveKeySandbox, entryFee };
+      const liveContext = { keyName: liveKeyName, exchange: liveKeyExchange, isSandbox: liveKeySandbox, entryFee,
+                            marketType: activeMarketType, leverage: liveLeverage, marginMode: liveMarginMode };
       setNodes(nds => nds.map(n => {
           if (n.type !== 'botConfig') return n;
           const cur = n.data.liveContext;
-          if (cur && cur.keyName === liveContext.keyName && cur.exchange === liveContext.exchange && cur.isSandbox === liveContext.isSandbox && cur.entryFee === liveContext.entryFee) return n;
+          if (cur && cur.keyName === liveContext.keyName && cur.exchange === liveContext.exchange && cur.isSandbox === liveContext.isSandbox && cur.entryFee === liveContext.entryFee
+              && cur.marketType === liveContext.marketType && cur.leverage === liveContext.leverage && cur.marginMode === liveContext.marginMode) return n;
           return { ...n, data: { ...n.data, liveContext } };
       }));
-  }, [liveKeyName, liveKeyExchange, liveKeySandbox, entryFee, setNodes]);
+  }, [liveKeyName, liveKeyExchange, liveKeySandbox, entryFee, activeMarketType, liveLeverage, liveMarginMode, setNodes]);
 
   // Esc asks to close (same dirty-check as the buttons); a browser reload with
   // unsaved work gets the native "leave page?" prompt.
@@ -433,7 +445,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
 
   const getDefaultData = useCallback((type) => {
       const defaultData = { onChange: updateNodeData, onDelete: deleteNode };
-      if (type === 'apiKey') defaultData.availableKeys = availableKeys;
+      if (type === 'apiKey') { defaultData.availableKeys = availableKeys; defaultData.apiKeyName = null; defaultData.dataExchange = 'okx'; defaultData.marketType = 'spot'; defaultData.leverage = 1; defaultData.marginMode = 'isolated'; }
       if (type === 'indicator') { defaultData.indicator = 'rsi'; defaultData.params = {length: 14}; defaultData.outputIdx = 0; }
       if (type === 'priceData') { defaultData.priceType = 'close'; defaultData.offset = 0; }
       if (type === 'condition') { defaultData.operator = '>'; defaultData.rightValue = ''; }
@@ -549,13 +561,25 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         const apiKeyName = apiKeyNode?.data.apiKeyName || null;
         const apiKeyRecord = apiKeyName ? availableKeys?.find(k => k.name === apiKeyName) : null;
         const dataExchange = apiKeyRecord?.exchange || apiKeyNode?.data.dataExchange || 'okx';
+        // The key's market wins; leverage/margin mode only matter on swaps
+        // (the backend strips the defaults from the config fingerprint)
+        const marketType = apiKeyRecord?.market_type || apiKeyNode?.data.marketType || 'spot';
+        const leverage = marketType === 'swap' ? (parseInt(apiKeyNode?.data.leverage) || 1) : 1;
+        const marginMode = marketType === 'swap' ? (apiKeyNode?.data.marginMode || 'isolated') : 'isolated';
 
         if (!configNode) return showError("Missing 'Main Configuration' block.");
         if (!whitelistNode) return showError("Missing 'Asset Whitelist' block.");
 
         const symbolsList = parsePairs(whitelistNode.data.pairs);
         if (symbolsList.length === 0) return showError("Whitelist must contain at least one pair.");
-        if (knownSymbols?.known && knownSymbols.exchange === dataExchange) {
+        if (marketType === 'swap') {
+            const spotPairs = symbolsList.filter(sym => !sym.includes(':'));
+            if (spotPairs.length) return showError(`Perpetual swaps use the BASE/QUOTE:SETTLE form (e.g. BTC/USDT:USDT); fix ${spotPairs.join(', ')} in the whitelist.`);
+        } else {
+            const swapPairs = symbolsList.filter(sym => sym.includes(':'));
+            if (swapPairs.length) return showError(`${swapPairs.join(', ')} are perpetual swaps; a spot bot needs BASE/QUOTE pairs (or pick a perps market in the Exchange Routing block).`);
+        }
+        if (knownSymbols?.known && knownSymbols.exchange === dataExchange && (knownSymbols.marketType || 'spot') === marketType) {
             const listed = new Set(knownSymbols.symbols);
             const unknown = symbolsList.filter(sym => !listed.has(sym));
             if (unknown.length) return showError(`Not listed on ${dataExchange.toUpperCase()}: ${unknown.join(', ')}. Fix the whitelist before saving.`);
@@ -598,6 +622,9 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
                 backtest_lookback: backtestNode ? (backtestNode.data.lookback || 150) : 150,
                 api_key_name: apiKeyName,
                 data_exchange: dataExchange,
+                market_type: marketType,
+                leverage,
+                margin_mode: marginMode,
                 trade_settings: {}, 
                 nodes: {},
                 ui_layout: {

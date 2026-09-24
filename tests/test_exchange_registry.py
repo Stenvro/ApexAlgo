@@ -50,6 +50,37 @@ def test_sandbox_rejected_where_ccxt_has_no_testnet():
     assert not reg.exchange_has_sandbox("mexc") and not reg.exchange_has_sandbox("kraken")
 
 
+def test_market_types_build_the_right_ccxt_class():
+    """Phase 2: every exchange has spot; swap only where listed, on the
+    derivatives class where ccxt has a separate one, with defaultType set."""
+    for ex_id, spec in reg.EXCHANGES.items():
+        assert "spot" in spec.markets, ex_id
+        for mt, caps in spec.markets.items():
+            assert hasattr(ccxt, caps.ccxt_id or ex_id), (ex_id, mt)
+            assert caps.max_leverage >= 1
+    assert reg.build_exchange("okx").options["defaultType"] == "spot"
+    assert reg.build_exchange("bybit").options["defaultType"] == "spot"  # ccxt's own default is swap
+    swap = reg.build_exchange("bybit", market_type="swap")
+    assert swap.id == "bybit" and swap.options["defaultType"] == "swap"
+    assert reg.build_exchange("kucoin", market_type="swap").id == "kucoinfutures"
+    assert reg.build_exchange("kraken", market_type="swap").id == "krakenfutures"
+    assert reg.build_exchange_for_symbol("bybit", "BTC/USDT:USDT").options["defaultType"] == "swap"
+    assert reg.build_exchange_for_symbol("bybit", "BTC/USDT").options["defaultType"] == "spot"
+    with pytest.raises(ValueError, match="no 'swap' market"):
+        reg.build_exchange("bitvavo", market_type="swap")
+    assert reg.market_caps("mexc", "swap") is None  # futures API closed to the public
+    assert reg.market_caps("kucoin", "swap").leverage_in_order is True
+    assert reg.exchange_has_sandbox("bybit", "swap") and reg.exchange_has_sandbox("kraken", "swap")
+    assert not reg.exchange_has_sandbox("htx", "swap") and not reg.exchange_has_sandbox("bitvavo", "swap")
+
+    class Key:
+        exchange, name, is_sandbox, api_key, api_secret, passphrase = "bybit", "k", False, "", "", None
+    spot_key, swap_key = Key(), Key()
+    swap_key.market_type = "swap"
+    assert reg._auth_key(spot_key)[3] == "spot" and reg._auth_key(swap_key)[3] == "swap"
+    assert reg._auth_key(spot_key) != reg._auth_key(swap_key)
+
+
 def test_exchanges_endpoint_mirrors_registry():
     r = TestClient(app).get("/api/keys/exchanges", headers=HEADERS)
     assert r.status_code == 200
@@ -64,3 +95,10 @@ def test_exchanges_endpoint_mirrors_registry():
         assert isinstance(row["has_sandbox"], bool)
     assert rows["bybit"]["has_sandbox"] is True and rows["bitget"]["has_sandbox"] is True
     assert rows["mexc"]["has_sandbox"] is False and rows["htx"]["has_sandbox"] is False
+    # Phase 2: market types per exchange mirror the spec
+    for ex_id, spec in reg.EXCHANGES.items():
+        assert set(rows[ex_id]["markets"]) == set(spec.markets), ex_id
+    assert rows["bitvavo"]["markets"].keys() == {"spot"}
+    assert rows["bybit"]["markets"]["swap"]["has_sandbox"] is True
+    assert rows["bybit"]["markets"]["swap"]["max_leverage"] >= 1
+    assert rows["kucoin"]["markets"]["swap"]["leverage_in_order"] is True

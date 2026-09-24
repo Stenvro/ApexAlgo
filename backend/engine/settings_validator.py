@@ -2,11 +2,16 @@ import logging
 import re
 from datetime import datetime
 
-from backend.core.exchange_registry import get_exchange_timeframes
+from backend.core.exchange_registry import exchange_spec, get_exchange_timeframes, market_caps
 from backend.engine.indicator_registry import get_spec
+from backend.engine.symbols import DEFAULT_MARGIN_MODE, DEFAULT_MARKET_TYPE, MARGIN_MODES, MARKET_TYPES, is_derivative
 
 logger = logging.getLogger("apexalgo.settings_validator")
-SYMBOL_PATTERN = re.compile(r'^[A-Z0-9]+/[A-Z0-9]+$')
+# BASE/QUOTE for spot, BASE/QUOTE:SETTLE for perpetual swaps
+SYMBOL_PATTERN = re.compile(r'^[A-Z0-9]+/[A-Z0-9]+(:[A-Z0-9]+)?$')
+# Above this the liquidation sits close enough to the entry that a normal
+# stop loss barely gets a chance — worth a warning, not a refusal
+LEVERAGE_WARN_ABOVE = 3
 MAX_PRICE_OFFSET = 500
 VALID_EXIT_TYPES = {'percentage', 'trailing', 'atr', 'fixed'}
 VALID_AMOUNT_TYPES = {'percentage', 'fixed'}
@@ -23,7 +28,7 @@ MAX_STREAK_LENGTH = 500
 LOOKBACK_MARGIN = 50
 
 
-def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dict:
+def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_market_type: str | None = None) -> dict:
     """Validate bot settings and return errors and warnings.
 
     Parameters
@@ -33,6 +38,9 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
     exchange_id : str, optional
         Resolved exchange ID for timeframe validation. Falls back to
         settings['data_exchange'] or 'okx' if not provided.
+    key_market_type : str, optional
+        Market type of the linked API key; a key is bound to one market,
+        so a bot on another market type is refused.
 
     Returns dict with 'errors' (list of blocking issues) and
     'warnings' (list of non-blocking issues).
@@ -40,32 +48,78 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
     errors = []
     warnings = []
     nodes = settings.get("nodes", {})
+    eid = exchange_id or settings.get("data_exchange", "okx")
+
+    # Market type (phase 2): spot or perpetual swap; absent = spot for every
+    # pre-existing bot. Symbol form, leverage and margin mode depend on it.
+    market_type = str(settings.get("market_type") or DEFAULT_MARKET_TYPE).strip().lower()
+    if market_type not in MARKET_TYPES:
+        errors.append(f"Invalid market_type '{settings.get('market_type')}'. Use one of: {', '.join(MARKET_TYPES)}.")
+        market_type = DEFAULT_MARKET_TYPE
+    elif "market_type" in settings:
+        settings["market_type"] = market_type
+    if key_market_type and str(key_market_type).lower() != market_type:
+        errors.append(f"API key '{settings.get('api_key_name')}' is a {key_market_type} key but the bot trades {market_type}. "
+                      f"Link a {market_type} key or change the bot's market type.")
+    if exchange_spec(eid) is not None and market_caps(eid, market_type) is None:
+        errors.append(f"{exchange_spec(eid).name} has no '{market_type}' market in ApexAlgo.")
+    derivative = market_type != "spot"
+
+    def _check_symbol(raw) -> str:
+        norm = str(raw).strip().upper().replace('-', '/')
+        if not SYMBOL_PATTERN.match(norm):
+            errors.append(f"Invalid symbol '{raw}'. Use BASE/QUOTE, e.g. BTC/USDC" + (" (BASE/QUOTE:SETTLE for swaps, e.g. BTC/USDT:USDT)." if derivative else "."))
+        elif derivative and not is_derivative(norm):
+            errors.append(f"Symbol '{raw}' is a spot pair; a swap bot needs the BASE/QUOTE:SETTLE form, e.g. {norm}:{norm.split('/')[-1]}.")
+        elif not derivative and is_derivative(norm):
+            errors.append(f"Symbol '{raw}' is a perpetual swap; a spot bot needs BASE/QUOTE, e.g. {norm.split(':')[0]} (or set market_type to 'swap').")
+        return norm
 
     # Symbols — normalize and validate BASE/QUOTE format, write back normalized values
     symbols = settings.get("symbols", [])
     if symbols:
-        normalized_symbols = []
-        for sym in symbols:
-            norm = str(sym).strip().upper().replace('-', '/')
-            if not SYMBOL_PATTERN.match(norm):
-                errors.append(f"Invalid symbol '{sym}'. Use BASE/QUOTE, e.g. BTC/USDC.")
-            normalized_symbols.append(norm)
-        settings["symbols"] = normalized_symbols
+        settings["symbols"] = [_check_symbol(sym) for sym in symbols]
     else:
         if settings.get("symbol"):
             warnings.append("Using single 'symbol' field; consider using 'symbols' list.")
         else:
             errors.append("No trading symbols configured.")
     if settings.get("symbol"):
-        norm = str(settings["symbol"]).strip().upper().replace('-', '/')
-        if not SYMBOL_PATTERN.match(norm):
-            errors.append(f"Invalid symbol '{settings['symbol']}'. Use BASE/QUOTE, e.g. BTC/USDC.")
-        settings["symbol"] = norm
+        settings["symbol"] = _check_symbol(settings["symbol"])
+
+    # Leverage and margin mode only mean something on a swap
+    lev_raw = settings.get("leverage")
+    if lev_raw not in (None, ""):
+        try:
+            lev = float(lev_raw)
+        except (ValueError, TypeError):
+            lev = None
+            errors.append(f"leverage '{lev_raw}' is not a valid number.")
+        if lev is not None:
+            if lev != int(lev) or lev < 1:
+                errors.append("leverage must be a whole number >= 1.")
+            elif derivative:
+                caps = market_caps(eid, market_type)
+                if caps is not None and lev > caps.max_leverage:
+                    errors.append(f"leverage {int(lev)}x exceeds the {caps.max_leverage}x ApexAlgo allows on {exchange_spec(eid).name} swaps.")
+                elif lev > LEVERAGE_WARN_ABOVE:
+                    warnings.append(f"leverage {int(lev)}x: the estimated liquidation sits about {100 / lev:.0f}% below the entry — "
+                                    "a stop loss that is not tighter than that never fires.")
+            elif lev > 1:
+                errors.append(f"leverage {int(lev)}x has no effect on a spot bot; set it to 1 or switch market_type to 'swap'.")
+    mm_raw = settings.get("margin_mode")
+    if mm_raw not in (None, ""):
+        mm = str(mm_raw).strip().lower()
+        if mm not in MARGIN_MODES:
+            errors.append(f"Invalid margin_mode '{mm_raw}'. Use one of: {', '.join(MARGIN_MODES)}.")
+        else:
+            settings["margin_mode"] = mm
+    if derivative and not settings.get("margin_mode"):
+        settings["margin_mode"] = DEFAULT_MARGIN_MODE
 
     # Timeframe — validated against the exchange's supported timeframes
     tf = settings.get("timeframe")
     if tf:
-        eid = exchange_id or settings.get("data_exchange", "okx")
         supported = get_exchange_timeframes(eid)
         if supported and tf not in supported:
             errors.append(f"Exchange '{eid}' does not support timeframe '{tf}'. Supported: {', '.join(sorted(supported.keys()))}")
@@ -275,7 +329,7 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
         except (ValueError, TypeError):
             max_order_value = 0
         if max_order_value <= 0:
-            errors.append("Live execution requires max_order_value > 0 as a safety cap.")
+            errors.append("Live execution requires max_order_value > 0 as a safety cap" + (" (on the notional, i.e. margin x leverage)." if derivative else "."))
         else:
             # The engine clamps every live entry to the cap, so a cap below
             # the configured size silently turns the strategy into a smaller
@@ -285,6 +339,9 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
                 planned = float(amount_value or 0)
                 if amount_type == "percentage":
                     planned = capital * planned / 100.0
+                if derivative:
+                    # The cap is on the notional; the entry is margin x leverage
+                    planned *= max(float(settings.get("leverage") or 1), 1.0)
                 if planned > max_order_value > 0:
                     warnings.append(
                         f"max_order_value ({max_order_value:,.0f}) is below the planned entry size "

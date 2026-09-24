@@ -276,6 +276,11 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
               : <Badge variant="neutral" dot>Stopped</Badge>}
             <ModeBadge mode={bot.execution_mode || (isApiExecutionOn ? 'live' : 'forward_test')} />
             {isBacktestOn && <Badge variant="neutral">+ Backtest</Badge>}
+            {bot.settings?.market_type === 'swap' && (
+              <Badge variant="warn" title={`Perpetual swaps at ${Number(bot.settings?.leverage) || 1}x ${bot.settings?.margin_mode || 'isolated'} margin — liquidation is modelled, funding is not`}>
+                Perps {Number(bot.settings?.leverage) || 1}×
+              </Badge>
+            )}
           </div>
 
           {/* Metrics row */}

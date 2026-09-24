@@ -151,11 +151,17 @@ export default function Settings() {
   const [apiSecret, setApiSecret] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [isSandbox, setIsSandbox] = useState(true);
+  // A key is bound to one market type: spot or perpetual swaps (USDT-margined)
+  const [marketType, setMarketType] = useState('spot');
 
   const exchangeInfo = exchanges.find(e => e.id === selectedExchange) || exchanges[0];
   const exchangeNames = useMemo(() => Object.fromEntries(exchanges.map(e => [e.id, e.name])), [exchanges]);
   const needsPassphrase = !!exchangeInfo.needs_passphrase;
-  const hasSandbox = !!exchangeInfo.has_sandbox;
+  const markets = exchangeInfo.markets || { spot: { has_sandbox: !!exchangeInfo.has_sandbox } };
+  const marketInfo = markets[marketType] || markets.spot || {};
+  const hasSwap = !!markets.swap;
+  // Sandbox availability differs per market (Binance: spot testnet ≠ futures testnet)
+  const hasSandbox = marketType === 'spot' ? !!exchangeInfo.has_sandbox : !!marketInfo.has_sandbox;
 
   const [swapModal, setSwapModal] = useState(null);
   const [swapFrom, setSwapFrom] = useState('USDC');
@@ -184,6 +190,10 @@ export default function Settings() {
   useEffect(() => {
     if (!hasSandbox) setIsSandbox(false); // eslint-disable-line react-hooks/set-state-in-effect -- derived from exchange capability
   }, [hasSandbox]);
+  // Spot-only exchange selected → the market type falls back to spot
+  useEffect(() => {
+    if (!hasSwap && marketType !== 'spot') setMarketType('spot'); // eslint-disable-line react-hooks/set-state-in-effect -- derived from exchange capability
+  }, [hasSwap, marketType]);
 
   const handleSave = async (e) => {
     e.preventDefault();
@@ -196,6 +206,7 @@ export default function Settings() {
         api_secret: apiSecret.trim(),
         passphrase: needsPassphrase ? passphrase : '',
         is_sandbox: hasSandbox ? isSandbox : false,
+        market_type: marketType,
       });
       toast.success(`Key '${keyName.trim()}' verified and securely stored.`);
       setKeyName('');
@@ -496,6 +507,7 @@ export default function Settings() {
                             ? <Badge variant="success" dot>Connected</Badge>
                             : <Badge variant="danger" dot pulse>Error</Badge>}
                           <Badge variant={k.is_sandbox ? 'info' : 'accent'}>{k.is_sandbox ? 'Sandbox' : 'Live'}</Badge>
+                          {k.market_type === 'swap' && <Badge variant="warn" title="Perpetual swaps (USDT-margined) — bots on this key trade with leverage">Perps</Badge>}
                         </div>
                         <div className="flex items-center gap-2 flex-wrap mt-1 text-2xs text-muted">
                           <span className="uppercase font-bold tracking-wider">{exchangeNames[k.exchange] || k.exchange}</span>
@@ -578,6 +590,18 @@ export default function Settings() {
                 <option key={ex.id} value={ex.id}>{ex.name}</option>
               ))}
             </Select>
+            <Select
+              label="Market"
+              value={marketType}
+              onChange={e => setMarketType(e.target.value)}
+              disabled={!hasSwap}
+              hint={hasSwap
+                ? (marketType === 'swap' ? `USDT-margined perpetuals, up to ${marketInfo.max_leverage || 1}× in ApexAlgo. Bots on this key trade swaps only.` : 'Spot wallet. A key is bound to one market — add a second key for perpetuals.')
+                : `${exchangeInfo.name}: spot only in ApexAlgo.`}
+            >
+              <option value="spot">Spot</option>
+              {hasSwap && <option value="swap">Perpetual swaps</option>}
+            </Select>
             <Input
               label="Connection Name"
               required
@@ -654,12 +678,13 @@ export default function Settings() {
                 <p className="text-xs text-muted mt-1">Create an API key in your {exchangeInfo.name} account settings.</p>
               )}
               <ul className="mt-2 space-y-1 text-2xs text-text-secondary">
-                <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Enable <b>read</b> + <b>spot trade</b> permissions</li>
+                <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Enable <b>read</b> + <b>{marketType === 'swap' ? 'futures/derivatives trade' : 'spot trade'}</b> permissions</li>
+                {marketType === 'swap' && marketInfo.note && <li className="flex items-start gap-1.5"><span className="text-info mt-0.5">{IconCheck}</span><span>{marketInfo.note}</span></li>}
                 <li className="flex items-center gap-1.5"><span className="text-danger">{IconBlock}</span>Leave <b>withdrawal</b> disabled — the bot never needs it</li>
                 <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Restrict the key to this machine's IP if the exchange allows it</li>
                 {needsPassphrase && <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Note the passphrase you set — it is required here</li>}
                 {exchangeInfo.sandbox_note && <li className="flex items-start gap-1.5"><span className="text-info mt-0.5">{IconCheck}</span><span>{exchangeInfo.sandbox_note}</span></li>}
-                {!hasSandbox && <li className="flex items-start gap-1.5"><span className="text-warn mt-0.5">{IconBlock}</span><span>No testnet: use paper mode in the bot (simulated fills on real prices) before enabling live orders.</span></li>}
+                {!hasSandbox && <li className="flex items-start gap-1.5"><span className="text-warn mt-0.5">{IconBlock}</span><span>No testnet{marketType === 'swap' ? ' for perpetuals' : ''}: use forward test in the bot (simulated fills on real prices) before enabling live orders.</span></li>}
               </ul>
             </div>
             <div className="border-t border-border pt-3">

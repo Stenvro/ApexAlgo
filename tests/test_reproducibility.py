@@ -207,7 +207,7 @@ def test_verify_data_route_uses_the_last_window_and_updates_the_summary(db, monk
     bot = _new_bot(db)
     bot, summary = _run(db, bot)
     exch = ExchangeReplay(rows, {rows[-5].timestamp: {"high": rows[-5].high * 1.02}})
-    monkeypatch.setattr(bots_router, "build_exchange", lambda *_a, **_k: exch)
+    monkeypatch.setattr(bots_router, "build_exchange_for_symbol", lambda *_a, **_k: exch)
     client = TestClient(app)
     headers = {"X-API-Key": os.environ["MASTER_API_KEY"]}
 

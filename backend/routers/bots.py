@@ -22,7 +22,7 @@ from backend.engine.settings_validator import validate_bot_settings
 from backend.engine.bot_manager import bot_manager, _config_fingerprint
 from backend.engine.sizing import backtest_pin
 from backend.engine.data_verify import verify_window
-from backend.core.exchange_registry import build_exchange
+from backend.core.exchange_registry import build_exchange_for_symbol
 from backend.core import bot_log_buffer as blb
 from backend.models.bot_logs import BotLog
 from backend.models.bot_config_runs import BotConfigRun
@@ -37,6 +37,17 @@ def _resolve_exchange(settings: dict, db: Session) -> str:
         if key:
             return key.exchange
     return settings.get("data_exchange", "okx")
+
+
+def _resolve_key_market_type(settings: dict, db: Session) -> str | None:
+    """Market type of the linked API key (None when no key is linked); a key
+    is bound to one market, so the validator refuses a bot on another."""
+    api_key_name = settings.get("api_key_name")
+    if api_key_name:
+        key = db.query(ExchangeKey).filter(ExchangeKey.name == api_key_name).first()
+        if key:
+            return getattr(key, "market_type", None) or "spot"
+    return None
 
 
 def _candle_exchange(settings: dict, key_exchange_by_name: dict) -> str:
@@ -150,6 +161,9 @@ def get_bots_summary(db: Session = Depends(get_db)):
                 # Sizing fields for the Analytics capital-allocation panel
                 "max_positions": b.settings.get("max_positions", 1) if b.settings else 1,
                 "max_order_value": b.settings.get("max_order_value") if b.settings else None,
+                # Phase 2: swap bots carry leverage (chips on card/Analytics/Home)
+                "market_type": (b.settings.get("market_type") or "spot") if b.settings else "spot",
+                "leverage": b.settings.get("leverage", 1) if b.settings else 1,
                 "live_allocation_pct": b.settings.get("live_allocation_pct", 100) if b.settings else 100,
                 "live_starting_capital": b.settings.get("live_starting_capital") if b.settings else None,
                 "entry_amount_type": (b.settings.get("trade_settings") or {}).get("entry", {}).get("amount_type", "percentage") if b.settings else "percentage",
@@ -218,7 +232,7 @@ def create_bot(bot_in: BotCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="A bot with this name already exists.")
 
     resolved_exchange = _resolve_exchange(bot_in.settings, db)
-    validation = validate_bot_settings(bot_in.settings, exchange_id=resolved_exchange)
+    validation = validate_bot_settings(bot_in.settings, exchange_id=resolved_exchange, key_market_type=_resolve_key_market_type(bot_in.settings, db))
     if validation["errors"]:
         raise HTTPException(status_code=400, detail={"validation_errors": validation["errors"]})
 
@@ -264,7 +278,7 @@ def import_bot(payload: dict = Body(...), db: Session = Depends(get_db)):
     if not isinstance(bot_settings, dict):
         raise HTTPException(status_code=400, detail="Invalid file: bot settings must be an object.")
     resolved_exchange = _resolve_exchange(bot_settings, db)
-    validation = validate_bot_settings(bot_settings, exchange_id=resolved_exchange)
+    validation = validate_bot_settings(bot_settings, exchange_id=resolved_exchange, key_market_type=_resolve_key_market_type(bot_settings, db))
     if validation["errors"]:
         raise HTTPException(status_code=400, detail={"validation_errors": validation["errors"]})
 
@@ -322,7 +336,7 @@ def update_bot(bot_id: int, background_tasks: BackgroundTasks, bot_data: dict = 
             current_settings[key] = value
 
         resolved_exchange = _resolve_exchange(current_settings, db)
-        validation = validate_bot_settings(current_settings, exchange_id=resolved_exchange)
+        validation = validate_bot_settings(current_settings, exchange_id=resolved_exchange, key_market_type=_resolve_key_market_type(current_settings, db))
         if validation["errors"]:
             raise HTTPException(status_code=400, detail={"validation_errors": validation["errors"]})
         validation_warnings = validation["warnings"]
@@ -663,9 +677,8 @@ async def verify_bot_data(bot_id: int, accept: bool = Query(default=False), db: 
     def _run():
         _db = SessionLocal()
         try:
-            exch = build_exchange(exchange_id)
-            return [verify_window(_db, exch, exchange_id, str(s).replace('-', '/').upper(), timeframe, start, end, accept=accept)
-                    for s in symbols]
+            return [verify_window(_db, build_exchange_for_symbol(exchange_id, sym), exchange_id, sym, timeframe, start, end, accept=accept)
+                    for sym in (str(s).replace('-', '/').upper() for s in symbols)]
         finally:
             _db.close()
     try:

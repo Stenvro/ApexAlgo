@@ -102,10 +102,20 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
   }, []);
 
   const realOpen = useMemo(() => openPositions.filter((p) => REAL_MODES.has(p.mode)), [openPositions]);
-  const exposure = useMemo(() => ({
-    live: realOpen.filter((p) => p.mode === 'live').reduce((s, p) => s + (p.entry_price || 0) * (p.amount || 0), 0),
-    paper: realOpen.filter((p) => p.mode === 'paper').reduce((s, p) => s + (p.entry_price || 0) * (p.amount || 0), 0),
-  }), [realOpen]);
+  // Notional at entry; on perpetuals the capital actually at risk is the
+  // margin (notional / leverage), shown next to it when any leveraged
+  // position is open
+  const exposure = useMemo(() => {
+    const notional = (p) => (p.entry_price || 0) * (p.amount || 0);
+    const margin = (p) => notional(p) / Math.max(1, Number(p.leverage) || 1);
+    const live = realOpen.filter((p) => p.mode === 'live');
+    return {
+      live: live.reduce((s, p) => s + notional(p), 0),
+      paper: realOpen.filter((p) => p.mode === 'paper').reduce((s, p) => s + notional(p), 0),
+      liveMargin: live.reduce((s, p) => s + margin(p), 0),
+      leveraged: realOpen.some((p) => (Number(p.leverage) || 1) > 1),
+    };
+  }, [realOpen]);
 
   const attention = useMemo(() => {
     const items = [];
@@ -236,7 +246,7 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
             label="Open exposure"
             value={fmtUsd(exposure.live)}
             sub={realOpen.length
-              ? `${realOpen.filter((p) => p.mode === 'live').length} live · ${realOpen.filter((p) => p.mode === 'paper').length} paper (${fmtUsd(exposure.paper)}) at entry`
+              ? `${realOpen.filter((p) => p.mode === 'live').length} live · ${realOpen.filter((p) => p.mode === 'paper').length} paper (${fmtUsd(exposure.paper)}) at entry${exposure.leveraged ? ` · ${fmtUsd(exposure.liveMargin)} margin` : ''}`
               : 'no real positions open'}
             accent="var(--color-info)"
             onClick={() => openAnalytics(realOpen.length ? 'real' : undefined)}

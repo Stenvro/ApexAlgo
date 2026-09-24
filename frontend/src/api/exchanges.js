@@ -5,24 +5,32 @@
 // (key form, data manager, builder) without touching the frontend.
 //
 // Shape of each entry:
-//   { id, name, needs_passphrase, has_sandbox, keys_url, sandbox_note }
+//   { id, name, needs_passphrase, has_sandbox, keys_url, sandbox_note,
+//     markets: { spot: {has_sandbox, max_leverage, leverage_in_order, note}, swap?: {...} } }
 import { useEffect, useSyncExternalStore } from 'react';
 import { apiClient } from './client';
 
+// Market types per exchange mirror backend ExchangeSpec.markets (spot always;
+// swap = USDT-margined perpetuals where ApexAlgo supports them)
+const SPOT = { spot: { has_sandbox: false, max_leverage: 1 } };
+const fb = (id, name, needs_passphrase, has_sandbox, swap) => ({
+  id, name, needs_passphrase, has_sandbox,
+  markets: swap ? { spot: { has_sandbox, max_leverage: 1 }, swap: { has_sandbox: swap.has_sandbox, max_leverage: swap.max_leverage || 10 } } : { spot: { ...SPOT.spot, has_sandbox } },
+});
 export const FALLBACK_EXCHANGES = [
-  { id: 'okx', name: 'OKX', needs_passphrase: true, has_sandbox: true },
-  { id: 'binance', name: 'Binance', needs_passphrase: false, has_sandbox: true },
-  { id: 'bitvavo', name: 'Bitvavo', needs_passphrase: false, has_sandbox: false },
-  { id: 'coinbase', name: 'Coinbase', needs_passphrase: false, has_sandbox: false },
-  { id: 'cryptocom', name: 'Crypto.com', needs_passphrase: false, has_sandbox: true },
-  { id: 'kraken', name: 'Kraken', needs_passphrase: false, has_sandbox: false },
-  { id: 'kucoin', name: 'KuCoin', needs_passphrase: true, has_sandbox: false },
-  { id: 'bybit', name: 'Bybit', needs_passphrase: false, has_sandbox: true },
-  { id: 'gateio', name: 'Gate', needs_passphrase: false, has_sandbox: true },
-  { id: 'bitget', name: 'Bitget', needs_passphrase: true, has_sandbox: true },
-  { id: 'mexc', name: 'MEXC', needs_passphrase: false, has_sandbox: false },
-  { id: 'htx', name: 'HTX', needs_passphrase: false, has_sandbox: false },
-  { id: 'bingx', name: 'BingX', needs_passphrase: false, has_sandbox: true },
+  fb('okx', 'OKX', true, true, { has_sandbox: true }),
+  fb('binance', 'Binance', false, true, { has_sandbox: true }),
+  fb('bitvavo', 'Bitvavo', false, false),
+  fb('coinbase', 'Coinbase', false, false),
+  fb('cryptocom', 'Crypto.com', false, true),
+  fb('kraken', 'Kraken', false, false, { has_sandbox: true, max_leverage: 5 }),
+  fb('kucoin', 'KuCoin', true, false, { has_sandbox: false }),
+  fb('bybit', 'Bybit', false, true, { has_sandbox: true }),
+  fb('gateio', 'Gate', false, true, { has_sandbox: true }),
+  fb('bitget', 'Bitget', true, true, { has_sandbox: true }),
+  fb('mexc', 'MEXC', false, false),
+  fb('htx', 'HTX', false, false, { has_sandbox: false }),
+  fb('bingx', 'BingX', false, true, { has_sandbox: true }),
 ];
 
 let cache = null;
@@ -58,4 +66,12 @@ export function useExchanges() {
 export function exchangeName(id) {
   const hit = snapshot().find((e) => e.id === id);
   return hit ? hit.name : String(id || '').toUpperCase();
+}
+
+/** Market capabilities of `exchangeId` for `marketType` ('spot' | 'swap'); null when unsupported. */
+export function marketCaps(exchangeId, marketType = 'spot') {
+  const hit = snapshot().find((e) => e.id === exchangeId);
+  if (!hit) return null;
+  const markets = hit.markets || { spot: { has_sandbox: !!hit.has_sandbox, max_leverage: 1 } };
+  return markets[marketType] || null;
 }

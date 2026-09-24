@@ -167,6 +167,12 @@ class BotManager:
 
     _wallet_held = staticmethod(broker.wallet_held)
     _reconcile_positions_with_wallet = staticmethod(broker.reconcile_positions_with_wallet)
+    # Derivatives (phase 2): position reconciliation via fetch_positions,
+    # leverage/margin-mode confirmation and contract conversion
+    _reconcile_positions_with_exchange = staticmethod(broker.reconcile_positions_with_exchange)
+    _ensure_leverage = staticmethod(broker.ensure_leverage)
+    _to_contracts = staticmethod(broker.to_contracts)
+    _from_contracts = staticmethod(broker.from_contracts)
 
     def _get_live_capital(self, ccxt_inst, api_key_record, ccxt_symbol, bot_name, ttl=30):
         return broker.get_live_capital(self._balance_cache, ccxt_inst, api_key_record, ccxt_symbol, bot_name, ttl)

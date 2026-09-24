@@ -1703,6 +1703,9 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                             <td className="px-3 py-2 font-bold text-text font-num">{pos.symbol}</td>
                                             <td className="px-4 py-3">
                                                 <Badge variant={pos.side === 'long' ? 'success' : 'danger'} className="text-3xs!">{pos.side}</Badge>
+                                                {(Number(pos.leverage) || 1) > 1 && (
+                                                    <Badge variant="warn" className="ml-1 text-3xs!" title={`Perpetual swap at ${pos.leverage}x — size is the notional, margin ≈ ${formatCrypto(pos.amount / pos.leverage)}`}>{Number(pos.leverage)}×</Badge>
+                                                )}
                                             </td>
                                             <td className="px-3 py-2 text-right font-num text-muted">${safeNum(pos.entry_price)}</td>
                                             <td className="px-3 py-2 text-right font-num text-muted">{formatCrypto(pos.amount)}</td>
@@ -1811,7 +1814,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                     <ModeBadge mode={pos.mode} short className="ml-1.5 text-3xs!" />
                                                 </td>
                                                 <td className="px-3 py-1.5 text-accent font-bold uppercase text-2xs">{pos.exchange || 'okx'}</td>
-                                                <td className="px-3 py-1.5 font-bold font-num text-text">{pos.symbol}</td>
+                                                <td className="px-3 py-1.5 font-bold font-num text-text">{pos.symbol}{(Number(pos.leverage) || 1) > 1 && <span className="ml-1 text-3xs text-warn" title={`Perpetual swap at ${pos.leverage}x`}>{Number(pos.leverage)}×</span>}</td>
                                                 <td className="px-3 py-1.5 text-right font-num text-2xs">
                                                     <span className="text-muted">${safeNum(pos.entry_price)}</span>
                                                     <span className="text-faint mx-1">→</span>
