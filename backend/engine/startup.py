@@ -282,6 +282,11 @@ def execute_sync_backfill(engine, bot_id: int):
 
             entry_series = evaluator.resolve_node(bot.settings.get("entry_node")) if bot.settings.get("entry_node") else pd.Series(False, index=evaluator.df.index)
             exit_series = evaluator.resolve_node(exit_node) if exit_node else pd.Series(False, index=evaluator.df.index)
+            # Shorts (phase 3): only when the strategy has the nodes; None keeps
+            # the simulate loop on its long-only path
+            short_node, cover_node = bot.settings.get("short_node"), bot.settings.get("cover_node")
+            short_series = evaluator.resolve_node(short_node) if short_node else None
+            cover_series = evaluator.resolve_node(cover_node) if cover_node else None
 
             # Pre-extract numpy arrays once — avoids O(n) .iloc index lookups inside the loop
             _standard_cols = {'id', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'atr'}
@@ -290,6 +295,8 @@ def execute_sync_backfill(engine, bot_id: int):
                 "df": evaluator.df,
                 "entry_arr": entry_series.values,
                 "exit_arr": exit_series.values,
+                "short_arr": short_series.values if short_series is not None else None,
+                "cover_arr": cover_series.values if cover_series is not None else None,
                 "atr_arr": evaluator.df['atr'].values if 'atr' in evaluator.df.columns else None,
                 "indicator_cols": [c for c in evaluator.df.columns if c not in _standard_cols],
                 "existing_timestamps": existing_timestamps,

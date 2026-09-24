@@ -31,8 +31,8 @@ class ExchangeSpec:
     and the builder derive their lists from here (via `GET /api/keys/exchanges`).
     ccxt itself is id-agnostic, so nothing engine-side needs to change.
     `markets` lists the market types a key/bot may use: every exchange has
-    "spot"; "swap" (USDT/USDC-margined linear perpetuals, long-only until
-    shorts land) only where ccxt can place, reduce and list positions.
+    "spot"; "swap" (USDT/USDC-margined linear perpetuals, long and short)
+    only where ccxt can place, reduce and list positions.
     """
     name: str                                   # display name
     needs_passphrase: bool = False              # api_key + secret + passphrase

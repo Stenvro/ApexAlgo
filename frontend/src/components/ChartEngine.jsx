@@ -7,6 +7,10 @@ import { getToken } from '../theme';
 import Button from './ui/Button';
 import Badge from './ui/Badge';
 
+// A sell that is not reduce-only on a perpetual opens a short; every other
+// sell closes a long (spot sells carry no reduce_only flag).
+const isShortOpen = (o) => o.side === 'sell' && o.market_type === 'swap' && !o.reduce_only;
+
 const safeParseTime = (ts) => { 
   if (!ts) return null; 
   if (typeof ts === 'number') return ts;  
@@ -498,7 +502,7 @@ function ChartEngine({ dataset, openDataVault }) {
      
     const markersByTime = {}; 
     signals.forEach(sig => { 
-      if (botConfigs[sig.bot_name]?.showSignals && (sig.action === 'buy' || sig.action === 'sell')) { 
+      if (botConfigs[sig.bot_name]?.showSignals && (sig.action === 'buy' || sig.action === 'sell' || sig.action === 'short' || sig.action === 'cover')) { 
         const rawTime = safeParseTime(sig.timestamp); 
         if (!rawTime) return;  
         const snappedTime = getSnappedTime(rawTime); 
@@ -521,15 +525,25 @@ function ChartEngine({ dataset, openDataVault }) {
          
         const buySigs = itemsAtTime.filter(i => i.type === 'signal' && i.data.action === 'buy'); 
         const sellSigs = itemsAtTime.filter(i => i.type === 'signal' && i.data.action === 'sell'); 
-        const buyTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'buy'); 
-        const sellTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'sell'); 
+        const shortSigs = itemsAtTime.filter(i => i.type === 'signal' && i.data.action === 'short'); 
+        const coverSigs = itemsAtTime.filter(i => i.type === 'signal' && i.data.action === 'cover'); 
+        // Opening vs closing fill, side-aware: a non-reduce-only sell on a
+        // perp opens a short, a reduce-only buy covers one
+        const buyTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'buy' && !i.data.reduce_only); 
+        const sellTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'sell' && !isShortOpen(i.data)); 
+        const shortTrades = itemsAtTime.filter(i => i.type === 'trade' && isShortOpen(i.data)); 
+        const coverTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'buy' && i.data.reduce_only); 
          
         // Marker colors resolved from the live CSS tokens (raw values required)
         if (buySigs.length > 0) finalMarkers.push({ time: time, position: 'belowBar', color: getToken('success'), shape: 'arrowUp', text: 'S-B' });
         if (sellSigs.length > 0) finalMarkers.push({ time: time, position: 'aboveBar', color: getToken('danger'), shape: 'arrowDown', text: 'S-S' });
+        if (shortSigs.length > 0) finalMarkers.push({ time: time, position: 'aboveBar', color: getToken('danger'), shape: 'arrowDown', text: 'S-SH' });
+        if (coverSigs.length > 0) finalMarkers.push({ time: time, position: 'belowBar', color: getToken('success'), shape: 'arrowUp', text: 'S-CV' });
 
         if (buyTrades.length > 0) finalMarkers.push({ time: time, position: 'belowBar', color: getToken('info'), shape: 'circle', text: 'T-BUY' });
         if (sellTrades.length > 0) finalMarkers.push({ time: time, position: 'aboveBar', color: getToken('purple'), shape: 'circle', text: 'T-SELL' });
+        if (shortTrades.length > 0) finalMarkers.push({ time: time, position: 'aboveBar', color: getToken('info'), shape: 'circle', text: 'T-SHORT' });
+        if (coverTrades.length > 0) finalMarkers.push({ time: time, position: 'belowBar', color: getToken('purple'), shape: 'circle', text: 'T-COVER' });
     }); 
 
     finalMarkers.sort((a, b) => a.time - b.time); 
@@ -816,15 +830,18 @@ function ChartEngine({ dataset, openDataVault }) {
           <div className="absolute top-12 left-2 md:top-14 md:left-3 z-20 flex flex-col space-y-2 pointer-events-none max-w-[calc(100vw-1rem)] md:max-w-none">
             {snappedTradeMap[hoverData.time].map((trade, idx) => {
                 const totalValue = trade.price * trade.amount;
-                const isWin = trade.position ? trade.price >= trade.position.entry_price : true;
-                const pnlPct = trade.position ? (((trade.price - trade.position.entry_price) / trade.position.entry_price) * 100).toFixed(2) : "0.00";
-                const pnlAbs = trade.position ? ((trade.price - trade.position.entry_price) * trade.amount).toFixed(2) : "0.00";
+                const isOpening = trade.side === 'buy' ? !trade.reduce_only : isShortOpen(trade);
+                const dir = trade.position?.side === 'short' ? -1 : 1;
+                const isWin = trade.position ? dir * (trade.price - trade.position.entry_price) >= 0 : true;
+                const pnlPct = trade.position ? ((dir * (trade.price - trade.position.entry_price) / trade.position.entry_price) * 100).toFixed(2) : "0.00";
+                const pnlAbs = trade.position ? (dir * (trade.price - trade.position.entry_price) * trade.amount).toFixed(2) : "0.00";
+                const headline = isOpening ? (trade.side === 'sell' ? 'SHORT ENTRY' : 'ENTRY EXECUTION') : (trade.side === 'buy' ? 'COVER EXECUTION' : 'EXIT EXECUTION');
 
                 return (
-                    <div key={idx} className={`bg-raised/95 backdrop-blur-md border p-3 rounded-lg shadow-pop flex flex-col min-w-[240px] md:min-w-[260px] ${trade.side === 'buy' ? 'border-info' : 'border-purple'}`}>
+                    <div key={idx} className={`bg-raised/95 backdrop-blur-md border p-3 rounded-lg shadow-pop flex flex-col min-w-[240px] md:min-w-[260px] ${isOpening ? 'border-info' : 'border-purple'}`}>
                         <div className="flex justify-between items-center mb-2 pb-2 border-b border-border">
-                            <span className={`text-2xs md:text-xs font-bold uppercase tracking-wider ${trade.side === 'buy' ? 'text-info' : 'text-purple'}`}>
-                                {trade.side === 'buy' ? 'ENTRY EXECUTION' : 'EXIT EXECUTION'}
+                            <span className={`text-2xs md:text-xs font-bold uppercase tracking-wider ${isOpening ? 'text-info' : 'text-purple'}`}>
+                                {headline}
                             </span>
                             <span className="bg-overlay border border-border text-text text-3xs px-1.5 py-0.5 rounded uppercase font-bold">{trade.mode}</span>
                         </div>
@@ -847,7 +864,7 @@ function ChartEngine({ dataset, openDataVault }) {
                                 <span className="text-2xs md:text-xs text-text uppercase">{trade.order_type || 'Market'}</span>
                             </div>
 
-                            {trade.side === 'sell' && trade.position && (
+                            {!isOpening && trade.position && (
                                 <div className="flex flex-col col-span-2 pt-2 border-t border-border">
                                     <span className="text-3xs md:text-3xs text-muted uppercase font-bold mb-1">PnL</span>
                                     <div className="grid grid-cols-2 gap-2 bg-inset p-2 rounded-lg border border-border">

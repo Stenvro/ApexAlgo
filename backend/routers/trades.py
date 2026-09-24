@@ -86,7 +86,7 @@ def get_positions(
         Position.id, Position.exchange, Position.bot_name, Position.symbol,
         Position.mode, Position.status, Position.side, Position.entry_price,
         Position.amount, Position.profit_abs, Position.profit_pct,
-        Position.created_at, Position.closed_at
+        Position.created_at, Position.closed_at, Position.market_type, Position.leverage
     )
     if symbol:
         formatted_symbol = symbol.replace('-', '/').upper()
@@ -111,7 +111,8 @@ def get_positions(
          "mode": r[4], "status": r[5], "side": r[6], "entry_price": r[7],
          "amount": r[8], "profit_abs": r[9], "profit_pct": r[10],
          "created_at": r[11].isoformat() if r[11] else None,
-         "closed_at": r[12].isoformat() if r[12] else None}
+         "closed_at": r[12].isoformat() if r[12] else None,
+         "market_type": r[13] or "spot", "leverage": r[14] or 1}
         for r in query.all()
     ]
 
@@ -128,7 +129,8 @@ def get_orders(
     query = db.query(
         Order.id, Order.position_id, Order.exchange, Order.bot_name,
         Order.mode, Order.symbol, Order.side, Order.order_type,
-        Order.price, Order.amount, Order.fee, Order.status, Order.timestamp
+        Order.price, Order.amount, Order.fee, Order.status, Order.timestamp,
+        Order.market_type, Order.reduce_only
     )
     if symbol:
         formatted_symbol = symbol.replace('-', '/').upper()
@@ -143,7 +145,8 @@ def get_orders(
         {"id": r[0], "position_id": r[1], "exchange": r[2], "bot_name": r[3],
          "mode": r[4], "symbol": r[5], "side": r[6], "order_type": r[7],
          "price": r[8], "amount": r[9], "fee": r[10], "status": r[11],
-         "timestamp": r[12].isoformat() if r[12] else None}
+         "timestamp": r[12].isoformat() if r[12] else None,
+         "market_type": r[13] or "spot", "reduce_only": int(r[14] or 0)}
         for r in query.all()
     ]
 
@@ -228,6 +231,16 @@ def get_trade_stats(
         "totalFees": total_fees,
         "avgWin": gross_profit / len(wins) if wins else 0,
         "avgLoss": gross_loss / len(losses) if losses else 0,
+        # Per-side breakdown (shorts exist on perpetual markets only)
+        "bySide": {
+            side: {
+                "total": len(rows),
+                "wins": sum(1 for p in rows if (p.profit_abs or 0) > 0),
+                "netPnl": sum(p.profit_abs or 0 for p in rows),
+            }
+            for side, rows in (("long", [p for p in closed if p.side != "short"]), ("short", [p for p in closed if p.side == "short"]))
+            if rows
+        },
     }
 
 
@@ -428,7 +441,9 @@ def close_position_now(pos: Position, db: Session) -> float:
             close_price = latest_candle.close if latest_candle else pos.entry_price
 
         # Fee-adjusted P&L accumulated on top of earlier partial exits
-        filled_buys = [o for o in (pos.orders or []) if o.side == "buy" and o.status == "filled"]
+        # Opening orders: buys for a long, the (non-reduce-only) sells for a short
+        _open_side = "sell" if pos.side == "short" else "buy"
+        filled_buys = [o for o in (pos.orders or []) if o.side == _open_side and o.status == "filled"]
         original_amount = sum((o.amount or 0.0) for o in filled_buys) or pos.amount or close_qty
         total_buy_fees = sum((o.fee or 0.0) for o in filled_buys)
         entry_fee_portion = total_buy_fees * (close_qty / original_amount) if original_amount > 0 else 0.0

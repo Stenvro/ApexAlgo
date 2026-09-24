@@ -74,7 +74,7 @@ https://github.com/user-attachments/assets/25d03926-1e88-4749-88d4-b97b14ff9c2b
 - **Async Event-Driven Architecture** — FastAPI backend with concurrent bot management via asyncio
 - **Multi-Exchange Market Data** — universal REST polling via CCXT; each `(exchange, symbol, timeframe)` gets its own independent polling stream
 - **CCXT Integration** — exchange-agnostic order execution with market precision handling
-- **Perpetual swaps with leverage** — a bot trades spot or USDT/USDC-settled perpetuals (long-only, 1–10×, isolated or cross margin); backtest, forward test and live share the same margin/liquidation model, and spot bots are untouched
+- **Perpetual swaps with leverage, long and short** — a bot trades spot or USDT/USDC-settled perpetuals (1–10×, isolated or cross margin); on perpetuals the strategy can open shorts (`SHORT` / `COVER` action blocks) with mirrored stop-loss/take-profit rules; backtest, forward test and live share the same margin/liquidation model, and spot bots are untouched
 
 ### Multi-Exchange Support
 - **13 Exchanges out of the box** — OKX, Binance, Bitvavo, Coinbase, Crypto.com, Kraken, KuCoin, Bybit, Gate, Bitget, MEXC, HTX, BingX; perpetual swaps on nine of them
@@ -538,9 +538,20 @@ Adding another CCXT-compatible exchange is one `ExchangeSpec` entry in `backend/
 
 ### Perpetual swaps
 
-An API key is bound to one market: save a second key with **Market: Perpetual swaps** for derivatives (the same exchange login, with futures/derivatives trade permission; Kraken and KuCoin issue separate futures keys). A bot on a swap key trades the `BASE/QUOTE:SETTLE` symbols (`BTC/USDT:USDT`) — only USDT/USDC-settled linear perpetuals, long-only in this release — with the leverage and margin mode set in the builder's Exchange Routing block (1–10×, isolated by default). The engine confirms leverage and margin mode on the exchange before the first order and refuses to start when that fails; on start-up, open swap positions are reconciled against `fetch_positions` instead of the wallet.
+An API key is bound to one market: save a second key with **Market: Perpetual swaps** for derivatives (the same exchange login, with futures/derivatives trade permission; Kraken and KuCoin issue separate futures keys). A bot on a swap key trades the `BASE/QUOTE:SETTLE` symbols (`BTC/USDT:USDT`) — only USDT/USDC-settled linear perpetuals — with the leverage and margin mode set in the builder's Exchange Routing block (1–10×, isolated by default). The engine confirms leverage and margin mode on the exchange before the first order and refuses to start when that fails; on start-up, open swap positions are reconciled against `fetch_positions` instead of the wallet.
 
 Economics are identical across backtest, forward test and live: an entry locks `notional / leverage` plus fees, PnL is on the full notional, and a position whose candle low reaches `entry × (1 − (1 − 0.5%) / leverage)` is liquidated for its margin (`liquidation` in the exit list, `liquidations` in the backtest summary). Funding payments are **not** modelled (`funding: "ignored"` in the summary). `Max Order Value` caps the notional, i.e. margin × leverage. Exchanges without a swap testnet (KuCoin, HTX) can only forward test or trade real money.
+
+### Shorts
+
+On a perpetual market the strategy graph can also open shorts. The action block's direction has four options: **BUY** (open long), **SELL** (close long), **SHORT** (open short) and **COVER** (close short). A SHORT block carries its own TP/SL ports and entry size (`trade_settings.short`, falling back to the long entry settings when the block is not connected), COVER sizes like SELL (`trade_settings.cover`). Both are refused on a spot bot by the validator — there is no silent no-op.
+
+Rules of the road:
+
+- Long and short never coexist on one pair: a BUY while a short is open (or a SHORT while a long is open) is ignored with an INFO line in the bot console; when BUY and SHORT fire on the same candle the BUY wins. Pyramiding (`Max Positions`) counts every layer on the pair regardless of side.
+- Exit rules are mirrored: a short stop-loss sits *above* the entry and is hit by the candle high, a take-profit *below* and is hit by the low; trailing and ATR rules anchor to the lowest price reached. A gap through a level fills at the open, as for longs.
+- PnL is `(entry − exit) × amount` minus fees, slippage works against the trade (sold below the close on entry, bought above it on cover). A short is liquidated when the candle high reaches `entry × (1 + (1 − 0.5%) / leverage)`, losing its margin.
+- Live orders: a short opens with a market **sell** (not reduce-only) and closes with a reduce-only **buy**; start-up reconciliation compares the side of every open position with the exchange. The backtest summary adds `long_trades` / `short_trades`, the Analytics *Trades* tile splits PnL per side, and the chart marks shorts (`S-SH` / `T-SHORT`) and covers (`S-CV` / `T-COVER`).
 
 ### Historical data per exchange
 

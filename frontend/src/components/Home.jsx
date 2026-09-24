@@ -114,6 +114,9 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
       paper: realOpen.filter((p) => p.mode === 'paper').reduce((s, p) => s + notional(p), 0),
       liveMargin: live.reduce((s, p) => s + margin(p), 0),
       leveraged: realOpen.some((p) => (Number(p.leverage) || 1) > 1),
+      // Short notional shown separately: it profits from a fall, so it
+      // must not read as long exposure
+      liveShort: live.filter((p) => p.side === 'short').reduce((s, p) => s + notional(p), 0),
     };
   }, [realOpen]);
 
@@ -246,7 +249,7 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
             label="Open exposure"
             value={fmtUsd(exposure.live)}
             sub={realOpen.length
-              ? `${realOpen.filter((p) => p.mode === 'live').length} live · ${realOpen.filter((p) => p.mode === 'paper').length} paper (${fmtUsd(exposure.paper)}) at entry${exposure.leveraged ? ` · ${fmtUsd(exposure.liveMargin)} margin` : ''}`
+              ? `${realOpen.filter((p) => p.mode === 'live').length} live · ${realOpen.filter((p) => p.mode === 'paper').length} paper (${fmtUsd(exposure.paper)}) at entry${exposure.leveraged ? ` · ${fmtUsd(exposure.liveMargin)} margin` : ''}${exposure.liveShort > 0 ? ` · ${fmtUsd(exposure.liveShort)} short` : ''}`
               : 'no real positions open'}
             accent="var(--color-info)"
             onClick={() => openAnalytics(realOpen.length ? 'real' : undefined)}

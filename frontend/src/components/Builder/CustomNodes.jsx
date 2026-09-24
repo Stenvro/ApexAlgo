@@ -616,16 +616,29 @@ export const TakeProfitNode = ({ id, data }) => (
 // 4. ACTION NODE
 // ==========================================
 
+// Opening legs (buy = long, short = short) carry the TP/SL ports and size
+// from capital; closing legs (sell, cover) size from the open position.
+// `short`/`cover` are only meaningful on a perpetual (swap) market — the
+// validator refuses them on spot.
+const ACTION_META = {
+  buy:   { opens: true,  title: 'ORDER ROUTING: LONG ENTRY',  color: 'var(--color-success)' },
+  sell:  { opens: false, title: 'ORDER ROUTING: CLOSE LONG',  color: 'var(--color-danger)' },
+  short: { opens: true,  title: 'ORDER ROUTING: SHORT ENTRY', color: 'var(--color-danger)' },
+  cover: { opens: false, title: 'ORDER ROUTING: CLOSE SHORT', color: 'var(--color-success)' },
+};
+
 export const ActionNode = ({ id, data }) => {
-  const isBuy = data.actionType === 'buy';
+  const actionType = data.actionType || 'buy';
+  const meta = ACTION_META[actionType] || ACTION_META.buy;
+  const isBuy = meta.opens;
   // CSS var resolves at paint time so the tint follows the active theme
-  const color = isBuy ? 'var(--color-success)' : 'var(--color-danger)';
+  const color = meta.color;
   
   return (
     <div className={`bg-raised/90 backdrop-blur-xl border-2 rounded-xl shadow-lg min-w-[320px]`} style={{ borderColor: color }}>
       
       <div className="px-3 py-2 font-bold text-xs uppercase tracking-wider border-b flex justify-between items-center" style={{ backgroundColor: `color-mix(in srgb, ${color} 6%, transparent)`, color: color, borderColor: `color-mix(in srgb, ${color} 19%, transparent)` }}>
-        <span>{isBuy ? 'ORDER ROUTING: LONG ENTRY' : 'ORDER ROUTING: CLOSE POSITION'}</span>
+        <span>{meta.title}</span>
         {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove action block" title="Remove block">✕</button>}
       </div>
       
@@ -638,9 +651,11 @@ export const ActionNode = ({ id, data }) => {
              <div className="flex space-x-2">
                 <div className="w-1/2">
                     <label className="text-3xs text-muted font-bold uppercase mb-1 block">Direction</label>
-                    <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag font-bold outline-none focus:border-info" style={{ color: color }} value={data.actionType !== undefined ? data.actionType : "buy"} onChange={(e) => data.onChange(id, 'actionType', e.target.value)}>
-                        <option value="buy">BUY (Open)</option>
-                        <option value="sell">SELL (Close)</option>
+                    <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag font-bold outline-none focus:border-info" style={{ color: color }} value={actionType} onChange={(e) => data.onChange(id, 'actionType', e.target.value)}>
+                        <option value="buy">BUY (Open long)</option>
+                        <option value="sell">SELL (Close long)</option>
+                        <option value="short">SHORT (Open short · perps)</option>
+                        <option value="cover">COVER (Close short · perps)</option>
                     </select>
                 </div>
                 <div className="w-1/2">

@@ -8,11 +8,11 @@
 
 ## 1. What ApexAlgo is — and how it executes
 
-ApexAlgo is a no-code, **long-only spot** trading bot. A strategy is a graph of nodes:
+ApexAlgo is a no-code trading bot for **spot** markets and **USDT/USDC-settled perpetual swaps** (leverage 1–10×). The default and the vetted templates are long-only spot; on a perpetual the graph may also short. A strategy is a graph of nodes:
 
 ```
-Indicator / Price Data ──> Condition ──> Logic Gate (optional) ──> Action (BUY / SELL)
-                                                                      └──> Take Profit / Stop Loss nodes (attached to the BUY action)
+Indicator / Price Data ──> Condition ──> Logic Gate (optional) ──> Action (BUY / SELL, and on perps SHORT / COVER)
+                                                                      └──> Take Profit / Stop Loss nodes (attached to the BUY or SHORT action)
 ```
 
 The engine evaluates the whole graph once per **closed candle**, per pair. Knowing exactly what happens on that tick is what separates strategies that look good from strategies that make money:
@@ -21,11 +21,12 @@ The engine evaluates the whole graph once per **closed candle**, per pair. Knowi
 |---|---|
 | **Evaluation moment** | On the close of each candle. `offset: 0` on a price node means *the candle that just closed*, not a still-forming candle. |
 | **Entry fill** | At the close price of the signal candle, plus `slippage` %. Fee is charged on the notional. |
-| **Direction** | Long only. `BUY` opens, `SELL` closes. There is no shorting and no leverage. |
+| **Direction** | `BUY` opens a long, `SELL` closes it. On a perpetual market (`market_type: swap`) `SHORT` opens a short and `COVER` closes it; long and short never coexist on a pair (the conflicting signal is ignored, BUY wins when both fire). Spot bots cannot short (validator error). Leverage only on swaps (`leverage`, default 1). |
 | **Positions per pair** | **Pyramiding up to `max_positions`.** A BUY signal while a position is already open on that pair opens another layer until the limit is reached (`per_pair` = per symbol, `global` = across all pairs of the bot). Each layer has its own SL/TP levels (anchored to its own entry) and is exited independently; a strategy **SELL signal flattens every open layer on that pair**. A layer opened on a candle is not exit-checked until the next candle. `max_positions: 1` gives the classic one-position-per-pair behaviour. Backtest and live apply the same rule. |
 | **Re-entry** | The moment a position closes, the next candle whose entry condition is true opens a new one. A *state* condition (e.g. `RSI < 30`) that stays true for 10 candles will therefore re-enter immediately after every exit — see §4.2. |
-| **Exit checks** | Every candle while a position is open, in this order: **stop-losses** (against the candle low) → **take-profits** (against high/low) → **strategy SELL signal** (at close). Only one group fires per candle; a hit stop-loss suppresses take-profits on the same candle. |
-| **Trailing anchor** | Trailing levels use the highest high reached **before** the current candle, so one candle cannot both raise the trail and trigger it against its own low. |
+| **Exit checks** | Every candle while a position is open, in this order: **stop-losses** (against the candle low) → **take-profits** (against high/low) → **strategy SELL signal** (at close). Only one group fires per candle; a hit stop-loss suppresses take-profits on the same candle. For a short every level is mirrored: the stop sits above the entry and is hit by the high, the target below and is hit by the low, the strategy exit is the COVER signal. |
+| **Trailing anchor** | Trailing levels use the highest high (lowest low for a short) reached **before** the current candle, so one candle cannot both raise the trail and trigger it against its own low. |
+| **Leverage (swaps)** | An entry locks `notional / leverage` plus the fee on the notional; PnL is on the full notional. A long is liquidated when the candle low reaches `entry × (1 − (1 − 0.5%) / leverage)`, a short when the high reaches `entry × (1 + (1 − 0.5%) / leverage)` — the margin is lost, no exit fee. Funding payments are **not** modelled. |
 | **Gaps** | If a candle opens beyond the trigger, the fill is at the open (worse for stops, better for targets). |
 | **Partial exits** | `close_amount_value` is a % of the *original* position. Each TP/SL tier fires once. A 100% tier closes whatever is left. |
 | **Sizing** | `amount_type: percentage` = % of the **currently available cash** in the shared pool (all pairs of the bot share one pool). Capital is locked while a position is open, so 50% sizing on two pairs = fully invested. `fixed` = fixed USD. |
@@ -123,7 +124,7 @@ The backend enforces this allowlist — never invent a method name.
 
 ### 2.6 Action node and risk nodes
 
-BUY action: order type, sizing, fee, slippage, and the attached TP/SL tiers. SELL action: closes the position (partially with `amount_value < 100`).
+BUY action: order type, sizing, fee, slippage, and the attached TP/SL tiers. SELL action: closes the position (partially with `amount_value < 100`). On a perpetual market the action's direction can also be SHORT (opens a short; same fields and TP/SL ports as BUY, stored as `trade_settings.short`) or COVER (closes the short, `trade_settings.cover`). The table below is written for a long; for a short every level is mirrored (stop above entry hit by the high, target below hit by the low, trailing anchored to the lowest low).
 
 | TP/SL `type` | Stop-loss meaning | Take-profit meaning |
 |---|---|---|
@@ -355,7 +356,11 @@ Output exactly **one** valid JSON document in a fenced code block. Use only meth
 | `api_execution` | bool | `true` = orders via API key |
 | `backtest_on_start` / `backtest_capital` / `backtest_lookback` | bool / USD / candles | Backtest settings |
 | `api_key_name` | string/null | Saved key name (null = forward test) |
-| `data_exchange` | string | `okx` `binance` `bitvavo` `coinbase` `cryptocom` `kraken` `kucoin` |
+| `data_exchange` | string | `okx` `binance` `bitvavo` `coinbase` `cryptocom` `kraken` `kucoin` `bybit` `gateio` `bitget` `mexc` `htx` `bingx` |
+| `market_type` | `spot` / `swap` | Default `spot`. `swap` = USDT/USDC-settled linear perpetuals; symbols then use the `BASE/QUOTE:SETTLE` form (`BTC/USDT:USDT`) and the key must be a swap key. Not every exchange offers swaps (§5.3) |
+| `leverage` | 1–10 (int) | Swaps only (spot must be 1). Position notional = margin × leverage; `max_order_value` caps the notional. Warning above 3× |
+| `margin_mode` | `isolated` / `cross` | Swaps only, default `isolated` |
+| `short_node` / `cover_node` | string/null | Node ids for the SHORT and COVER signals (like `entry_node`/`exit_node`). Only on `swap`; omit for long-only bots |
 
 ### 5.3 Exchange timeframes and history
 
@@ -368,6 +373,8 @@ Output exactly **one** valid JSON document in a fenced code block. Use only meth
 | Bitvavo | `1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d` | full |
 | KuCoin | `1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 1w` | full |
 | Crypto.com | `1m 5m 15m 30m 1h 2h 4h 6h 12h 1d 1w` | full since listing |
+
+Bybit, Gate, Bitget, MEXC, HTX and BingX were added later; their timeframes come from `GET /api/data/timeframes/{exchange}` (the builder filters the dropdown). Perpetual swaps (`market_type: swap`) are available on OKX, Binance, Kraken, KuCoin, Bybit, Gate, Bitget, HTX and BingX — not on Bitvavo, Coinbase, Crypto.com or MEXC.
 
 For long daily backtests prefer Binance or Coinbase data; for Kraken use ≤ 720 candles.
 
@@ -393,6 +400,8 @@ For long daily backtests prefer Binance or Coinbase data; for Kraken use ≤ 720
 ```
 
 `fee`/`slippage` are percentages (`0.1` = 0.1%). `amount_type` `percentage` (% of available cash) or `fixed` (USD). TP/SL semantics in §2.6.
+
+Shorts (swap only): add `"short"` (same shape as `entry`, its TP/SL are the short's levels) and `"cover"` (same shape as `exit`) next to them and set `short_node`/`cover_node`. When `short` is omitted the short leg reuses `entry`; when `cover` is omitted it reuses `exit`.
 
 ### 5.5 Node definitions
 

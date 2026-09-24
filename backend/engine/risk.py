@@ -3,6 +3,7 @@ tracker keeps one realized-equity state per (bot, mode group), lazily rebuilt
 from closed positions; `unrealized_pnl` marks the open positions to the
 latest stored close so the gates measure the same curve as the backtest."""
 import threading
+from backend.engine import pnl
 from backend.models.candles import Candle
 from backend.models.positions import Position
 
@@ -94,5 +95,5 @@ def unrealized_pnl(db, positions, exchange, timeframe, close_cache):
         last = close_cache[key]
         if last is None:
             continue
-        total += (last - (p.entry_price or 0.0)) * (p.amount or 0.0)
+        total += pnl.price_pnl(p.side, p.entry_price or 0.0, last, p.amount or 0.0)
     return total

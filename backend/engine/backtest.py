@@ -17,6 +17,7 @@ from backend.engine.sizing import (
     backtest_pin, combined_fingerprint, slice_key,
 )
 from backend.engine.symbols import leverage_for, market_type_for
+from backend.engine import pnl
 from backend.core import bot_log_buffer as blb
 
 logger = logging.getLogger("apexalgo.bot_manager")
@@ -47,6 +48,7 @@ class SimResult:
     dd_detail: dict
     timeline: list = field(default_factory=list)
     liquidations: int = 0
+    shorts: int = 0
 
 
 def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits, position_states, states_lock, on_progress, check_abort):
@@ -99,6 +101,16 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
     if bt_derivative:
         blb.push(bot.name, "INFO", f"Backtest on {bt_market_type} at {bt_leverage:g}x: liquidation approximated at "
                                    f"{100 * (1 - _MAINTENANCE_MARGIN) / bt_leverage:.1f}% adverse move, funding ignored")
+    # Shorts (phase 3): a `short` signal opens a short layer, `cover` flattens
+    # the pair's shorts; both only exist when the strategy has the nodes and
+    # the bot runs on a derivative market (the validator rejects them on
+    # spot). Long and short never coexist on one pair — the conflicting
+    # signal is ignored (INFO once per pair). Frictions come from the
+    # `short`/`cover` legs, falling back to entry/exit.
+    bt_shorts_enabled = bt_derivative and any(c.get("short_arr") is not None for c in sym_contexts)
+    bt_s_entry_fee, bt_s_exit_fee, bt_s_entry_slippage, bt_s_exit_slippage = sim_frictions(bot.settings, "short")
+    bt_short_count = 0
+    _conflict_logged = set()
 
     # ── Merged chronological execution across all symbols ──
     timeline = []
@@ -139,6 +151,8 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
 
         is_buy = bool(ctx["entry_arr"][index])
         is_sell = bool(ctx["exit_arr"][index])
+        is_short = bool(ctx["short_arr"][index]) if ctx.get("short_arr") is not None else False
+        is_cover = bool(ctx["cover_arr"][index]) if ctx.get("cover_arr") is not None else False
         atr_arr = ctx["atr_arr"]
         current_atr = float(atr_arr[index]) if atr_arr is not None and not pd.isna(atr_arr[index]) else 0.0
 
@@ -161,8 +175,14 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
             else:
                 slot_free = sum(len(c2["open_positions"]) for c2 in sym_contexts) < max_pos
             just_opened = None
+            # Side already open on this pair (None when flat) — a long never
+            # stacks on a short and vice versa
+            pair_side = (open_list[0].side or "long") if open_list else None
+            if is_buy and pair_side == "short" and symbol not in _conflict_logged:
+                _conflict_logged.add(symbol)
+                blb.push(bot.name, "INFO", f"{symbol}: BUY signal ignored while a short is open (long and short never coexist on a pair)")
             # Capital depletion halt / drawdown block: no new entries, exits keep running
-            if is_buy and slot_free and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
+            if is_buy and pair_side != "short" and slot_free and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
                 if bt_derivative:
                     trade_amount = calculate_trade_amount(current_price, bot.settings, current_equity=bt_equity, leverage=bt_leverage)
                 else:
@@ -197,6 +217,32 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                         db.add(Order(position_id=just_opened.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="buy", order_type="market", price=bt_entry_price, amount=trade_amount, timestamp=_naive_utc(ts), status="filled", fee=investment_cost * bt_entry_fee, **_bt_open_extra))
                         open_list.append(just_opened)
                         ctx["original_amount"][just_opened.id] = trade_amount
+            elif bt_shorts_enabled and is_short and not is_buy:
+                if pair_side == "long":
+                    if symbol not in _conflict_logged:
+                        _conflict_logged.add(symbol)
+                        blb.push(bot.name, "INFO", f"{symbol}: SHORT signal ignored while a long is open (long and short never coexist on a pair)")
+                elif slot_free and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
+                    trade_amount = calculate_trade_amount(current_price, bot.settings, current_equity=bt_equity, leverage=bt_leverage, side="short")
+                    if trade_amount is not None:
+                        # Slippage works against the seller: a short fills below the close
+                        bt_entry_price = current_price * (1 - bt_s_entry_slippage)
+                        _short_cfg = pnl.entry_cfg(bot.settings.get("trade_settings", {}), "short")
+                        if _short_cfg.get("amount_type", "percentage") != "fixed":
+                            max_affordable = bt_equity / (bt_entry_price * (1 / bt_leverage + bt_s_entry_fee))
+                            trade_amount = min(trade_amount, max_affordable)
+                        investment_cost = bt_entry_price * trade_amount
+                        total_cost = investment_cost / bt_leverage + investment_cost * bt_s_entry_fee
+                        if trade_amount > 0 and total_cost <= bt_equity + 1e-9:
+                            ctx["trade_entry_indices"].append(index)
+                            bt_equity = max(bt_equity - total_cost, 0.0)  # Lock margin + entry fee
+                            just_opened = Position(exchange=exchange_name, bot_name=bot.name, symbol=symbol, mode="backtest", status="open", side="short", entry_price=bt_entry_price, amount=trade_amount, created_at=_naive_utc(ts), market_type=bt_market_type, leverage=bt_leverage)
+                            db.add(just_opened)
+                            db.flush()
+                            db.add(Order(position_id=just_opened.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="sell", order_type="market", price=bt_entry_price, amount=trade_amount, timestamp=_naive_utc(ts), status="filled", fee=investment_cost * bt_s_entry_fee, **_bt_open_extra))
+                            open_list.append(just_opened)
+                            ctx["original_amount"][just_opened.id] = trade_amount
+                            bt_short_count += 1
 
             # Every position carries its own SL/TP/trailing state; a SELL
             # signal reaches each of them, so it flattens the whole pair.
@@ -205,13 +251,23 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
             for open_bt_pos in list(open_list):
                 if open_bt_pos is just_opened:
                     continue
-                if bt_derivative and current_low <= liquidation_price(open_bt_pos.entry_price, bt_leverage):
+                pos_side = open_bt_pos.side or "long"
+                pos_short = pos_side == "short"
+                if bt_derivative:
+                    if pos_short:
+                        liq_price = pnl.liquidation_price("short", open_bt_pos.entry_price, bt_leverage)
+                        liq_hit = liq_price is not None and current_high >= liq_price
+                    else:
+                        liq_price = liquidation_price(open_bt_pos.entry_price, bt_leverage)
+                        liq_hit = current_low <= liq_price
+                else:
+                    liq_hit = False
+                if liq_hit:
                     # Liquidated: the whole margin is gone, nothing returns
                     # to the pool (entry fee was paid on open, no exit fee)
-                    liq_price = liquidation_price(open_bt_pos.entry_price, bt_leverage)
                     remaining_qty = open_bt_pos.amount
                     margin_qty = open_bt_pos.entry_price * remaining_qty / bt_leverage
-                    db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="sell", order_type="market", price=liq_price, amount=remaining_qty, timestamp=_naive_utc(ts), status="filled", fee=0.0, **_bt_close_extra))
+                    db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side=pnl.close_order_side(pos_side), order_type="market", price=liq_price, amount=remaining_qty, timestamp=_naive_utc(ts), status="filled", fee=0.0, **_bt_close_extra))
                     open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) - margin_qty
                     original_amount = ctx["original_amount"].get(open_bt_pos.id)
                     if original_amount and original_amount > 0:
@@ -226,7 +282,10 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                     ctx["original_amount"].pop(open_bt_pos.id, None)
                     bt_liquidations += 1
                     continue
-                exit_events = check_exits(open_bt_pos, current_price, current_high, current_low, is_sell, bot.settings, current_atr, row_open=current_open)
+                if pos_short:
+                    exit_events = check_exits(open_bt_pos, current_price, current_high, current_low, is_cover, bot.settings, current_atr, row_open=current_open, side="short")
+                else:
+                    exit_events = check_exits(open_bt_pos, current_price, current_high, current_low, is_sell, bot.settings, current_atr, row_open=current_open)
 
                 for ev in exit_events:
                     if open_bt_pos.status == "closed": break
@@ -241,22 +300,32 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                     close_qty = min(close_qty, open_bt_pos.amount)
                     if close_qty <= 0: continue
 
-                    actual_price = ev['price'] * (1 - bt_exit_slippage)
-                    db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="sell", order_type="market", price=actual_price, amount=close_qty, timestamp=_naive_utc(ts), status="filled", fee=actual_price * close_qty * bt_exit_fee, **_bt_close_extra))
-
-                    entry_cost = open_bt_pos.entry_price * close_qty * (1 + bt_entry_fee)
-                    exit_proceeds = actual_price * close_qty * (1 - bt_exit_fee)
-                    realized_pnl = exit_proceeds - entry_cost
-                    open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + realized_pnl
-
-                    if bt_derivative:
-                        # Margin comes back with the price PnL, minus the exit fee
-                        bt_equity += open_bt_pos.entry_price * close_qty / bt_leverage + (actual_price - open_bt_pos.entry_price) * close_qty - actual_price * close_qty * bt_exit_fee
-                        # Return on what was locked (margin + entry fee)
-                        entry_cost = open_bt_pos.entry_price * close_qty * (1 / bt_leverage + bt_entry_fee)
+                    if pos_short:
+                        # Covering buys back above the trigger; fees on both legs' notional
+                        actual_price = ev['price'] * (1 + bt_s_exit_slippage)
+                        db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="buy", order_type="market", price=actual_price, amount=close_qty, timestamp=_naive_utc(ts), status="filled", fee=actual_price * close_qty * bt_s_exit_fee, **_bt_close_extra))
+                        gross = pnl.price_pnl("short", open_bt_pos.entry_price, actual_price, close_qty)
+                        realized_pnl = gross - open_bt_pos.entry_price * close_qty * bt_s_entry_fee - actual_price * close_qty * bt_s_exit_fee
+                        open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + realized_pnl
+                        bt_equity += open_bt_pos.entry_price * close_qty / bt_leverage + gross - actual_price * close_qty * bt_s_exit_fee
+                        entry_cost = open_bt_pos.entry_price * close_qty * (1 / bt_leverage + bt_s_entry_fee)
                     else:
-                        # Return sale proceeds to capital pool
-                        bt_equity += exit_proceeds
+                        actual_price = ev['price'] * (1 - bt_exit_slippage)
+                        db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="sell", order_type="market", price=actual_price, amount=close_qty, timestamp=_naive_utc(ts), status="filled", fee=actual_price * close_qty * bt_exit_fee, **_bt_close_extra))
+
+                        entry_cost = open_bt_pos.entry_price * close_qty * (1 + bt_entry_fee)
+                        exit_proceeds = actual_price * close_qty * (1 - bt_exit_fee)
+                        realized_pnl = exit_proceeds - entry_cost
+                        open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + realized_pnl
+
+                        if bt_derivative:
+                            # Margin comes back with the price PnL, minus the exit fee
+                            bt_equity += open_bt_pos.entry_price * close_qty / bt_leverage + (actual_price - open_bt_pos.entry_price) * close_qty - actual_price * close_qty * bt_exit_fee
+                            # Return on what was locked (margin + entry fee)
+                            entry_cost = open_bt_pos.entry_price * close_qty * (1 / bt_leverage + bt_entry_fee)
+                        else:
+                            # Return sale proceeds to capital pool
+                            bt_equity += exit_proceeds
 
                     # Weighted profit_pct: accumulate based on portion of original position closed (fee-adjusted)
                     original_amount = ctx["original_amount"].get(open_bt_pos.id)
@@ -283,7 +352,7 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
         if _naive_utc(ts) not in ctx["existing_timestamps"]:
             indicators = { col: float(row[col]) for col in ctx["indicator_cols"] if not pd.isna(row[col]) }
             if indicators:
-                action_str = "buy" if is_buy else ("sell" if is_sell else "neutral")
+                action_str = "buy" if is_buy else ("short" if is_short else ("sell" if is_sell else ("cover" if is_cover else "neutral")))
                 ctx["new_signals"].append(Signal(candle_id=int(row['id']), symbol=symbol, timestamp=ts, bot_name=bot.name, name="STRATEGY_TICK", action=action_str, extra_data=indicators))
 
         # Mark-to-market equity curve: cash + open positions at their last close
@@ -292,7 +361,7 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
             for c2 in sym_contexts:
                 if c2["last_close"]:
                     if bt_derivative:
-                        open_value += sum(p2.entry_price * p2.amount / bt_leverage + (c2["last_close"] - p2.entry_price) * p2.amount
+                        open_value += sum(p2.entry_price * p2.amount / bt_leverage + pnl.price_pnl(p2.side, p2.entry_price, c2["last_close"], p2.amount)
                                           for p2 in c2["open_positions"])
                     else:
                         open_value += sum(p2.amount for p2 in c2["open_positions"]) * c2["last_close"]
@@ -352,14 +421,21 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
             if last_ts.tzinfo is None: last_ts = last_ts.replace(tzinfo=timezone.utc)
             for open_bt_pos in list(ctx["open_positions"]):
                 remaining_qty = open_bt_pos.amount
+                pos_short = (open_bt_pos.side or "long") == "short"
 
-                entry_cost = open_bt_pos.entry_price * remaining_qty * (1 + bt_entry_fee)
-                exit_proceeds = last_price * remaining_qty * (1 - bt_exit_fee)
-                final_pnl = exit_proceeds - entry_cost
+                if pos_short:
+                    gross = pnl.price_pnl("short", open_bt_pos.entry_price, last_price, remaining_qty)
+                    final_pnl = gross - open_bt_pos.entry_price * remaining_qty * bt_s_entry_fee - last_price * remaining_qty * bt_s_exit_fee
+                    entry_cost = open_bt_pos.entry_price * remaining_qty * (1 / bt_leverage + bt_s_entry_fee)
+                    open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + final_pnl
+                else:
+                    entry_cost = open_bt_pos.entry_price * remaining_qty * (1 + bt_entry_fee)
+                    exit_proceeds = last_price * remaining_qty * (1 - bt_exit_fee)
+                    final_pnl = exit_proceeds - entry_cost
 
-                open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + final_pnl
-                if bt_derivative:
-                    entry_cost = open_bt_pos.entry_price * remaining_qty * (1 / bt_leverage + bt_entry_fee)
+                    open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + final_pnl
+                    if bt_derivative:
+                        entry_cost = open_bt_pos.entry_price * remaining_qty * (1 / bt_leverage + bt_entry_fee)
                 original_amount = ctx["original_amount"].get(open_bt_pos.id)
                 if original_amount and original_amount > 0:
                     portion_pct = (final_pnl / entry_cost) * 100 if entry_cost > 0 else 0.0
@@ -368,11 +444,15 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
 
                 open_bt_pos.status = "closed"
                 open_bt_pos.closed_at = _naive_utc(last_ts)
-                if bt_derivative:
-                    bt_equity += open_bt_pos.entry_price * remaining_qty / bt_leverage + (last_price - open_bt_pos.entry_price) * remaining_qty - last_price * remaining_qty * bt_exit_fee
+                if pos_short:
+                    bt_equity += open_bt_pos.entry_price * remaining_qty / bt_leverage + gross - last_price * remaining_qty * bt_s_exit_fee
+                    db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=ctx["symbol"], side="buy", order_type="market", price=last_price, amount=remaining_qty, timestamp=_naive_utc(last_ts), status="filled", fee=last_price * remaining_qty * bt_s_exit_fee, **_bt_close_extra))
                 else:
-                    bt_equity += exit_proceeds  # Return proceeds to capital pool
-                db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=ctx["symbol"], side="sell", order_type="market", price=last_price, amount=remaining_qty, timestamp=_naive_utc(last_ts), status="filled", fee=last_price * remaining_qty * bt_exit_fee, **_bt_close_extra))
+                    if bt_derivative:
+                        bt_equity += open_bt_pos.entry_price * remaining_qty / bt_leverage + (last_price - open_bt_pos.entry_price) * remaining_qty - last_price * remaining_qty * bt_exit_fee
+                    else:
+                        bt_equity += exit_proceeds  # Return proceeds to capital pool
+                    db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=ctx["symbol"], side="sell", order_type="market", price=last_price, amount=remaining_qty, timestamp=_naive_utc(last_ts), status="filled", fee=last_price * remaining_qty * bt_exit_fee, **_bt_close_extra))
 
                 with states_lock:
                     position_states.pop(open_bt_pos.id, None)
@@ -398,6 +478,7 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
         starting_capital=bt_starting_capital, equity=bt_equity, max_dd=bt_max_dd, max_loss=bt_max_loss,
         dd_action=bt_dd_action, dd_cooldown_secs=bt_dd_cooldown_secs, blocked_secs=bt_blocked_secs,
         block_count=bt_block_count, dd_detail=bt_dd_detail, timeline=timeline, liquidations=bt_liquidations,
+        shorts=bt_short_count,
     )
 
 
@@ -478,6 +559,13 @@ def build_summary(db, bot, res: SimResult, sym_contexts, exchange_name=None) -> 
             "liquidations": res.liquidations,
             "funding": "ignored",
         })
+        if res.shorts:
+            # Closed short trades (buy & hold above stays the long reference on purpose)
+            short_closed = db.query(Position.id).filter(
+                Position.bot_name == bot.name, Position.mode == "backtest", Position.status == "closed", Position.side == "short"
+            ).count()
+            summary["short_trades"] = short_closed
+            summary["long_trades"] = len(pnls) - short_closed
     return summary
 
 

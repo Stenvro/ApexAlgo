@@ -125,6 +125,8 @@ function rebuildLayoutFromSettings(settings, updateNodeData, deleteNode) {
     }
     if (settings.entry_node) collectDeps(settings.entry_node);
     if (settings.exit_node) collectDeps(settings.exit_node);
+    if (settings.short_node) collectDeps(settings.short_node);
+    if (settings.cover_node) collectDeps(settings.cover_node);
     for (const nid of Object.keys(settingsNodes)) if (!visited.has(nid)) collectDeps(nid);
 
     // Column x-positions: each column starts after previous column's width + generous gap
@@ -227,6 +229,50 @@ function rebuildLayoutFromSettings(settings, updateNodeData, deleteNode) {
             slippage: exitTs.slippage ?? 0.05 } });
     if (settings.exit_node && settingsNodes[settings.exit_node])
         edges.push({ id: `e_${settings.exit_node}_exit`, source: settings.exit_node, target: exitId, targetHandle: 'logic', animated: true, style: edgeStyle });
+
+    // ── Short leg (phase 3) — only when the bot actually has short nodes, so
+    // long-only bots rebuild exactly as before ──
+    if (settings.short_node || settings.cover_node) {
+        const shortTs = settings.trade_settings?.short || entryTs;
+        const shortId = 'rebuilt_short';
+        let shortY = strategyY + 2 * (SIZE.action.h + COL_GAP);
+        nodes.push({ id: shortId, type: 'action', position: { x: C4_X, y: shortY },
+            data: { onChange: updateNodeData, onDelete: deleteNode, actionType: 'short',
+                orderType: shortTs.order_type || 'market', amountType: shortTs.amount_type || 'percentage',
+                amountValue: shortTs.amount_value ?? 100, fee: shortTs.fee ?? 0.1,
+                slippage: shortTs.slippage ?? 0.05 } });
+        if (settings.short_node && settingsNodes[settings.short_node])
+            edges.push({ id: `e_${settings.short_node}_short`, source: settings.short_node, target: shortId, targetHandle: 'logic', animated: true, style: edgeStyle });
+        let stpslY = Math.max(tpslY, shortY);
+        (shortTs.take_profits || []).forEach((tp, i) => {
+            const tpId = `rebuilt_short_tp_${i}`;
+            nodes.push({ id: tpId, type: 'takeProfit', position: { x: C5_X, y: stpslY },
+                data: { onChange: updateNodeData, onDelete: deleteNode,
+                    triggerType: tp.type || 'percentage', triggerValue: tp.value ?? '',
+                    closeType: tp.close_amount_type || 'percentage', closeValue: tp.close_amount_value ?? 100 } });
+            edges.push({ id: `e_short_${tpId}`, source: shortId, sourceHandle: 'tp', target: tpId, animated: true, style: edgeStyle });
+            stpslY += SIZE.tp.h + GAP + 10;
+        });
+        (shortTs.stop_losses || []).forEach((sl, i) => {
+            const slId = `rebuilt_short_sl_${i}`;
+            nodes.push({ id: slId, type: 'stopLoss', position: { x: C5_X, y: stpslY },
+                data: { onChange: updateNodeData, onDelete: deleteNode,
+                    triggerType: sl.type || 'percentage', triggerValue: sl.value ?? '',
+                    closeType: sl.close_amount_type || 'percentage', closeValue: sl.close_amount_value ?? 100 } });
+            edges.push({ id: `e_short_${slId}`, source: shortId, sourceHandle: 'sl', target: slId, animated: true, style: edgeStyle });
+            stpslY += SIZE.sl.h + GAP + 10;
+        });
+        const coverTs = settings.trade_settings?.cover || exitTs;
+        const coverId = 'rebuilt_cover';
+        shortY += SIZE.action.h + COL_GAP;
+        nodes.push({ id: coverId, type: 'action', position: { x: C4_X, y: shortY },
+            data: { onChange: updateNodeData, onDelete: deleteNode, actionType: 'cover',
+                orderType: coverTs.order_type || 'market', amountType: coverTs.amount_type || 'percentage',
+                amountValue: coverTs.amount_value ?? 100, fee: coverTs.fee ?? 0.1,
+                slippage: coverTs.slippage ?? 0.05 } });
+        if (settings.cover_node && settingsNodes[settings.cover_node])
+            edges.push({ id: `e_${settings.cover_node}_cover`, source: settings.cover_node, target: coverId, targetHandle: 'logic', animated: true, style: edgeStyle });
+    }
 
     return { nodes, edges };
 }
@@ -671,15 +717,33 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
              };
         }
         
-        if (exitNode) {
-            payload.settings.trade_settings.exit = {
-                order_type: exitNode.data.orderType || 'market',
-                amount_type: exitNode.data.amountType || 'percentage',
-                amount_value: exitNode.data.amountValue !== undefined && exitNode.data.amountValue !== "" ? exitNode.data.amountValue : 100,
-                fee: exitNode.data.fee !== undefined && exitNode.data.fee !== "" ? exitNode.data.fee : 0.1,
-                slippage: exitNode.data.slippage !== undefined && exitNode.data.slippage !== "" ? exitNode.data.slippage : 0.05
+        const closingLeg = (node) => ({
+            order_type: node.data.orderType || 'market',
+            amount_type: node.data.amountType || 'percentage',
+            amount_value: node.data.amountValue !== undefined && node.data.amountValue !== "" ? node.data.amountValue : 100,
+            fee: node.data.fee !== undefined && node.data.fee !== "" ? node.data.fee : 0.1,
+            slippage: node.data.slippage !== undefined && node.data.slippage !== "" ? node.data.slippage : 0.05
+        });
+        if (exitNode) payload.settings.trade_settings.exit = closingLeg(exitNode);
+
+        // Short leg (phase 3): serialized only when a short/cover action exists
+        // on the canvas — a long-only bot keeps its exact settings shape (and
+        // config fingerprint). Short TP/SL hang off the short node's ports.
+        const shortNode = nodes.find(n => n.type === 'action' && n.data.actionType === 'short');
+        const coverNode = nodes.find(n => n.type === 'action' && n.data.actionType === 'cover');
+        if (shortNode) {
+            const ruleFromEdge = (e) => {
+                const n = nodes.find(nd => nd.id === e.target);
+                if (!n) return null;
+                return { type: n.data.triggerType, value: parseFloat(n.data.triggerValue) || 0, close_amount_type: n.data.closeType, close_amount_value: parseFloat(n.data.closeValue) || 100 };
+            };
+            payload.settings.trade_settings.short = {
+                ...closingLeg(shortNode),
+                take_profits: edges.filter(e => e.source === shortNode.id && e.sourceHandle === 'tp').map(ruleFromEdge).filter(Boolean),
+                stop_losses: edges.filter(e => e.source === shortNode.id && e.sourceHandle === 'sl').map(ruleFromEdge).filter(Boolean),
             };
         }
+        if (coverNode) payload.settings.trade_settings.cover = closingLeg(coverNode);
 
         const traverse = (targetId) => {
             const incomingEdge = edges.find(e => e.target === targetId && (e.targetHandle === 'logic' || e.targetHandle === 'left' || e.targetHandle === 'in1' || !e.targetHandle));
@@ -757,8 +821,16 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
 
         if (entryNode) payload.settings.entry_node = traverse(entryNode.id);
         if (exitNode) payload.settings.exit_node = traverse(exitNode.id);
+        if (shortNode) payload.settings.short_node = traverse(shortNode.id);
+        if (coverNode) payload.settings.cover_node = traverse(coverNode.id);
+        // PUT merges settings, so a short leg removed from the canvas must be
+        // cleared explicitly (null = engine default, fingerprint-neutral)
+        if (editingBot?.settings) {
+            if (!shortNode && editingBot.settings.short_node) payload.settings.short_node = null;
+            if (!coverNode && editingBot.settings.cover_node) payload.settings.cover_node = null;
+        }
 
-        const hasLogic = !!payload.settings.entry_node;
+        const hasLogic = !!payload.settings.entry_node || !!payload.settings.short_node;
 
         const res = editingBot
             ? await apiClient.put(`/api/bots/${editingBot.id}`, { name: payload.name, settings: payload.settings })
@@ -770,7 +842,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         if (hasLogic) {
             toast.success(editingBot ? 'Algorithm configuration updated.' : 'Algorithm successfully compiled & deployed.');
         } else {
-            toast.warn('Draft saved without logic — the engine will ignore it until you connect an Entry signal.');
+            toast.warn('Draft saved without logic — the engine will ignore it until you connect an Entry (or Short) signal.');
         }
         baselineRef.current = graphSnapshot(nodes, edges);
         closeBuilder();

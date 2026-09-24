@@ -180,9 +180,9 @@ class BotManager:
     def _close_all_open_positions(self, bot, db, key_records):
         live_cycle.close_all_open_positions(self, bot, db, key_records)
 
-    def _check_exits(self, open_position, row_close, row_high, row_low, is_sell_signal, bot_settings, current_atr=0.0, row_open=None):
+    def _check_exits(self, open_position, row_close, row_high, row_low, is_sell_signal, bot_settings, current_atr=0.0, row_open=None, side="long"):
         return exits.check_exits(self.position_states, self._position_states_lock, open_position,
-                                 row_close, row_high, row_low, is_sell_signal, bot_settings, current_atr, row_open)
+                                 row_close, row_high, row_low, is_sell_signal, bot_settings, current_atr, row_open, side=side)
 
     async def _startup_backfill(self):
         def get_active_bot_ids():

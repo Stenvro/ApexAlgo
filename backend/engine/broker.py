@@ -176,7 +176,9 @@ def reconcile_positions_with_exchange(db, bot, ccxt_inst, mode: str):
     tol: dict = {}
     for pos in open_pos:
         sym = normalize(pos.symbol)
-        expected[sym] = expected.get(sym, 0.0) + float(pos.amount or 0)
+        # Signed like the exchange side below: shorts count negative
+        _signed = -float(pos.amount or 0) if (pos.side or "long") == "short" else float(pos.amount or 0)
+        expected[sym] = expected.get(sym, 0.0) + _signed
         ids.setdefault(sym, []).append(pos.id)
         step = 0.0
         try:
@@ -201,10 +203,17 @@ def reconcile_positions_with_exchange(db, bot, ccxt_inst, mode: str):
     problems = []
     for sym, want in expected.items():
         have = held.get(sym, 0.0)
-        if have < 0:
-            problems.append(f"Position #{','.join(map(str, ids[sym]))}: DB holds a long of {want:g} {sym} but the exchange holds a short")
+        tag = f"Position #{','.join(map(str, ids[sym]))}"
+        if want < 0:
+            # DB short: the exchange must hold at least as large a short
+            if have > 0:
+                problems.append(f"{tag}: DB holds a short of {-want:g} {sym} but the exchange holds a long")
+            elif -have + tol[sym] + 1e-12 < -want:
+                problems.append(f"{tag}: DB holds a short of {-want:g} {sym} but exchange position is {-have:g}")
+        elif have < 0:
+            problems.append(f"{tag}: DB holds a long of {want:g} {sym} but the exchange holds a short")
         elif have + tol[sym] + 1e-12 < want:
-            problems.append(f"Position #{','.join(map(str, ids[sym]))}: DB holds {want:g} {sym} but exchange position is {have:g}")
+            problems.append(f"{tag}: DB holds {want:g} {sym} but exchange position is {have:g}")
     return problems
 
 

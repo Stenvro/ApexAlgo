@@ -131,10 +131,29 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
         errors.append(f"entry_node '{entry_node}' not found in nodes.")
     if exit_node and exit_node not in nodes:
         errors.append(f"exit_node '{exit_node}' not found in nodes.")
-    if not entry_node and not exit_node:
+    if not entry_node and not exit_node and not settings.get("short_node"):
         warnings.append("No entry_node or exit_node configured. Bot will not generate signals.")
     if exit_node and not entry_node:
         warnings.append("exit_node is configured without an entry_node; bot will never buy.")
+
+    # Short/cover node references (phase 3): derivatives only — a spot
+    # account has nothing to sell short, so this is an error, not a no-op
+    short_node = settings.get("short_node")
+    cover_node = settings.get("cover_node")
+    if short_node and short_node not in nodes:
+        errors.append(f"short_node '{short_node}' not found in nodes.")
+    if cover_node and cover_node not in nodes:
+        errors.append(f"cover_node '{cover_node}' not found in nodes.")
+    if (short_node or cover_node) and not derivative:
+        errors.append("Shorts need a perpetual market: remove the 'Open short' / 'Close short' actions or set market_type to 'swap'.")
+    if short_node and not cover_node:
+        _short_cfg = (settings.get("trade_settings") or {}).get("short") or {}
+        if not (_short_cfg.get("stop_losses") or _short_cfg.get("take_profits")):
+            warnings.append("short_node is configured without a cover_node, stop loss or take profit; shorts would only close on liquidation or a forced stop.")
+    if cover_node and not short_node:
+        warnings.append("cover_node is configured without a short_node; bot will never open a short.")
+    if not entry_node and short_node:
+        warnings.append("Short-only strategy: the bot never goes long.")
 
     # Max positions
     max_pos = settings.get("max_positions", 1)
@@ -268,47 +287,14 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
 
     # Trade settings
     trade_settings = settings.get("trade_settings", {})
+    # The `short` leg (phase 3) has the same shape as `entry` and is checked
+    # the same way, with a "Short " prefix so messages point at the right node
     entry_ts = trade_settings.get("entry", {})
-
-    # Entry amount
     amount_type = entry_ts.get("amount_type", "percentage")
-    if amount_type not in VALID_AMOUNT_TYPES:
-        errors.append(f"Invalid entry amount_type '{amount_type}'.")
     amount_value = entry_ts.get("amount_value")
-    if amount_value is not None:
-        try:
-            if float(amount_value) <= 0:
-                warnings.append("Entry amount_value is <= 0.")
-        except (ValueError, TypeError):
-            errors.append(f"Entry amount_value '{amount_value}' is not a valid number.")
-
-    # Stop losses
-    for i, sl in enumerate(entry_ts.get("stop_losses", [])):
-        sl_type = sl.get("type", "")
-        if sl_type not in VALID_EXIT_TYPES:
-            errors.append(f"Stop loss #{i}: invalid type '{sl_type}'.")
-        try:
-            if float(sl.get("value", 0)) <= 0:
-                warnings.append(f"Stop loss #{i}: value is <= 0.")
-        except (ValueError, TypeError):
-            errors.append(f"Stop loss #{i}: value is not a valid number.")
-        cat = sl.get("close_amount_type", "percentage")
-        if cat not in VALID_CLOSE_AMOUNT_TYPES:
-            errors.append(f"Stop loss #{i}: invalid close_amount_type '{cat}'.")
-
-    # Take profits
-    for i, tp in enumerate(entry_ts.get("take_profits", [])):
-        tp_type = tp.get("type", "")
-        if tp_type not in VALID_EXIT_TYPES:
-            errors.append(f"Take profit #{i}: invalid type '{tp_type}'.")
-        try:
-            if float(tp.get("value", 0)) <= 0:
-                warnings.append(f"Take profit #{i}: value is <= 0.")
-        except (ValueError, TypeError):
-            errors.append(f"Take profit #{i}: value is not a valid number.")
-        cat = tp.get("close_amount_type", "percentage")
-        if cat not in VALID_CLOSE_AMOUNT_TYPES:
-            errors.append(f"Take profit #{i}: invalid close_amount_type '{cat}'.")
+    _validate_entry_leg(entry_ts, "", errors, warnings)
+    if isinstance(trade_settings.get("short"), dict) and trade_settings["short"]:
+        _validate_entry_leg(trade_settings["short"], "Short ", errors, warnings)
 
     # Live allocation: share of the exchange wallet this bot may deploy
     if settings.get("live_allocation_pct") not in (None, ""):
@@ -431,3 +417,47 @@ def _longest_indicator_length(nodes: dict) -> int:
                 except (ValueError, TypeError):
                     pass
     return longest
+
+
+def _validate_entry_leg(entry_ts: dict, leg: str, errors: list, warnings: list) -> None:
+    """Amount + stop-loss/take-profit checks for one opening leg
+    (`trade_settings.entry` or `.short`); `leg` prefixes the messages."""
+    # Entry amount
+    amount_type = entry_ts.get("amount_type", "percentage")
+    if amount_type not in VALID_AMOUNT_TYPES:
+        errors.append(f"Invalid {leg.lower()}entry amount_type '{amount_type}'.")
+    amount_value = entry_ts.get("amount_value")
+    if amount_value is not None:
+        try:
+            if float(amount_value) <= 0:
+                warnings.append(f"{leg}Entry amount_value is <= 0." if leg else "Entry amount_value is <= 0.")
+        except (ValueError, TypeError):
+            errors.append(f"{leg}Entry amount_value '{amount_value}' is not a valid number." if leg else f"Entry amount_value '{amount_value}' is not a valid number.")
+
+    # Stop losses
+    for i, sl in enumerate(entry_ts.get("stop_losses", [])):
+        sl_type = sl.get("type", "")
+        if sl_type not in VALID_EXIT_TYPES:
+            errors.append(f"{leg}Stop loss #{i}: invalid type '{sl_type}'.")
+        try:
+            if float(sl.get("value", 0)) <= 0:
+                warnings.append(f"{leg}Stop loss #{i}: value is <= 0.")
+        except (ValueError, TypeError):
+            errors.append(f"{leg}Stop loss #{i}: value is not a valid number.")
+        cat = sl.get("close_amount_type", "percentage")
+        if cat not in VALID_CLOSE_AMOUNT_TYPES:
+            errors.append(f"{leg}Stop loss #{i}: invalid close_amount_type '{cat}'.")
+
+    # Take profits
+    for i, tp in enumerate(entry_ts.get("take_profits", [])):
+        tp_type = tp.get("type", "")
+        if tp_type not in VALID_EXIT_TYPES:
+            errors.append(f"{leg}Take profit #{i}: invalid type '{tp_type}'.")
+        try:
+            if float(tp.get("value", 0)) <= 0:
+                warnings.append(f"{leg}Take profit #{i}: value is <= 0.")
+        except (ValueError, TypeError):
+            errors.append(f"{leg}Take profit #{i}: value is not a valid number.")
+        cat = tp.get("close_amount_type", "percentage")
+        if cat not in VALID_CLOSE_AMOUNT_TYPES:
+            errors.append(f"{leg}Take profit #{i}: invalid close_amount_type '{cat}'.")

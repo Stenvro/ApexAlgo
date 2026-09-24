@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from sqlalchemy import text, func
 from backend.models.bots import BotConfig
 from backend.models.positions import Position
+from backend.engine import pnl
 from backend.engine.symbols import cash_currency, is_derivative
 
 logger = logging.getLogger("apexalgo.bot_manager")
@@ -73,7 +74,9 @@ _NON_STRATEGY_KEYS = frozenset({
 # Phase-2 (derivatives) settings at their default are dropped from the
 # fingerprint: a spot bot saved by a newer UI must hash exactly like the
 # same bot saved before these keys existed, or every variant counter bumps.
-_DEFAULT_MARKET_KEYS = {"market_type": "spot", "leverage": 1, "margin_mode": "isolated"}
+_DEFAULT_MARKET_KEYS = {"market_type": "spot", "leverage": 1, "margin_mode": "isolated",
+                        # phase 3: absent short/cover nodes hash like a pre-shorts bot
+                        "short_node": None, "cover_node": None}
 
 
 def _config_fingerprint(settings: dict) -> str:
@@ -165,16 +168,19 @@ def _record_config_run(db, bot_name: str, settings: dict, slice_hash: str = "", 
     return total, on_slice
 
 
-def sim_frictions(settings):
+def sim_frictions(settings, side="long"):
     """(entry_fee, exit_fee, entry_slippage, exit_slippage) as fractions
     from trade_settings — the frictions the backtest applies to every
-    simulated fill. Exit fee falls back to the entry fee when unset."""
+    simulated fill. Exit fee falls back to the entry fee when unset. For a
+    short the `short`/`cover` legs are read (falling back to entry/exit)."""
     ts = settings.get("trade_settings", {}) or {}
-    entry_fee = _num(ts.get("entry", {}).get("fee"), 0) / 100
-    raw_exit_fee = ts.get("exit", {}).get("fee")
+    open_cfg = pnl.entry_cfg(ts, side)
+    close_cfg = pnl.exit_cfg(ts, side)
+    entry_fee = _num(open_cfg.get("fee"), 0) / 100
+    raw_exit_fee = close_cfg.get("fee")
     exit_fee = _num(raw_exit_fee, entry_fee * 100) / 100 if raw_exit_fee not in (None, "") else entry_fee
-    entry_slip = _num(ts.get("entry", {}).get("slippage"), 0) / 100
-    exit_slip = _num(ts.get("exit", {}).get("slippage"), 0) / 100
+    entry_slip = _num(open_cfg.get("slippage"), 0) / 100
+    exit_slip = _num(close_cfg.get("slippage"), 0) / 100
     return entry_fee, exit_fee, entry_slip, exit_slip
 
 
@@ -228,11 +234,12 @@ def live_allocation(db, bot, quote, free_balance):
     return max(bot_total - deployed_bot, 0.0), wallet_total, bot_total
 
 
-def calculate_trade_amount(current_price, bot_settings, current_equity=None, leverage=1):
-    """Base amount to buy. `amount_value` is what the bot puts up (percentage
-    of its pool, or a fixed cash amount); on derivatives that is the margin,
-    so the notional — and the returned amount — is `leverage` times bigger.
-    Spot callers never pass leverage and get the pre-existing sizing."""
+def calculate_trade_amount(current_price, bot_settings, current_equity=None, leverage=1, side="long"):
+    """Base amount to buy (or sell short). `amount_value` is what the bot puts
+    up (percentage of its pool, or a fixed cash amount); on derivatives that
+    is the margin, so the notional — and the returned amount — is `leverage`
+    times bigger. Spot callers never pass leverage and get the pre-existing
+    sizing; a short reads `trade_settings.short` (fallback `entry`)."""
     if not current_price or current_price <= 0:
         logger.warning("Invalid current_price (%s), cannot calculate trade amount", current_price)
         return None
@@ -243,7 +250,7 @@ def calculate_trade_amount(current_price, bot_settings, current_equity=None, lev
     if leverage < 1:
         leverage = 1.0
 
-    entry_settings = bot_settings.get("trade_settings", {}).get("entry", {})
+    entry_settings = pnl.entry_cfg(bot_settings.get("trade_settings", {}), side)
     amount_type = entry_settings.get("amount_type", "percentage")
     raw_val = entry_settings.get("amount_value")
 

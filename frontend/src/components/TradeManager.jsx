@@ -654,7 +654,9 @@ export default function TradeManager({ setError, bots = [], request = null }) {
     const entryTsByPos = useMemo(() => {
         const map = {};
         for (const o of orders) {
-            if (o.side === 'buy' && o.status === 'filled' && o.position_id && o.timestamp) {
+            // Opening fill: a buy, or the non-reduce-only sell that opens a short
+            const opens = o.side === 'buy' ? !o.reduce_only : (o.market_type === 'swap' && !o.reduce_only);
+            if (opens && o.status === 'filled' && o.position_id && o.timestamp) {
                 const t = new Date(o.timestamp);
                 if (!map[o.position_id] || t < map[o.position_id]) map[o.position_id] = t;
             }
@@ -727,6 +729,13 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             .filter(o => o.position_id && filteredPosIds.has(o.position_id))
             .reduce((s, o) => s + (o.fee || 0), 0);
 
+        // Long/short split (phase 3): only shown when a short is in view
+        const shorts = closedPositions.filter(p => p.side === 'short');
+        const bySide = shorts.length ? {
+            long: { total: closedPositions.length - shorts.length, netPnl: netPnl - shorts.reduce((a, p) => a + (p.profit_abs || 0), 0) },
+            short: { total: shorts.length, netPnl: shorts.reduce((a, p) => a + (p.profit_abs || 0), 0) },
+        } : null;
+
         return {
             netPnl,
             winRate,
@@ -734,6 +743,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             losses: losses.length,
             total: closedPositions.length,
             openCount: activePositions.length,
+            bySide,
             profitFactor,
             maxDDpct,
             avgHoldMs,
@@ -1269,7 +1279,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                     <StatCard
                         label="Trades"
                         value={stats.total > 0 ? stats.total : '—'}
-                        sub={stats.openCount > 0 ? `closed · ${stats.openCount} open now` : 'closed'}
+                        sub={`${stats.openCount > 0 ? `closed · ${stats.openCount} open now` : 'closed'}${stats.bySide ? ` · ${stats.bySide.long.total} long (${pnlSign(stats.bySide.long.netPnl)}$${safeNum(Math.abs(stats.bySide.long.netPnl), 0)}) / ${stats.bySide.short.total} short (${pnlSign(stats.bySide.short.netPnl)}$${safeNum(Math.abs(stats.bySide.short.netPnl), 0)})` : ''}`}
                         color="neutral"
                     />
                     <StatCard
