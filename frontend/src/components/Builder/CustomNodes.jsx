@@ -159,7 +159,7 @@ const ExecutionModeSection = ({ id, data }) => {
     { ok: hasKey, label: hasKey ? `Key "${ctx.keyName}" on ${String(ctx.exchange || '').toUpperCase()} (${ctx.isSandbox ? 'sandbox → paper' : 'real → live'})` : 'Select an API key in the Exchange Routing block' },
     { ok: cap > 0, label: cap > 0 ? `Max order value ${fmtMoney(cap, quoteCcy, { digits: 0 })}${quoteCcy ? '' : ' (quote notional)'} caps every order${isSwap ? ' (notional = margin × leverage)' : ''}` : `Set the max order value above (required for live orders${isSwap ? '; caps the notional, i.e. margin × leverage' : ''})` },
     { ok: fee > 0, label: fee > 0 ? `Entry fee ${fee}% modelled` : 'Entry fee is 0% — the backtest ignores what the exchange will charge' },
-    ...(isSwap ? [{ ok: lev <= 3, label: `Perpetuals ${lev}× ${ctx.marginMode || 'isolated'} · liquidation ≈ −${liqPct}% from entry · funding not modelled${mctx.hasInverse ? ` · inverse: margin and PnL in ${mctx.inverseBases.join('/')}` : ''}` }] : []),
+    ...(isSwap ? [{ ok: lev <= 3, label: `Perpetuals ${lev}× ${ctx.marginMode || 'isolated'} · liquidation ≈ −${liqPct}% from entry · funding simulated from stored rates${ctx.marginMode === 'cross' ? ' · cross: a liquidation takes the whole pool' : ''}${mctx.hasInverse ? ` · inverse: margin and PnL in ${mctx.inverseBases.join('/')}` : ''}` }] : []),
     ...(ctx.hasShort ? [
       { ok: isSwap, label: isSwap ? 'Short entries — routed through a swap key' : 'Short entries — requires a swap (perpetuals) key; this key trades spot' },
       { ok: !!(ctx.hasCover || ctx.hasShortStop), label: (ctx.hasCover || ctx.hasShortStop) ? 'Short leg has an exit (COVER block or stop-loss)' : 'Short leg has no COVER block and no stop-loss — a short could only be closed by liquidation' },
@@ -390,7 +390,7 @@ export const ApiKeyNode = ({ id, data }) => {
         )}
         {isSwap && (
           <span className="text-3xs text-muted block">
-            Up to {maxLev}× on {exchangeId.toUpperCase()}. {leverage > 3 ? `${leverage}× liquidates after a ≈ −${liquidationPct(leverage)}% move — ` : ''}Position size = margin × leverage; funding payments are not modelled.{data.marketCtx?.hasInverse ? ` Inverse pairs: margin and PnL in ${data.marketCtx.inverseBases.join('/')}.` : ''}
+            Up to {maxLev}× on {exchangeId.toUpperCase()}. {leverage > 3 ? `${leverage}× liquidates after a ≈ −${liquidationPct(leverage)}% move — ` : ''}Position size = margin × leverage. Backtest and forward test charge the funding rates and use the exchange's margin tiers when stored; cross margin puts the whole pool behind every position.{data.marketCtx?.hasInverse ? ` Inverse pairs: margin and PnL in ${data.marketCtx.inverseBases.join('/')}.` : ''}
           </span>
         )}
       </div>

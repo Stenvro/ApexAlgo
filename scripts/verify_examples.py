@@ -118,7 +118,7 @@ def run_example(path: str, one_per_pair: bool) -> None:
               f"blocked {sm.get('entries_blocked_days')} d | orders {n_orders} | open at end {n_open}")
         if sm.get("market_type") == "swap":
             print(f"   swap    {sm.get('leverage')}x | long {sm.get('long_trades')} / short {sm.get('short_trades')} | "
-                  f"liquidations {sm.get('liquidations')} | funding {sm.get('funding')}")
+                  f"liquidations {sm.get('liquidations')} | funding {sm.get('funding')} {sm.get('funding_paid')} ({sm.get('funding_events')} settlements) | mmr {sm.get('mmr_source')}")
         bh = sm.get("buy_hold") or {}
         print("   B&H     " + ", ".join(f"{s} {v.get('pct')}%" for s, v in bh.items()))
     finally:

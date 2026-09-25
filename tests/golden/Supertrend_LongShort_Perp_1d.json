@@ -538,13 +538,27 @@
   "data_to": "2024-11-30T00:00:00",
   "entries_blocked_count": 0,
   "entries_blocked_days": 0.0,
-  "funding": "ignored",
+  "funding": "no data",
+  "funding_by_symbol": {
+   "BTC/USDT:USDT": {
+    "funding": "no data",
+    "funding_events": 0
+   },
+   "ETH/USDT:USDT": {
+    "funding": "no data",
+    "funding_events": 0
+   }
+  },
+  "funding_events": 0,
+  "funding_paid": 0.0,
   "leverage": 1.0,
   "liquidations": 0,
   "long_trades": 18,
+  "margin_mode": "isolated",
   "market_type": "swap",
   "max_capital_loss": 6.92,
   "max_drawdown": 15.43,
+  "mmr_source": "flat",
   "net_pnl": 23.17,
   "pinned": false,
   "return_pct": 2.32,

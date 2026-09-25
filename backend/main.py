@@ -26,6 +26,7 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.models.bots import BotConfig
 from backend.models.bot_logs import BotLog
 from backend.models.bot_config_runs import BotConfigRun
+from backend.models.market_data import FundingRate, LeverageTier
 
 # Import the routers
 from backend.routers import auth, keys, data, bots, trades, indicators

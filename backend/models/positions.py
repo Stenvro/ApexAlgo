@@ -38,6 +38,12 @@ class Position(Base):
     cash_currency = Column(String, nullable=True)
     contract_kind = Column(String, nullable=True)   # "spot" | "linear" | "inverse"
     contract_size = Column(Float, nullable=True)
+    # Funding (v2.3): sum of the simulated funding payments booked on this
+    # position (cash currency, negative = paid; already inside profit_abs)
+    # and the timestamp of the last settlement applied, so every funding
+    # event is charged exactly once (backtest and forward test only)
+    funding_paid = Column(Float, nullable=True)
+    funding_until = Column(DateTime, nullable=True)
     triggered_exits = Column(JSON, nullable=True, default=list)
 
     orders = relationship("Order", back_populates="position", cascade="all, delete-orphan")

@@ -68,6 +68,22 @@ class CapitalPools:
         p = self.pool(currency)
         p.locked = max(p.locked - locked, 0.0)
 
+    def charge(self, currency: str, amount: float) -> None:
+        """Book a cash flow that is not a fill: a funding payment (negative)
+        or receipt (positive). The free cash may go below zero — the
+        exchange takes funding from the margin balance, and a negative
+        balance blocks new entries exactly like a depleted pool."""
+        self.pool(currency).cash += float(amount or 0.0)
+
+    def drain(self, currency: str) -> float:
+        """Cross-margin liquidation: the whole wallet is gone. Returns the
+        free cash that was lost on top of the positions' margins."""
+        p = self.pool(currency)
+        lost = max(p.cash, 0.0)
+        p.cash = 0.0
+        p.locked = 0.0
+        return lost
+
     def currencies(self) -> list:
         return list(self.pools)
 

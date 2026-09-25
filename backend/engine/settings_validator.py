@@ -128,6 +128,9 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
             errors.append(f"Invalid margin_mode '{mm_raw}'. Use one of: {', '.join(MARGIN_MODES)}.")
         else:
             settings["margin_mode"] = mm
+            if mm == "cross" and derivative:
+                warnings.append("margin_mode 'cross': a liquidation takes the whole margin wallet, not just the position's margin. "
+                                "The simulation treats backtest_capital as that wallet; on the exchange other balances in the account are at risk too.")
     if derivative and not settings.get("margin_mode"):
         settings["margin_mode"] = DEFAULT_MARGIN_MODE
 

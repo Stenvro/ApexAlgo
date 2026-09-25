@@ -16,7 +16,8 @@ from backend.models.orders import Order
 from backend.models.positions import Position
 from backend.models.exchange_keys import ExchangeKey
 from backend.engine.evaluator import NodeEvaluator
-from backend.engine import backtest, broker, live_cycle, risk
+from backend.engine import backtest, broker, funding, live_cycle, risk, tiers
+from backend.engine.contracts import MAINTENANCE_MARGIN
 from sqlalchemy.orm import selectinload
 from backend.engine.sizing import _num, _int, _tf_seconds, _naive_utc, backtest_pin, data_fingerprint
 from backend.engine.symbols import DEFAULT_MARGIN_MODE, base_of, cash_currency, is_derivative, leverage_for, market_type_for
@@ -323,6 +324,30 @@ def execute_sync_backfill(engine, bot_id: int):
         if not still_active(engine, bot_id, _run_token):
             raise StoppedByUser()
 
+        # Perpetuals: the funding settlements of the backtest window and the
+        # exchange's maintenance-margin tiers, stored next to the candles.
+        # Best effort — the simulation reports what it could not get.
+        if any(is_derivative(c["symbol"]) for c in sym_contexts):
+            engine.set_runtime(bot.name, "fetching", "Funding rates and margin tiers")
+            for c in sym_contexts:
+                if not is_derivative(c["symbol"]) or len(c["df"]) == 0:
+                    continue
+                _ts = c["df"]["timestamp"]
+                try:
+                    _new = funding.ensure_history(db, exchange_name, c["symbol"], _ts.iloc[0], _ts.iloc[-1])
+                    if _new:
+                        blb.push(bot.name, "INFO", f"{c['symbol']}: stored {_new} new funding settlement(s) from {exchange_name.upper()}")
+                except Exception as _exc:
+                    logger.warning("Bot '%s': funding history for %s failed: %s", bot.name, c["symbol"], _exc)
+                    blb.push(bot.name, "WARN", f"{c['symbol']}: could not fetch funding history ({_exc}) — using what is stored")
+                try:
+                    tiers.ensure(db, exchange_name, c["symbol"])
+                except Exception as _exc:
+                    logger.warning("Bot '%s': leverage tiers for %s failed: %s", bot.name, c["symbol"], _exc)
+                    blb.push(bot.name, "WARN", f"{c['symbol']}: could not fetch the maintenance-margin tiers ({_exc}) — flat {100 * MAINTENANCE_MARGIN:g}% assumed")
+            if not still_active(engine, bot_id, _run_token):
+                raise StoppedByUser()
+
         res = backtest.simulate(
             db, bot, sym_contexts, exchange_name, run_backtest,
             check_exits=engine._check_exits, position_states=engine.position_states, states_lock=engine._position_states_lock,
@@ -484,7 +509,7 @@ def execute_sync_backfill(engine, bot_id: int):
                     engine._engine_stop(bot, db, f"Could not set {_lev:g}x {_mm} leverage on the exchange: {_exc}")
                     db.commit()
                     return
-                blb.push(bot.name, "INFO", f"Perpetual swap ({live_mode}): {_lev:g}x {_mm} confirmed on {api_key.exchange.upper()} for {len(symbols)} pair(s) — funding payments are not modelled")
+                blb.push(bot.name, "INFO", f"Perpetual swap ({live_mode}): {_lev:g}x {_mm} confirmed on {api_key.exchange.upper()} for {len(symbols)} pair(s) — funding and liquidation are settled by the exchange")
 
         # Make the backtest→live handover visible in the console: the next
         # tick only arrives when the current candle closes on the exchange

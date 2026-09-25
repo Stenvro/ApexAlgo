@@ -302,7 +302,8 @@ def test_backtest_leverage_scales_notional_and_locks_margin(db):
     assert first.amount <= max_affordable + 1e-9
     assert first.amount * first.entry_price == pytest.approx(0.4 * 1000 * 3, rel=1e-6)
     summary = bot.settings["last_backtest_summary"]
-    assert summary["market_type"] == "swap" and summary["leverage"] == 3 and summary["funding"] == "ignored"
+    assert summary["market_type"] == "swap" and summary["leverage"] == 3 and summary["funding"] == "no data"
+    assert summary["mmr_source"] == "flat" and summary["funding_paid"] == 0
     assert "liquidations" in summary
     orders = db.query(Order).filter(Order.bot_name == "bt-bot").all()
     assert orders and all(o.market_type == "swap" for o in orders)

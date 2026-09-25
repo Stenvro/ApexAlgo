@@ -233,11 +233,16 @@ def forward_pool(db, bot, quote):
         Position.bot_name == bot.name, Position.status == "open",
         Position.mode == "forward_test").all() if cash_currency(sym) == quote]
     entry_fees = 0.0
+    open_funding = 0.0
     if open_ids:
         entry_fees = db.query(func.coalesce(func.sum(Order.fee), 0.0)).filter(
             Order.position_id.in_(open_ids), Order.mode == "forward_test",
             func.coalesce(Order.reduce_only, 0) == 0).scalar() or 0.0
-    return _num(bot.settings.get("backtest_capital"), 1000) + float(realized) - deployed - float(entry_fees)
+        # Funding already charged on the open positions moved the pool's
+        # cash too (closed positions carry it inside profit_abs)
+        open_funding = db.query(func.coalesce(func.sum(Position.funding_paid), 0.0)).filter(
+            Position.id.in_(open_ids)).scalar() or 0.0
+    return _num(bot.settings.get("backtest_capital"), 1000) + float(realized) - deployed - float(entry_fees) + float(open_funding)
 
 
 def live_allocation(db, bot, quote, free_balance):

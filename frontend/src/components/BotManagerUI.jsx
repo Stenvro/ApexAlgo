@@ -11,7 +11,7 @@ import EmptyState from './ui/EmptyState';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
 import BotConsole from './BotConsole';
-import { contractKindOf, symbolParts } from '../utils/money';
+import { contractKindOf, fmtMoney, symbolParts } from '../utils/money';
 
 /* ── Inline icons (stroke 1.8) ── */
 const IconEdit = (
@@ -239,6 +239,22 @@ function BacktestResult({ bot, updateBotConfig, verifyData, verifying }) {
           historical candles differ from the previous run on this slice
         </p>
       )}
+      {/* Row 3 (perpetuals): what the simulation could model of funding and margin */}
+      {sm.market_type && sm.market_type !== 'spot' && (() => {
+        const fundingOk = sm.funding === 'simulated';
+        const fundingText = sm.funding === 'simulated'
+          ? `Funding ${fmtMoney(sm.funding_paid, sm.cash_currency, { sign: true })} over ${sm.funding_events} settlement${sm.funding_events === 1 ? '' : 's'}`
+          : sm.funding === 'partial'
+            ? `Funding partial: ${fmtMoney(sm.funding_paid, sm.cash_currency, { sign: true })} — not every pair had rates stored`
+            : 'Funding not simulated — no funding rates stored for this range';
+        const mmrText = sm.mmr_source === 'tiers' ? `${exchange} margin tiers` : 'flat 0.5% maintenance margin';
+        return (
+          <span className={`min-w-0 truncate ${fundingOk ? 'text-faint' : 'text-warn'}`}
+            title={`${sm.margin_mode || 'isolated'} margin at ${sm.leverage || 1}×. Funding settlements stored for the pair are charged on open positions (paper/live: the exchange charges them). Liquidation levels use ${sm.mmr_source === 'tiers' ? "the exchange's maintenance-margin tiers" : 'a flat 0.5% maintenance margin (tiers not fetched)'}.${sm.margin_mode === 'cross' ? ' Cross: one account-level liquidation takes the whole pool.' : ''}`}>
+            {fundingText} · {mmrText}{sm.liquidations > 0 ? ` · ${sm.liquidations} liquidation${sm.liquidations === 1 ? '' : 's'}` : ''}
+          </span>
+        );
+      })()}
     </div>
   );
 }
@@ -282,7 +298,7 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
               const inverse = assignedPairs.filter(p => contractKindOf(p) === 'inverse');
               const bases = [...new Set(inverse.map(p => symbolParts(p).base).filter(Boolean))];
               return (
-                <Badge variant="warn" title={`Perpetual swaps at ${Number(bot.settings?.leverage) || 1}× ${bot.settings?.margin_mode || 'isolated'} margin — liquidation modelled in backtest and forward; funding not modelled${inverse.length ? `. Inverse: margin and PnL in ${bases.join('/')}` : ''}`}>
+                <Badge variant="warn" title={`Perpetual swaps at ${Number(bot.settings?.leverage) || 1}× ${bot.settings?.margin_mode || 'isolated'} margin — liquidation, funding and the exchange's margin tiers modelled in backtest and forward (cross: the whole pool is at stake)${inverse.length ? `. Inverse: margin and PnL in ${bases.join('/')}` : ''}`}>
                   Perps {Number(bot.settings?.leverage) || 1}×{inverse.length ? ' · inverse' : ''}
                 </Badge>
               );

@@ -19,7 +19,8 @@ from backend.models.positions import Position
 from backend.models.exchange_keys import ExchangeKey
 from backend.engine.evaluator import NodeEvaluator
 from backend.engine.sizing import _indicator_fingerprint, _num, _int, _tf_seconds, _naive_utc, cap_by_max_order_value, position_spec
-from backend.engine.symbols import base_of, is_derivative, leverage_for, market_type_for, normalize
+from backend.engine.symbols import DEFAULT_MARGIN_MODE, base_of, is_derivative, leverage_for, market_type_for, normalize
+from backend.engine import funding, tiers
 from backend.engine import broker, pnl, risk
 from backend.engine.contracts import spec_for, spec_for_instance
 from backend.core.exchange_registry import market_caps
@@ -106,11 +107,13 @@ def _original_amount(pos, open_side):
     return sum(o.amount for o in (pos.orders or []) if o.side == open_side and o.status == "filled") or pos.amount
 
 
-def _book_liquidation(engine, db, bot, pos, price, ts, dd_group, note):
+def _book_liquidation(engine, db, bot, pos, price, ts, dd_group, note, extra_loss=0.0):
     """Close `pos` as liquidated: the remaining margin and its share of the
     entry fee are lost, nothing comes back to the pool, no exit fee (same
     booking as the backtest). Adds the reduce-only close order at `price`
-    and updates the drawdown state."""
+    and updates the drawdown state. `extra_loss` is the share of the free
+    cash a cross-margin liquidation takes on top of the margin, so the
+    booked losses add up to the equity that vanished."""
     pos_side = pos.side or "long"
     open_side = pnl.open_order_side(pos_side)
     remaining = float(pos.amount or 0.0)
@@ -118,14 +121,15 @@ def _book_liquidation(engine, db, bot, pos, price, ts, dd_group, note):
     lev = max(float(pos.leverage or 1), 1.0)
     spec = _pos_spec(pos)
     fee_portion = _entry_fee_total(pos, open_side) * (remaining / original) if original > 0 else 0.0
-    loss = spec.margin(remaining, pos.entry_price or 0.0, lev) + fee_portion
+    own_loss = spec.margin(remaining, pos.entry_price or 0.0, lev) + fee_portion
+    loss = own_loss + float(extra_loss or 0.0)
     close_cols = {"market_type": pos.market_type or "swap", "reduce_only": 1, "fee_currency": spec.cash_currency}
     db.add(Order(position_id=pos.id, exchange=pos.exchange, bot_name=bot.name, mode=pos.mode, symbol=pos.symbol,
                  side=pnl.close_order_side(pos_side), order_type="market", price=price, amount=remaining,
                  timestamp=ts, exchange_order_id=f"liq_{uuid.uuid4().hex[:8]}", status="filled", fee=0.0, **close_cols))
     pos.profit_abs = (pos.profit_abs or 0.0) - loss
-    if original > 0:
-        pos.profit_pct = (pos.profit_pct or 0.0) - 100.0 * (remaining / original)
+    if original > 0 and own_loss > 0:
+        pos.profit_pct = (pos.profit_pct or 0.0) - 100.0 * (loss / own_loss) * (remaining / original)
     with engine._position_states_lock:
         st = engine.position_states.pop(pos.id, None)
     triggered = set((st or {}).get("triggered_exits") or ()) | set(pos.triggered_exits or ())
@@ -139,6 +143,79 @@ def _book_liquidation(engine, db, bot, pos, price, ts, dd_group, note):
     logger.warning("%s LIQUIDATION %s #%d: %s @ %s (loss %.2f %s) — %s", pos.mode.upper(), pos.symbol, pos.id, remaining, price, loss, spec.cash_currency, note)
     blb.push(bot.name, "WARN", f"{pos.mode.upper()} LIQUIDATION {pos.symbol}: {remaining:g} @ {price:g} (−{loss:.2f} {spec.cash_currency}) — {note}")
     return loss
+
+
+def _apply_forward_funding(engine, db, bot, positions, exchange, ccxt_symbol, price, candle_ts, dd_group, events_cache):
+    """Forward test: charge every stored funding settlement a position has
+    not been charged for yet (`funding_until < ts <= candle_ts`) on its
+    notional at `price` — the backtest rule, from the same table. Returns
+    the net amount booked."""
+    key = (exchange, ccxt_symbol)
+    if key not in events_cache:
+        events_cache[key] = funding.load(db, exchange, ccxt_symbol)
+    events = events_cache[key]
+    if not events:
+        return 0.0
+    total = 0.0
+    for pos in positions:
+        if pos.status != "open":
+            continue
+        pos_side = pos.side or "long"
+        spec = _pos_spec(pos)
+        open_side = pnl.open_order_side(pos_side)
+        original = _original_amount(pos, open_side)
+        lev = max(float(pos.leverage or 1), 1.0)
+        locked = spec.margin(original, pos.entry_price or 0.0, lev) + _entry_fee_total(pos, open_side) if original > 0 else 0.0
+        booked = 0.0
+        for f_ts, rate in funding.settlements(events, pos.funding_until or pos.created_at, candle_ts):
+            pay = funding.payment(spec, pos_side, pos.amount or 0.0, price, rate)
+            pos.profit_abs = (pos.profit_abs or 0.0) + pay
+            pos.funding_paid = (pos.funding_paid or 0.0) + pay
+            if locked > 0:
+                pos.profit_pct = (pos.profit_pct or 0.0) + 100.0 * pay / locked
+            pos.funding_until = f_ts
+            booked += pay
+        if booked:
+            engine._update_drawdown(bot.name, dd_group, booked)
+            total += booked
+            blb.push(bot.name, "INFO", f"FORWARD_TEST funding {pos.symbol} #{pos.id}: {booked:+.4f} {spec.cash_currency}")
+    return total
+
+
+def _forward_cross_breached(db, engine, bot, positions, exchange, timeframe, ccxt_symbol, current_high, current_low, candle_ts, close_cache):
+    """Cross-margin account check of a forward-test bot on this candle:
+    `forward_pool` free cash plus every open position's margin and PnL —
+    the current symbol at its adverse extreme, the others at their stored
+    close at or before the candle — against the sum of the maintenance
+    margins. Returns `(marks, cash)` when liquidated, else None."""
+    if not positions:
+        return None
+    ccy = _pos_spec(positions[0]).cash_currency
+    cash = engine._forward_pool(db, bot, ccy)
+    equity = cash
+    maint = 0.0
+    marks = {}
+    for p in positions:
+        side = p.side or "long"
+        spec = _pos_spec(p)
+        lev = max(float(p.leverage or 1), 1.0)
+        if normalize(p.symbol) == ccxt_symbol:
+            mark = current_high if side == "short" else current_low
+        else:
+            key = (p.exchange or exchange, p.symbol)
+            if key not in close_cache:
+                row = db.query(Candle.close).filter(
+                    Candle.exchange == key[0], Candle.symbol == p.symbol, Candle.timeframe == timeframe,
+                    Candle.timestamp <= candle_ts).order_by(Candle.timestamp.desc()).first()
+                close_cache[key] = float(row[0]) if row and row[0] is not None else None
+            mark = close_cache[key] if close_cache[key] is not None else (p.entry_price or 0.0)
+        marks[p.id] = mark
+        equity += spec.margin(p.amount or 0.0, p.entry_price or 0.0, lev) + spec.pnl_cash(side, p.amount or 0.0, p.entry_price or 0.0, mark)
+        maint += spec.notional_cash(p.amount or 0.0, mark) * tiers.mmr_for(
+            tiers.load(db, p.exchange or exchange, normalize(p.symbol)), tiers.tier_size(spec, p.amount or 0.0, p.entry_price or 0.0))
+    if equity > maint:
+        return None
+    return marks, max(cash, 0.0)
 
 
 def close_all_open_positions(engine, bot, db, key_records):
@@ -470,6 +547,9 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
                 if _derivative:
                     open_position.market_type = _market_type
                     open_position.leverage = _leverage
+                    # Funding is charged from the candle that opened the
+                    # position (created_at is wall-clock, the candle may be older)
+                    open_position.funding_until = latest_time
                     if mode in ["paper", "live"]:
                         open_position.contracts = spec.to_contracts(trade_amount)
                 db.add(open_position)
@@ -575,6 +655,7 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
         ).all() if matching_bot_names else []
 
         _positions_by_bot_mode = defaultdict(list)
+        _funding_cache = {}  # (exchange, symbol) → stored funding events, one query per tick
         for p in _all_open_positions:
             _positions_by_bot_mode[(p.bot_name, p.mode)].append(p)
 
@@ -856,6 +937,16 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                     # Use pre-loaded positions (already includes orders via selectinload)
                     active_positions = bot_positions
 
+                    # Forward test on a perpetual: funding on the positions
+                    # that were open before this candle, the margin mode
+                    # decides between a level per position and one account
+                    _fwd_swap = mode == "forward_test" and is_derivative(ccxt_symbol)
+                    _fwd_cross = _fwd_swap and (bot.settings.get("margin_mode") or DEFAULT_MARGIN_MODE) == "cross"
+                    if _fwd_swap:
+                        _apply_forward_funding(engine, db, bot, [p for p in active_positions if p.id not in just_opened_ids],
+                                               exchange, ccxt_symbol, current_price, latest_time, _dd_group, _funding_cache)
+                        _sym_tiers = tiers.load(db, exchange, ccxt_symbol)
+
                     for pos in active_positions:
                         if not bot.is_active: break
                         if pos.id in just_opened_ids: continue
@@ -874,8 +965,9 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                         # regular exits; whatever is still open afterwards
                         # (or would have filled beyond it) is liquidated.
                         _liq_price, _liq_hit = None, False
-                        if mode == "forward_test" and is_derivative(ccxt_symbol):
-                            _liq_price = pnl.liquidation_price(pos_side, pos.entry_price, pos.leverage or 1, spec=pos_spec)
+                        if _fwd_swap and not _fwd_cross:
+                            _mmr = tiers.mmr_for(_sym_tiers, tiers.tier_size(pos_spec, pos.amount, pos.entry_price))
+                            _liq_price = pos_spec.liquidation_price(pos_side, pos.entry_price, pos.leverage or 1, mmr=_mmr)
                             _liq_hit = pnl.liquidated(pos_side, _liq_price, current_high, current_low)
                             if _liq_hit:
                                 exit_events = [ev for ev in exit_events if not pnl.liquidated(pos_side, _liq_price, ev['price'], ev['price'])]
@@ -1024,6 +1116,24 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                         if _liq_hit and pos.status == "open":
                             _book_liquidation(engine, db, bot, pos, _liq_price, latest_time, _dd_group,
                                               f"candle range reached the liquidation level {_liq_price:g} at {pos.leverage or 1:g}x")
+
+                    # Cross margin: the whole account after this candle's
+                    # exits (every symbol of the bot); a breach liquidates
+                    # all open forward positions and the free cash is lost
+                    # with them (same booking as the backtest)
+                    if _fwd_cross:
+                        _all_open = [p for p in _positions_by_bot_mode.get((bot.name, mode), []) if p.status == "open" and p.id not in just_opened_ids]
+                        _breach = _forward_cross_breached(db, engine, bot, _all_open, exchange, timeframe, ccxt_symbol,
+                                                          current_high, current_low, latest_time, _last_close_cache)
+                        if _breach is not None:
+                            _marks, _cash_lost = _breach
+                            _total_margin = sum(_pos_spec(p).margin(p.amount or 0.0, p.entry_price or 0.0, max(float(p.leverage or 1), 1.0)) for p in _all_open)
+                            for p in _all_open:
+                                _m_i = _pos_spec(p).margin(p.amount or 0.0, p.entry_price or 0.0, max(float(p.leverage or 1), 1.0))
+                                _extra = _cash_lost * _m_i / _total_margin if _total_margin > 0 else 0.0
+                                _book_liquidation(engine, db, bot, p, _marks.get(p.id, p.entry_price), latest_time, _dd_group,
+                                                  f"cross-margin account liquidation on {symbol} — equity fell to the maintenance margin, wallet lost", extra_loss=_extra)
+                            blb.push(bot.name, "WARN", f"FORWARD_TEST cross-margin liquidation: {len(_all_open)} position(s) closed, {_cash_lost:,.2f} free cash lost")
 
                     standard_cols = ['id', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'atr']
                     indicators = { col: float(latest_row[col]) for col in evaluator.df.columns if col not in standard_cols and not pd.isna(latest_row[col]) }

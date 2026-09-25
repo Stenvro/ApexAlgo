@@ -5,9 +5,10 @@ bots stay byte-identical."""
 
 from backend.engine import contracts as _contracts
 
-# Maintenance margin ratio used by the liquidation approximation; the
-# exchange-specific tiers are ignored (documented in the backtest summary).
-# Lives in `contracts`; re-exported for the callers/tests that read it here.
+# Flat maintenance margin ratio — the fallback when no exchange tier is
+# stored for the pair (`engine/tiers`); the validator's leverage warning
+# quotes this estimate. Lives in `contracts`; re-exported for the callers/
+# tests that read it here.
 MAINTENANCE_MARGIN = _contracts.MAINTENANCE_MARGIN
 
 SIDES = ("long", "short")

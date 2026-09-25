@@ -82,11 +82,11 @@ The repo contains `STRATEGY_CONTEXT.md`. Paste that file into any capable AI ass
 
 ### Perpetual swaps: known limitations of the simulation
 
-Backtest and forward test model leverage, margin, fees, slippage and liquidation (flat 0.5% maintenance margin), but **not**:
+Backtest and forward test model leverage, margin, fees, slippage, liquidation, funding and the exchange's maintenance-margin tiers, with these caveats:
 
-- **Funding payments** — perps pay/receive funding every few hours; a long-running position can lose (or gain) a few percent that the simulation does not show.
-- **Tiered maintenance margin** — big positions liquidate earlier on the real exchange than the flat 0.5% suggests.
-- **Cross margin** — `cross` is sent to the exchange, but the simulation treats it like isolated (one position cannot drain the whole account in the backtest; on the exchange it can).
+- **Funding history** — the bot fetches the funding-rate history when it starts and stores it next to the candles, but exchanges only serve a limited window (OKX ≈ 3 months, Binance years). Older parts of a backtest run without funding; the console and the summary (`funding: simulated | partial | no data`) say so. Paper/live positions are charged by the exchange itself and not booked by ApexAlgo.
+- **Maintenance-margin tiers** — fetched once a week per pair; without them (exchange unreachable, no tier endpoint) the flat 0.5% applies (`mmr_source` in the summary).
+- **Cross margin** — simulated as one account: `backtest_capital` is the whole margin wallet, a breach liquidates every open position of the bot and empties that pool (`profit_pct` can go below −100). On the exchange the *real* wallet — including balances of other bots and keys — is what gets liquidated.
 - **Spot margin / borrowing** — not supported; spot bots only ever spend the cash they hold.
 - **Hedge mode** — not supported; keep the account in one-way position mode. The bot never holds a long and a short on the same pair at once, and reconciliation nets both sides into one number, so hedged positions would be misread.
 

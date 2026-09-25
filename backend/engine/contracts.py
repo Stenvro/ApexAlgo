@@ -33,8 +33,9 @@ from backend.engine.symbols import base_of, is_derivative, normalize, quote_of, 
 
 KINDS = ("spot", "linear", "inverse")
 
-# Maintenance margin ratio used by the liquidation approximation; exchange
-# tiers are ignored (documented in the backtest summary as `funding: ignored`)
+# Flat maintenance margin ratio: the fallback of the liquidation formulas
+# when no exchange tier is stored for the pair (`engine/tiers.mmr_for`);
+# the backtest summary reports which one applied as `mmr_source`
 MAINTENANCE_MARGIN = 0.005
 
 

@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from backend.core.database import SessionLocal
 from backend.core.exchange_registry import build_exchange_for_symbol, exchange_spec
-from backend.engine.symbols import market_type_of
+from backend.engine.symbols import is_derivative, market_type_of
+from backend.engine import funding
 from backend.core.events import event_bus
 from backend.models.bots import BotConfig
 from backend.models.candles import Candle
@@ -659,6 +660,16 @@ class CandlePoller:
         saved = await asyncio.to_thread(db_op)
         if not saved:
             return
+        if is_derivative(symbol):
+            # Top up the stored funding settlements before the bots see the
+            # candle (throttled to once an hour per symbol; errors logged)
+            def funding_op():
+                db: Session = SessionLocal()
+                try:
+                    funding.refresh_recent(db, exchange_name, symbol)
+                finally:
+                    db.close()
+            await asyncio.to_thread(funding_op)
         await event_bus.publish("CANDLE_CLOSED", {
             "exchange":  exchange_name,
             "symbol":    symbol,

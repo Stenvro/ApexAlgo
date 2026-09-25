@@ -71,6 +71,12 @@ def run_migrations():
             if 'contract_size' not in pos_cols:
                 conn.execute(text("ALTER TABLE positions ADD COLUMN contract_size REAL"))
                 logger.info("Migration: added 'contract_size' to positions")
+            if 'funding_paid' not in pos_cols:
+                conn.execute(text("ALTER TABLE positions ADD COLUMN funding_paid REAL"))
+                logger.info("Migration: added 'funding_paid' to positions")
+            if 'funding_until' not in pos_cols:
+                conn.execute(text("ALTER TABLE positions ADD COLUMN funding_until DATETIME"))
+                logger.info("Migration: added 'funding_until' to positions")
             _backfill_position_currency(conn)
 
         # ── orders ───────────────────────────────────────────────────────────────
