@@ -3,6 +3,7 @@
 poller or engine thread is started; the exchange is the ``ExchangeMock`` from
 the live-tick tests, wired into ``close_position_now`` via
 ``get_authenticated_exchange``."""
+import json
 import os
 
 import pytest
@@ -15,7 +16,7 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.models.orders import Order
 from backend.models.positions import Position
 from backend.routers import trades as trades_router
-from tests.conftest import insert_candles, make_candles
+from tests.conftest import EXAMPLES_DIR, example_names, insert_candles, make_candles
 from tests.test_live_tick import EXCHANGE, KEY_NAME, SYMBOL, TF, ExchangeMock, _settings
 
 HEADERS = {"X-API-Key": os.environ["MASTER_API_KEY"]}
@@ -488,3 +489,22 @@ def test_stats_capital_basis_is_the_sum_of_the_bots_in_view(db, client, running_
     assert r.json()["maxDDpct"] == pytest.approx(30.0)
     r = client.get("/api/trades/stats", params={"mode": "live", "bot_name": "bot-b"}, headers=HEADERS)
     assert r.json()["maxDDpct"] == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize("name", example_names())
+def test_bundled_example_imports_clean(db, client, name, monkeypatch):
+    """Every ``examples/*.apex.json`` must pass the import validator as
+    shipped (the "Load example strategy" path), with its swap/short fields
+    intact — a template that needs hand-editing after import is not vetted."""
+    import backend.engine.settings_validator as sv
+    monkeypatch.setattr(sv, "get_exchange_timeframes", lambda _eid: {})  # no network
+    with open(EXAMPLES_DIR / f"{name}.apex.json") as fh:
+        payload = json.load(fh)
+    r = client.post("/api/bots/import", json=payload, headers=HEADERS)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert not body.get("validation_warnings"), body.get("validation_warnings")
+    saved = body["settings"]
+    src = payload["bot"]["settings"]
+    for key in ("market_type", "leverage", "short_node", "cover_node"):
+        assert saved.get(key) == src.get(key)

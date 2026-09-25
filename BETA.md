@@ -47,7 +47,7 @@ You're ready when the frontend logs `Starting nginx`.
 
 ## 4. Your first bot (5 minutes, no exchange account needed)
 
-1. Go to **Algorithms** and click **Load example strategy** (or *Import* and pick a file from the `examples/` folder in the repo — `Supertrend_Trend_1d.apex.json` is a good start).
+1. Go to **Algorithms** and click **Load example strategy** (or *Import* and pick a file from the `examples/` folder in the repo — `Supertrend_Trend_1d.apex.json` is a good start; `Supertrend_LongShort_Perp_1d.apex.json` is the long/short perpetual version).
 2. Leave the bot in **Paper** mode with *Run Historical Backtest* enabled.
 3. Click **Start**. The engine downloads historical candles (a few minutes the first time) and runs a full backtest. Open the **Console** on the bot card to watch it work.
 4. Explore the results in **Trades** (equity curve, drawdown, positions) and on the **Chart** (buy/sell markers).

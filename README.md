@@ -233,7 +233,7 @@ docker compose build && docker compose up -d
 
 ### Tests and lint
 
-The backend test suite (227 tests) runs against a throw-away SQLite file (your `data/` database is never touched) and covers the exit-rule table, a full live tick against a mocked exchange, swaps and shorts, contract economics (`test_contracts.py`), a **parity suite** (`test_parity_modes.py`: the same candles through backtest, forward test and a live mock, long/short, 1×/5×), **property tests** with hypothesis (`test_properties.py`: PnL sign, liquidation monotone in leverage, sizing never exceeds the pool), the routers, and **golden backtests**: every example strategy (plus a synthetic long/short swap fixture) is run on deterministic synthetic candles and its order stream is compared with `tests/golden/*.json`, so an engine change can never silently alter a strategy's trades.
+The backend test suite (231 tests) runs against a throw-away SQLite file (your `data/` database is never touched) and covers the exit-rule table, a full live tick against a mocked exchange, swaps and shorts, contract economics (`test_contracts.py`), a **parity suite** (`test_parity_modes.py`: the same candles through backtest, forward test and a live mock, long/short, 1×/5×), **property tests** with hypothesis (`test_properties.py`: PnL sign, liquidation monotone in leverage, sizing never exceeds the pool), the routers, and **golden backtests**: every example strategy (plus a synthetic long/short swap fixture) is run on deterministic synthetic candles and its order stream is compared with `tests/golden/*.json`, so an engine change can never silently alter a strategy's trades.
 
 ```bash
 pip install -r requirements-dev.txt
@@ -569,6 +569,7 @@ Rules of the road:
 - Exit rules are mirrored: a short stop-loss sits *above* the entry and is hit by the candle high, a take-profit *below* and is hit by the low; trailing and ATR rules anchor to the lowest price reached. A gap through a level fills at the open, as for longs.
 - PnL is `(entry − exit) × amount` minus fees on a linear contract (the inverse formula above on coin-margined ones), slippage works against the trade (sold below the close on entry, bought above it on cover). A short is liquidated when the candle high reaches `entry × (1 + (1 − 0.5%) / leverage)` — even at 1×, where that is a +99.5% move — losing its margin.
 - Live orders: a short opens with a market **sell** (not reduce-only) and closes with a reduce-only **buy**; start-up reconciliation compares the side of every open position with the exchange. The backtest summary adds `long_trades` / `short_trades`, the Analytics *Trades* tile splits PnL per side, and the chart marks shorts (`S-SH` / `T-SHORT`) and covers (`S-CV` / `T-COVER`).
+- A ready-made long/short template ships in `examples/Supertrend_LongShort_Perp_1d.apex.json` (also under *Load example strategy*): long while the daily Supertrend points up, short while it points down, 1×, BTC+ETH USDT perps — +50.8% / 29.1% max DD over Dec 2023 → Sep 2026 with 26 long and 23 short trades; the parameter neighbours and the 2× version are in STRATEGY_CONTEXT.md §4.9.
 
 ### Historical data per exchange
 

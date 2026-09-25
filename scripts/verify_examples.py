@@ -112,9 +112,13 @@ def run_example(path: str, one_per_pair: bool) -> None:
               f"size {entry['amount_value']}% | fee {entry['fee']}% slip {entry['slippage']}%")
         print(f"   window  {sm.get('data_from')} -> {sm.get('data_to')}  ({sm.get('candles')} candles, "
               f"{lookback} lookback)")
-        print(f"   trades  {sm.get('trades')} | win {sm.get('win_rate')}% | net ${sm.get('net_pnl')} | "
+        ccy = sm.get("cash_currency") or "quote"
+        print(f"   trades  {sm.get('trades')} | win {sm.get('win_rate')}% | net {sm.get('net_pnl')} {ccy} | "
               f"return {sm.get('return_pct')}% | max DD {sm.get('max_drawdown')}% | "
               f"blocked {sm.get('entries_blocked_days')} d | orders {n_orders} | open at end {n_open}")
+        if sm.get("market_type") == "swap":
+            print(f"   swap    {sm.get('leverage')}x | long {sm.get('long_trades')} / short {sm.get('short_trades')} | "
+                  f"liquidations {sm.get('liquidations')} | funding {sm.get('funding')}")
         bh = sm.get("buy_hold") or {}
         print("   B&H     " + ", ".join(f"{s} {v.get('pct')}%" for s, v in bh.items()))
     finally:

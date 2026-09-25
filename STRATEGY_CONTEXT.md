@@ -2,7 +2,7 @@
 
 > Paste this file into any AI assistant (or point it at the raw GitHub URL) and ask for a strategy. Everything it produces will then be **directly importable** into ApexAlgo (Bot Manager → Import) and, more importantly, will be designed around how the engine actually trades — not around indicator folklore.
 
-**If you are the AI reading this:** you are designing a real trading system that will run on real money. Sections 1–3 tell you how the engine executes; section 4 is the design playbook you must follow; section 5 is the exact file format; section 6 has three vetted templates to start from. Work through the checklist at the end of section 4 before you output anything.
+**If you are the AI reading this:** you are designing a real trading system that will run on real money. Sections 1–3 tell you how the engine executes; section 4 is the design playbook you must follow; section 5 is the exact file format; section 6 has four vetted templates to start from (three long-only spot, one long/short perpetual). Work through the checklist at the end of section 4 before you output anything.
 
 ---
 
@@ -252,6 +252,24 @@ Windows: 1d = 1 000 candles (Dec 2023 → Sep 2026, includes the 2024–25 bull 
 | `Supertrend_Trend_1d` (BTC+ETH, 50%, `max_positions` 2 global) | 1d | 26 | 42 | +26.0% | 32.0% | BTC +73%, ETH +4% |
 | `Donchian_Breakout_1d` (BTC+ETH, 50%, `max_positions` 2 global) | 1d | 20 | 60 | +19.9% | 26.3% | BTC +73%, ETH +4% |
 | `EMA_Cross_4h` (BTC+ETH+SOL, 33%, `max_positions` 3 global) | 4h | 153 | 37 | +14.2% | 26.3% | BTC +75%, ETH +7%, SOL −5% |
+| `Supertrend_LongShort_Perp_1d` (BTC+ETH USDT perps, 30%, 1×, `max_positions` 2 global) — measured 25 Sep 2026, window 30 Dec 2023 → 24 Sep 2026, fee 0.05% | 1d | 49 (26 long / 23 short) | 37 | +50.8% | 29.1% | BTC +100%, ETH +17% |
+
+**Long/short on perpetuals (measured 25 Sep 2026, Binance USDT-settled perps, taker fee 0.05%, window 30 Dec 2023 → 24 Sep 2026):** the same Supertrend(10, 3) flip, but *short while the direction is down* instead of flat. Entries are the trend **state** (`st_dir > 0` / `< 0`), exits the flip: a long and a short never coexist on a pair, so on the flip candle the old side is closed and the new side opens on the next candle from the state signal; with the flip as the only exit the state re-enters exactly once per trend. A 20% disaster stop replaces the 15% trail — a trailing stop on the state entry re-enters after every stop-out and turned the 1× result into −0.3% at 89 trades.
+
+| Variant (BTC+ETH, `max_positions` 2 global) | Lev | Trades | Win % | Return | Max DD |
+|---|---|---|---|---|---|
+| Supertrend(10, 3) state long/short, SL 20%, 30% size | 1× | 49 | 37 | **+50.8%** | 29.1% |
+| same, 40% size | 1× | 49 | 35 | +52.7% | 31.2% |
+| same, 50% size | 1× | 48 | 35 | +59.2% | 35.7% |
+| same, BTC+ETH+SOL at 33% | 1× | 78 | 33 | +38.5% | 32.5% |
+| Neighbours (10, 3.5) / (12, 3) / (14, 3) / (7, 3) / (10, 2.5), 40% | 1× | 42–75 | 30–38 | +33 / +22 / +46 / +14 / +12% | 31–34% |
+| Supertrend(14, 4) state long/short | 1× | 34 | 41 | +11.5% | 36.2% |
+| Supertrend(10, 3) state long/short, 40% | **2×** | 46 | 37 | +180% | 35.7% |
+| every neighbour above at 2× — (10, 2.5), (10, 3.5), (12, 3), (14, 4) | 2× | 10–18 | 14–22 | **−30 to −39%** (stopped by `max_capital_loss`) | 33–46% |
+| EMA 21/55 state long/short, ATR 3× stop, 4h and 1d | 1–2× | 16–182 | 10–34 | −33 to −41% (1d 21/55 at 1× the only positive: +8.9%) | 32–38% |
+| Supertrend(10, 3) state long/short on 4h, SL 15% | 2× | 43 | 23 | −35% | 31.8% |
+
+Read the 2× rows correctly: the shipped parameters happen to survive 2× leverage and every neighbour blows through the capital-loss stop — that is path luck, not an edge, which is why the template ships at **1×**. Leverage doubles the trade-level swings, and a 35% max-drawdown guard sized for 1× stops the bot before the good trend arrives. The shorts do not add return in this window (the 1d bull run rewards the long side; a long-only Supertrend gives +26% at 50% size) — they cut the time flat and the 2026 drawdown, which is what makes the smaller 30% size hold up. Funding is not simulated (§1); at 1× and multi-week holds it is a few percent a year against whichever side is crowded.
 
 Original measurements (engine v1, one position per pair):
 
@@ -290,7 +308,7 @@ Take-aways: (1) simple trend following with an opposite-signal exit works across
 4. SL/TP sized for the timeframe (§4.4); reward:risk ≥ 1.5 if both are fixed.
 5. `backtest_lookback` covers several regimes and the exchange has that history; longest indicator length ≤ lookback / 10.
 6. `is_sandbox: true`, `api_execution: false`, `api_key_name: null`, `max_order_value` present.
-7. After the JSON, tell the user in 3–5 lines: what regime it targets, what the failure mode is, what to look for in the backtest (trade count, PF, DD vs. B&H), and that it must forward-test first. If the request cannot be expressed (shorting, multi-timeframe in one graph, time-of-day rules), say so instead of approximating.
+7. After the JSON, tell the user in 3–5 lines: what regime it targets, what the failure mode is, what to look for in the backtest (trade count, PF, DD vs. B&H), and that it must forward-test first. If the request cannot be expressed (shorting on a spot market, multi-timeframe in one graph, time-of-day rules), say so instead of approximating.
 
 ---
 
@@ -423,7 +441,7 @@ Shorts (swap only): add `"short"` (same shape as `entry`, its TP/SL are the shor
 
 ## 6. Vetted templates
 
-Three complete files, identical to `examples/*.apex.json` in the repository, all imported and backtested in the real engine (results in §4.9, re-verified on v2.0.0 with `scripts/verify_examples.py`; `tests/golden/` pins their order stream on synthetic data so an engine change can never silently alter them). Adapt pairs, fee and sizes; keep the structure. Each is deliberately minimal — every addition we tried made them worse.
+Four complete files, identical to `examples/*.apex.json` in the repository, all imported and backtested in the real engine (results in §4.9, re-verified with `scripts/verify_examples.py`; `tests/golden/` pins their order stream on synthetic data so an engine change can never silently alter them). Three are long-only spot, the fourth is the long/short perpetual version of the first. Adapt pairs, fee and sizes; keep the structure. Each is deliberately minimal — every addition we tried made them worse.
 
 ### 6.1 Supertrend trend follower — 1d, flip in / flip out, 15% disaster trail
 
@@ -600,6 +618,142 @@ Backtest Dec 2023 → Sep 2026, BTC+ETH+SOL at 33%: **+15.3%, max DD 26.3%, 153 
 ```
 
 Roughly one trade per pair per week. The ATR 3× trailing stop (≈ 4–7% on 4h) closes most trades — 134 of 153 exits were the trail, at +0.9% average — while the death cross only catches slow rolls. Lower return than the daily systems but shallower single-trade losses and faster feedback for a forward test. Run at least 6 000 candles; a 2 000-candle window covers one regime only.
+
+### 6.4 Supertrend long/short on perpetuals — 1d, 1×, long in uptrend, short in downtrend
+
+Backtest 30 Dec 2023 → 24 Sep 2026, BTC+ETH USDT-settled perps at 30%: **+50.8%, max DD 29.1%, 49 trades (26 long / 23 short), 37% win rate**, 0 liquidations, entries never blocked (buy & hold: BTC +100%, ETH +17%). Neighbours at 1× all positive (+12 to +46%); at 2× only these exact parameters survive, so it ships at 1× (§4.9).
+
+```json
+{
+  "apex_version": "1.0",
+  "exported_at": "2026-09-25T12:00:00Z",
+  "bot": {
+    "name": "Supertrend Long/Short Perp 1d",
+    "is_sandbox": true,
+    "strategy": "node_evaluator",
+    "settings": {
+      "symbol": "BTC/USDT:USDT",
+      "symbols": [
+        "BTC/USDT:USDT",
+        "ETH/USDT:USDT"
+      ],
+      "timeframe": "1d",
+      "market_type": "swap",
+      "leverage": 1,
+      "margin_mode": "isolated",
+      "max_positions": 2,
+      "max_positions_scope": "global",
+      "cooldown_trades": 1,
+      "cooldown_candles": 5,
+      "max_drawdown": 35,
+      "drawdown_action": "block_entries",
+      "drawdown_cooldown_days": 14,
+      "max_capital_loss": 40,
+      "max_order_value": 1000,
+      "live_allocation_pct": 100,
+      "api_execution": false,
+      "backtest_on_start": true,
+      "backtest_capital": 1000,
+      "backtest_lookback": 1000,
+      "api_key_name": null,
+      "data_exchange": "binance",
+      "trade_settings": {
+        "entry": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 30,
+          "fee": 0.05,
+          "slippage": 0.05,
+          "take_profits": [],
+          "stop_losses": [
+            {
+              "type": "percentage",
+              "value": 20.0,
+              "close_amount_type": "percentage",
+              "close_amount_value": 100
+            }
+          ]
+        },
+        "exit": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 100,
+          "fee": 0.05,
+          "slippage": 0.05
+        },
+        "short": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 30,
+          "fee": 0.05,
+          "slippage": 0.05,
+          "take_profits": [],
+          "stop_losses": [
+            {
+              "type": "percentage",
+              "value": 20.0,
+              "close_amount_type": "percentage",
+              "close_amount_value": 100
+            }
+          ]
+        },
+        "cover": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 100,
+          "fee": 0.05,
+          "slippage": 0.05
+        }
+      },
+      "nodes": {
+        "st_dir": {
+          "class": "indicator",
+          "method": "supertrend",
+          "params": {
+            "length": 10,
+            "multiplier": 3.0
+          },
+          "output_idx": 1
+        },
+        "trend_up": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": ">",
+          "right": 0
+        },
+        "trend_down": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": "<",
+          "right": 0
+        },
+        "flip_up": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": "cross_above",
+          "right": 0
+        },
+        "flip_down": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": "cross_below",
+          "right": 0
+        }
+      },
+      "ui_layout": {
+        "nodes": [],
+        "edges": []
+      },
+      "entry_node": "trend_up",
+      "exit_node": "flip_down",
+      "short_node": "trend_down",
+      "cover_node": "flip_up"
+    }
+  }
+}
+```
+
+The same flip as §6.1, made two-sided: `trend_up` (`st_dir > 0`) is the BUY, `flip_down` the SELL, `trend_down` the SHORT and `flip_up` the COVER. The entries are states rather than crosses on purpose — a long and a short never coexist on a pair, so on the flip candle the old side is closed and the new side opens one candle later from the state; with the flip as the only strategy exit the state fires once per trend, and the 20% stop is a disaster stop only (a trailing stop here would re-enter after every stop-out — tested, −0.3%). `market_type: swap` with `:USDT` symbols, `leverage: 1`, `margin_mode: isolated`, taker fee 0.05% on both legs. Runs as a forward test without a key; live needs a key bound to the swap market (§5). Do not raise the leverage without re-running the backtest: the 2× rows in §4.9 show why.
 
 ---
 

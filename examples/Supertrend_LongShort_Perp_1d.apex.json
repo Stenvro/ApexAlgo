@@ -1,0 +1,127 @@
+{
+  "apex_version": "1.0",
+  "exported_at": "2026-09-25T12:00:00Z",
+  "bot": {
+    "name": "Supertrend Long/Short Perp 1d",
+    "is_sandbox": true,
+    "strategy": "node_evaluator",
+    "settings": {
+      "symbol": "BTC/USDT:USDT",
+      "symbols": [
+        "BTC/USDT:USDT",
+        "ETH/USDT:USDT"
+      ],
+      "timeframe": "1d",
+      "market_type": "swap",
+      "leverage": 1,
+      "margin_mode": "isolated",
+      "max_positions": 2,
+      "max_positions_scope": "global",
+      "cooldown_trades": 1,
+      "cooldown_candles": 5,
+      "max_drawdown": 35,
+      "drawdown_action": "block_entries",
+      "drawdown_cooldown_days": 14,
+      "max_capital_loss": 40,
+      "max_order_value": 1000,
+      "live_allocation_pct": 100,
+      "api_execution": false,
+      "backtest_on_start": true,
+      "backtest_capital": 1000,
+      "backtest_lookback": 1000,
+      "api_key_name": null,
+      "data_exchange": "binance",
+      "trade_settings": {
+        "entry": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 30,
+          "fee": 0.05,
+          "slippage": 0.05,
+          "take_profits": [],
+          "stop_losses": [
+            {
+              "type": "percentage",
+              "value": 20.0,
+              "close_amount_type": "percentage",
+              "close_amount_value": 100
+            }
+          ]
+        },
+        "exit": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 100,
+          "fee": 0.05,
+          "slippage": 0.05
+        },
+        "short": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 30,
+          "fee": 0.05,
+          "slippage": 0.05,
+          "take_profits": [],
+          "stop_losses": [
+            {
+              "type": "percentage",
+              "value": 20.0,
+              "close_amount_type": "percentage",
+              "close_amount_value": 100
+            }
+          ]
+        },
+        "cover": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 100,
+          "fee": 0.05,
+          "slippage": 0.05
+        }
+      },
+      "nodes": {
+        "st_dir": {
+          "class": "indicator",
+          "method": "supertrend",
+          "params": {
+            "length": 10,
+            "multiplier": 3.0
+          },
+          "output_idx": 1
+        },
+        "trend_up": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": ">",
+          "right": 0
+        },
+        "trend_down": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": "<",
+          "right": 0
+        },
+        "flip_up": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": "cross_above",
+          "right": 0
+        },
+        "flip_down": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": "cross_below",
+          "right": 0
+        }
+      },
+      "ui_layout": {
+        "nodes": [],
+        "edges": []
+      },
+      "entry_node": "trend_up",
+      "exit_node": "flip_down",
+      "short_node": "trend_down",
+      "cover_node": "flip_up"
+    }
+  }
+}
