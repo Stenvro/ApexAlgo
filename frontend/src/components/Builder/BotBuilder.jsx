@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import ReactFlow, { MiniMap, Controls, Background, useNodesState, useEdgesState, addEdge, ReactFlowProvider } from 'reactflow';
+import ReactFlow, { MiniMap, Controls, Background, useNodesState, useEdgesState, useNodesInitialized, addEdge, ReactFlowProvider } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { BotConfigNode, WhitelistNode, BacktestNode, ApiKeyNode, IndicatorNode, ConditionNode, LogicNode, StopLossNode, TakeProfitNode, ActionNode, PriceDataNode } from './CustomNodes';
 import { apiClient } from '../../api/client';
@@ -54,7 +54,7 @@ function rebuildLayoutFromSettings(settings, updateNodeData, deleteNode) {
         config:    { w: 340, h: 1100 }, // 12 fields incl. guards + live allocation; cooldown row is conditional
         whitelist: { w: 320, h: 200 },
         backtest:  { w: 320, h: 220 },
-        apiKey:    { w: 320, h: 240 },
+        apiKey:    { w: 320, h: 340 }, // grows with market type / leverage / margin mode
         indicator: { w: 270, h: 200 }, // base; grows with params
         priceData: { w: 240, h: 190 },
         condition: { w: 280, h: 200 },
@@ -279,6 +279,35 @@ function rebuildLayoutFromSettings(settings, updateNodeData, deleteNode) {
     return { nodes, edges };
 }
 
+// The SIZE table above is a guess; the real heights depend on content (param
+// count, hint texts, leverage fields) and drift whenever a node gains a row.
+// Once ReactFlow has measured the nodes, push every column apart from the
+// top so no block overlaps the one above it. Only vertical shifts, only
+// downwards, so the hand-made column layout stays recognisable.
+const RELAYOUT_GAP = 60;
+function resolveColumnOverlaps(nodes) {
+    const columns = new Map();
+    for (const n of nodes) {
+        const x = Math.round(n.position.x);
+        if (!columns.has(x)) columns.set(x, []);
+        columns.get(x).push(n);
+    }
+    const shifted = new Map();
+    for (const col of columns.values()) {
+        col.sort((a, b) => a.position.y - b.position.y);
+        let bottom = -Infinity;
+        for (const n of col) {
+            const h = n.height || 0;
+            let y = n.position.y;
+            if (y < bottom + RELAYOUT_GAP) y = bottom + RELAYOUT_GAP;
+            if (y !== n.position.y) shifted.set(n.id, y);
+            bottom = y + h;
+        }
+    }
+    if (shifted.size === 0) return null;
+    return nodes.map(n => shifted.has(n.id) ? { ...n, position: { ...n.position, y: shifted.get(n.id) } } : n);
+}
+
 // Stable fingerprint of what Save would persist: node identity, position and
 // user-editable data (runtime keys pushed in by effects are ignored), plus
 // edge topology. Used to decide whether closing would lose work.
@@ -322,6 +351,10 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   const [knownSymbols, setKnownSymbols] = useState(null);
 
   const initRef = useRef(false);
+  // Set when the layout was generated (rebuilt from settings or the new-bot
+  // default) rather than restored from ui_layout: fix overlaps once measured.
+  const relayoutRef = useRef(false);
+  const nodesInitialized = useNodesInitialized();
 
   const updateNodeData = useCallback((id, field, value) => {
     let safeValue = value;
@@ -386,6 +419,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         setNodes(rebuilt.nodes);
         setEdges(rebuilt.edges);
         initRef.current = true;
+        relayoutRef.current = true;
     } else {
         setNodes([
             { id: getId(), type: 'botConfig', position: { x: 50, y: 50 }, data: { onChange: updateNodeData, onDelete: deleteNode, botName: editingBot ? editingBot.name : 'Apex Strategy Alpha', timeframe: editingBot?.settings?.timeframe || '1m', executionMode: 'paper', maxPositions: 1, maxPositionsScope: 'per_pair', cooldownTrades: 0, cooldownCandles: 0 } },
@@ -394,6 +428,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
             { id: getId(), type: 'apiKey', position: { x: 470, y: 610 }, data: { onChange: updateNodeData, onDelete: deleteNode, apiKeyName: null, dataExchange: 'okx', marketType: 'spot', leverage: 1, marginMode: 'isolated' } }
         ]);
         initRef.current = true;
+        relayoutRef.current = true;
     }
   }, [editingBot, updateNodeData, deleteNode, setNodes, setEdges]);
 
@@ -635,6 +670,24 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
       }
   }, [nodes, edges]);
   const isDirty = () => baselineRef.current !== null && graphSnapshot(nodes, edges) !== baselineRef.current;
+
+  // Generated layouts: once every node has a measured height, separate the
+  // columns and retake the baseline — a layout correction is not user work.
+  // Keeps running while the graph is untouched (nodes grow when keys and
+  // market lists arrive); the first user edit ends it.
+  useEffect(() => {
+      if (!relayoutRef.current || !nodesInitialized || nodes.length === 0) return;
+      if (nodes.some(n => !n.height)) return;
+      if (baselineRef.current !== null && graphSnapshot(nodes, edges) !== baselineRef.current) {
+          relayoutRef.current = false;
+          return;
+      }
+      const fixed = resolveColumnOverlaps(nodes);
+      if (!fixed) return;
+      setNodes(fixed);
+      baselineRef.current = graphSnapshot(fixed, edges);
+      if (reactFlowInstance) requestAnimationFrame(() => reactFlowInstance.fitView({ padding: 0.1 }));
+  }, [nodesInitialized, nodes, edges, setNodes, reactFlowInstance]);
 
   // Re-entrancy guard: a second Close/Esc while the "Unsaved changes" dialog is
   // open must not fire another confirmDialog (which would resolve the first

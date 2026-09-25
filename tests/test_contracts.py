@@ -136,7 +136,12 @@ def test_inverse_pnl_equals_the_quote_pnl_valued_at_exit(qty, entry, exit_, size
     # dir·contracts·size·(1/entry − 1/exit) == quote PnL (contracts·size·(exit/entry − 1)) / exit
     spec = spec_from_symbol("BTC/USD:BTC", size)
     quote_pnl = qty * size * (exit_ / entry - 1)
-    assert spec.pnl_cash("long", qty, entry, exit_) == pytest.approx(quote_pnl / exit_, rel=1e-7, abs=1e-12)
+    # Both sides cancel two nearly equal terms when exit ≈ entry, so the
+    # rounding noise scales with the settle-coin notional (qty·size/price),
+    # not with the (near-zero) result: e.g. entry = 0.01 + 1 ulp, qty·size =
+    # 200 leaves ~3e-12 of noise, which a fixed 1e-12 floor flagged on CI.
+    noise = 1e-11 * qty * size / min(entry, exit_)
+    assert spec.pnl_cash("long", qty, entry, exit_) == pytest.approx(quote_pnl / exit_, rel=1e-7, abs=noise)
 
 
 @given(sides, prices, st.floats(min_value=1.0, max_value=125.0))

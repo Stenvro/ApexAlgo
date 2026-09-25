@@ -322,7 +322,7 @@ export const ApiKeyNode = ({ id, data }) => {
   }, [selectedKey, keyMarket, data.marketType, hasSwap, id]); // eslint-disable-line react-hooks/exhaustive-deps -- data.onChange is stable
 
   return (
-    <div className="bg-raised/90 backdrop-blur-xl border border-info rounded-xl shadow-lg min-w-[260px]">
+    <div className="bg-raised/90 backdrop-blur-xl border border-info rounded-xl shadow-lg min-w-[260px] max-w-[340px]">
       <div className="bg-info/10 px-3 py-2 border-b border-info/30 flex justify-between items-center">
         <span className="font-bold text-info text-xs uppercase tracking-wider">EXCHANGE ROUTING</span>
         {data.onDelete && <button onClick={() => data.onDelete(id)} className="text-muted hover:text-danger transition-colors" aria-label="Remove exchange routing block" title="Remove block">✕</button>}
@@ -390,7 +390,7 @@ export const ApiKeyNode = ({ id, data }) => {
         )}
         {isSwap && (
           <span className="text-3xs text-muted block">
-            Up to {maxLev}× on {exchangeId.toUpperCase()}. {leverage > 3 ? `${leverage}× liquidates after a ≈ −${liquidationPct(leverage)}% move — ` : ''}Position size = margin × leverage. Backtest and forward test charge the funding rates and use the exchange's margin tiers when stored; cross margin puts the whole pool behind every position.{data.marketCtx?.hasInverse ? ` Inverse pairs: margin and PnL in ${data.marketCtx.inverseBases.join('/')}.` : ''}
+            Up to {maxLev}× on {exchangeId.toUpperCase()}. {leverage > 3 ? `${leverage}× liquidates after a ≈ −${liquidationPct(leverage)}% move — ` : ''}Size = margin × leverage. Simulations charge funding and use the exchange's margin tiers; cross margin puts the whole pool behind every position.{data.marketCtx?.hasInverse ? ` Inverse pairs: margin and PnL in ${data.marketCtx.inverseBases.join('/')}.` : ''}
           </span>
         )}
       </div>
