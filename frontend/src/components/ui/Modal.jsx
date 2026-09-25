@@ -18,6 +18,7 @@
  * For simple yes/no flows prefer `confirmDialog()` from ui/ConfirmDialog.
  */
 import { useEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import Button from './Button';
 
 const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -69,8 +70,11 @@ const Modal = ({ config, customBody }) => {
 
   const colors = TYPE_COLORS[config.type] || TYPE_COLORS.warning;
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="apex-modal-title" data-apex-modal="">
+  // Portalled to <body> at z-[300] so the dialog always sits above full-screen
+  // overlays (builder z-[100], mobile toolbox z-[110]); the Toaster (z-[400])
+  // stays above it.
+  return createPortal(
+    <div className="fixed inset-0 z-[300] flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-labelledby="apex-modal-title" data-apex-modal="">
       <div
         className="absolute inset-0 backdrop backdrop-enter"
         onClick={busy ? undefined : config.onCancel}
@@ -115,7 +119,8 @@ const Modal = ({ config, customBody }) => {
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   );
 };
 

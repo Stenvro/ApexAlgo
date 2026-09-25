@@ -14,6 +14,7 @@ from backend.engine.bot_manager import BotManager
 from backend.engine.settings_validator import validate_bot_settings
 from backend.engine.sizing import _config_fingerprint
 from backend.models.bots import BotConfig
+from backend.models.candles import Candle
 from backend.models.orders import Order
 from backend.models.positions import Position
 from tests.conftest import insert_candles, make_candles
@@ -93,7 +94,8 @@ def test_pnl_helpers_mirror_long_and_short():
     assert pnl.price_pnl(None, 100, 110, 2) == pytest.approx(20)  # legacy rows are longs
     assert pnl.liquidation_price("short", 100.0, 10) == pytest.approx(100 * (1 + 0.995 / 10))
     assert pnl.liquidation_price("long", 100.0, 10) == pytest.approx(100 * (1 - 0.995 / 10))
-    assert pnl.liquidation_price("short", 100.0, 1) is None
+    assert pnl.liquidation_price("short", 100.0, 1) == pytest.approx(100 * (1 + 0.995))
+    assert pnl.liquidation_price("long", 100.0, 1) is None
     assert pnl.liquidated("short", 110.0, 111.0, 100.0) and not pnl.liquidated("short", 110.0, 109.0, 100.0)
     assert pnl.liquidated("long", 90.0, 100.0, 89.0) and not pnl.liquidated("long", 90.0, 100.0, 91.0)
     assert pnl.open_order_side("short") == "sell" and pnl.close_order_side("short") == "buy"
@@ -305,7 +307,9 @@ def test_backtest_short_liquidation_on_high(db):
     assert bot.settings["last_backtest_summary"]["liquidations"] >= 1 and liq
     p = liq[0]
     margin = p.entry_price * p.amount / lev
-    assert p.profit_abs == pytest.approx(-margin, rel=1e-6)
+    sell = db.query(Order).filter(Order.position_id == p.id, Order.side == "sell").one()
+    assert p.profit_abs == pytest.approx(-(margin + sell.fee), rel=1e-6)  # margin + entry fee lost
+    assert p.profit_pct == pytest.approx(-100.0, rel=1e-6)
     buy = db.query(Order).filter(Order.position_id == p.id, Order.side == "buy").one()
     assert buy.price == pytest.approx(pnl.liquidation_price("short", p.entry_price, lev), rel=1e-9)
     assert buy.price > p.entry_price and buy.fee == 0 and buy.reduce_only == 1
@@ -377,7 +381,8 @@ def test_live_short_stop_loss_buys_reduce_only(db, swap_bot, run_tick):
     closed = db.get(Position, pos.id)
     assert closed.status == "closed"
     assert closed.profit_abs == pytest.approx((100.0 - 110.0) * 0.5)
-    assert closed.profit_pct == pytest.approx(-10.0)
+    # profit_pct is on the locked capital (margin at 3x): -10% price move x 3
+    assert closed.profit_pct == pytest.approx(-30.0)
     close_order = db.query(Order).filter(Order.position_id == pos.id, Order.side == "buy").one()
     assert close_order.reduce_only == 1 and close_order.amount == pytest.approx(0.5)
 
@@ -436,7 +441,7 @@ def test_force_close_all_covers_short(db, swap_bot, monkeypatch):
     assert [(o["side"], o["params"]) for o in mock.created] == [("buy", {"reduceOnly": True})]
     closed = db.get(Position, pos.id)
     assert closed.status == "closed" and closed.profit_abs == pytest.approx((100.0 - 99.0) * 0.5)
-    assert closed.profit_pct == pytest.approx(1.0)
+    assert closed.profit_pct == pytest.approx(3.0)  # +1% price move on 3x margin
 
 
 def test_forward_short_entry_and_pool_accounting(db, swap_bot, run_tick):
@@ -496,3 +501,28 @@ def test_fingerprint_ignores_absent_short_nodes():
     explicit = dict(base, short_node=None, cover_node=None)
     assert _config_fingerprint(explicit) == _config_fingerprint(base)
     assert _config_fingerprint(dict(base, short_node="short")) != _config_fingerprint(base)
+
+
+# ── audit 2026-09-24: forward liquidation mirrors the short side ───────────
+
+def test_forward_short_is_liquidated_on_the_candle_high(db, swap_bot, run_tick):
+    """Item 11 mirrored: a short is liquidated when the candle high reaches
+    `entry*(1+(1-MMR)/lev)`; loss = margin + entry fee, no exit fee."""
+    s = _short_settings(short_always=False, leverage=10, sl_pct=50)
+    s["api_execution"] = False
+    s["api_key_name"] = None
+    _, candles = swap_bot(s)
+    db.query(Candle).filter(Candle.symbol == SWAP, Candle.timestamp == candles[-1].timestamp).update({"high": 115.0})
+    db.commit()
+    pos = _open_short_position(db, candles, entry=100.0, amount=1.0, leverage=10.0, mode="forward_test")
+    db.query(Order).filter(Order.position_id == pos.id).update({"fee": 0.1})
+    db.commit()
+    run_tick(SwapExchangeMock())
+    db.expire_all()
+    closed = db.get(Position, pos.id)
+    assert closed.status == "closed" and "liquidation" in closed.triggered_exits
+    assert closed.profit_abs == pytest.approx(-(100.0 * 1.0 / 10 + 0.1))
+    assert closed.profit_pct == pytest.approx(-100.0)
+    cover = db.query(Order).filter(Order.position_id == pos.id, Order.side == "buy").one()
+    assert cover.reduce_only == 1 and cover.fee == 0
+    assert cover.price == pytest.approx(pnl.liquidation_price("short", 100.0, 10))

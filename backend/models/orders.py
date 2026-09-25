@@ -22,7 +22,9 @@ class Order(Base):
 
     price = Column(Float)
     amount = Column(Float)
-    fee = Column(Float, nullable=True)
+    fee = Column(Float, nullable=True)                  # in the position's cash currency
+    fee_currency = Column(String, nullable=True)        # what the exchange charged it in (live), when known
+    fee_cash = Column(Float, nullable=True)             # the raw charged amount in `fee_currency`
 
     status = Column(String, default="open")             # "open", "filled", "canceled", "rejected"
     market_type = Column(String, default="spot")        # "spot" | "swap"

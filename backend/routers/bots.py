@@ -21,6 +21,7 @@ from backend.core.security import verify_api_key
 from backend.engine.settings_validator import validate_bot_settings
 from backend.engine.bot_manager import bot_manager, _config_fingerprint
 from backend.engine.sizing import backtest_pin
+from backend.engine.symbols import cash_currency as _cash_currency_of
 from backend.engine.data_verify import verify_window
 from backend.core.exchange_registry import build_exchange_for_symbol
 from backend.core import bot_log_buffer as blb
@@ -124,6 +125,22 @@ def _execution_mode(settings: dict, sandbox_by_key: dict) -> str:
     return "forward_test"
 
 
+def _bot_cash_currency(settings) -> str | None:
+    """Cash currency of a bot from its whitelist (the persisted backtest
+    summary's `cash_currency` wins when present: it was computed with the
+    exchange's market data)."""
+    if not settings:
+        return None
+    summary = settings.get("last_backtest_summary") or {}
+    if summary.get("cash_currency"):
+        return summary["cash_currency"]
+    for sym in list(settings.get("symbols") or []) + ([settings["symbol"]] if settings.get("symbol") else []):
+        norm = str(sym or "").replace("-", "/").upper()
+        if "/" in norm:
+            return _cash_currency_of(norm)
+    return None
+
+
 @router.get("/summary")
 def get_bots_summary(db: Session = Depends(get_db)):
     """Lightweight bot list for polling — excludes full settings/node graph."""
@@ -149,6 +166,9 @@ def get_bots_summary(db: Session = Depends(get_db)):
                 "api_key_name": b.settings.get("api_key_name") if b.settings else None,
                 "backtest_on_start": b.settings.get("backtest_on_start", False) if b.settings else False,
                 "backtest_capital": b.settings.get("backtest_capital", 1000) if b.settings else 1000,
+                # Unit `backtest_capital`, PnL and the pool are in: the quote
+                # of the whitelist (settle on swaps) — never a hard-coded USD
+                "cash_currency": _bot_cash_currency(b.settings),
                 "backtest_from": b.settings.get("backtest_from") if b.settings else None,
                 "backtest_to": b.settings.get("backtest_to") if b.settings else None,
                 # Needed by chart-open and the Data Vault live-guard: the

@@ -7,6 +7,7 @@
  * @param {'accent'|'info'|'success'|'danger'|'purple'|'neutral'} [props.color='accent']
  * @param {string} [props.sub]                    Optional muted sub-line under the value.
  * @param {React.ReactNode} [props.icon]          Optional small icon, top-right.
+ * @param {string} [props.title]                  Native tooltip on the whole tile (method notes).
  *
  * Usage:
  *   <StatCard label="Win rate" value="63.4%" color="success" sub="142 trades" />
@@ -21,13 +22,14 @@ const COLORS = {
   neutral: 'var(--color-text)',
 };
 
-const StatCard = ({ label, value, color = 'accent', sub, icon }) => {
+const StatCard = ({ label, value, color = 'accent', sub, icon, title }) => {
   const accent = COLORS[color] || COLORS.accent;
 
   return (
     <div
       className="terminal-card relative p-3 border-l-2 transition-all duration-300 hover:border-border-strong hover:-translate-y-px overflow-hidden"
       style={{ borderLeftColor: accent }}
+      title={title}
     >
       <div className="flex items-start justify-between gap-2">
         <p className="text-3xs font-bold uppercase tracking-wider text-muted mb-1">{label}</p>

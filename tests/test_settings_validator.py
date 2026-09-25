@@ -103,3 +103,49 @@ def test_ichimoku_labels_follow_pandas_ta_column_order():
     assert prefixes == ["ISA", "ISB", "ITS", "IKS", "ICS"]
     labels = get_spec("ichimoku").outputs
     assert "Span A" in labels[0] and "Span B" in labels[1] and "Tenkan" in labels[2] and "Kijun" in labels[3] and "Chikou" in labels[4]
+
+
+# ── audit 2026-09-24: sprint A validator items ─────────────────────────────
+
+def _swap(settings, **overrides):
+    return {**settings, "symbol": None, "market_type": "swap", "leverage": 2, "margin_mode": "isolated", "max_order_value": 500, **overrides}
+
+
+def test_whitelist_must_share_one_cash_currency():
+    _, settings = load_example("Donchian_Breakout_1d")
+    res = validate_bot_settings({**settings, "symbols": ["BTC/USDT", "ETH/BTC"]})
+    assert any("mixes cash currencies" in e and "BTC" in e and "USDT" in e for e in res["errors"])
+    assert validate_bot_settings({**settings, "symbols": ["BTC/USDT", "ETH/USDT"]})["errors"] == []
+
+
+def test_inverse_contracts_only_where_the_registry_lists_them():
+    """Sprint D: inverse (coin-margined) contracts are a registry capability,
+    not a blanket rejection — binance serves them (binancecoinm), bingx does
+    not."""
+    _, settings = load_example("Donchian_Breakout_1d")
+    assert validate_bot_settings(_swap(settings, symbols=["BTC/USD:BTC"]), exchange_id="binance")["errors"] == []
+    assert validate_bot_settings(_swap(settings, symbols=["BTC/USD:BTC"]), exchange_id="okx")["errors"] == []
+    res = validate_bot_settings(_swap(settings, symbols=["BTC/USD:BTC"]), exchange_id="bingx")
+    assert any("inverse (coin-margined) contract" in e and "BingX" in e for e in res["errors"])
+    assert validate_bot_settings(_swap(settings, symbols=["BTC/USDT:USDT"]), exchange_id="binance")["errors"] == []
+
+
+def test_integer_settings_are_coerced_and_non_numeric_refused():
+    _, settings = load_example("Donchian_Breakout_1d")
+    s = {**settings, "backtest_lookback": "150.0", "cooldown_trades": "2", "cooldown_candles": 3.0}
+    res = validate_bot_settings(s)
+    assert res["errors"] == []
+    assert s["backtest_lookback"] == 150 and s["cooldown_trades"] == 2 and s["cooldown_candles"] == 3
+    assert all(isinstance(s[k], int) for k in ("backtest_lookback", "cooldown_trades", "cooldown_candles"))
+    assert sum("stored as" in w for w in res["warnings"]) == 3
+    res = validate_bot_settings({**settings, "cooldown_candles": "many"})
+    assert any("cooldown_candles" in e and "whole number" in e for e in res["errors"])
+    res = validate_bot_settings({**settings, "backtest_lookback": 5})
+    assert any("backtest_lookback must be at least 20" in e for e in res["errors"])
+
+
+def test_leverage_warning_quotes_the_maintenance_margin_move():
+    _, settings = load_example("Donchian_Breakout_1d")
+    res = validate_bot_settings(_swap(settings, symbols=["BTC/USDT:USDT"], leverage=5), exchange_id="binance")
+    assert res["errors"] == []
+    assert any("liquidation" in w and "19.9%" in w for w in res["warnings"]), res["warnings"]

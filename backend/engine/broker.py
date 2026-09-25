@@ -9,14 +9,17 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.models.positions import Position
 from backend.core.exchange_registry import get_authenticated_exchange, market_caps
 from backend.core import bot_log_buffer as blb
+from backend.engine.contracts import spec_for_instance
 from backend.engine.symbols import base_of, cash_currency, is_derivative, normalize
 
 logger = logging.getLogger("apexalgo.bot_manager")
 
 
-def get_ccxt_instance(api_key_record: ExchangeKey):
-    """Shared, market-loaded instance from the registry (1 h TTL)."""
-    return get_authenticated_exchange(api_key_record)
+def get_ccxt_instance(api_key_record: ExchangeKey, symbol: str | None = None):
+    """Shared, market-loaded instance from the registry (1 h TTL). `symbol`
+    picks the ccxt class for the contract kind on exchanges that serve
+    inverse contracts from a separate class (binance -> binancecoinm)."""
+    return get_authenticated_exchange(api_key_record, symbol=symbol)
 
 def reconcile_order(ccxt_inst, order, ccxt_symbol, attempts=5, delay=1.0):
     """Market orders often report status open/None on creation even though they
@@ -59,63 +62,91 @@ def cancel_unfilled_order(ccxt_inst, order_id, ccxt_symbol):
         return False
 
 def contract_size(ccxt_inst, ccxt_symbol) -> float:
-    """Base units per contract (1 for spot and for most linear perpetuals;
-    e.g. 0.001 BTC on kucoinfutures). Unknown metadata counts as 1."""
+    """Units per contract from the market (1 for spot and for most linear
+    perpetuals; e.g. 0.001 BTC on kucoinfutures, 100 USD on BTC/USD:BTC).
+    Unknown metadata counts as 1."""
     if not is_derivative(ccxt_symbol):
         return 1.0
-    try:
-        cs = (ccxt_inst.market(ccxt_symbol) or {}).get("contractSize")
-        return float(cs) if cs else 1.0
-    except Exception:
-        return 1.0
+    return spec_for_instance(ccxt_inst, ccxt_symbol).contract_size
 
 
-def to_contracts(ccxt_inst, ccxt_symbol, base_amount) -> float:
-    """Base amount → the `amount` ccxt expects in create_order for a
-    derivative (contracts). Identity on spot."""
-    return float(base_amount) / contract_size(ccxt_inst, ccxt_symbol)
+def to_contracts(ccxt_inst, ccxt_symbol, qty) -> float:
+    """Position size (base units on spot/linear, contracts on inverse) → the
+    `amount` ccxt expects in create_order. Identity on spot and inverse."""
+    return spec_for_instance(ccxt_inst, ccxt_symbol).to_contracts(qty)
 
 
 def from_contracts(ccxt_inst, ccxt_symbol, contracts) -> float:
-    return float(contracts) * contract_size(ccxt_inst, ccxt_symbol)
+    return spec_for_instance(ccxt_inst, ccxt_symbol).from_contracts(contracts)
 
 
 def below_market_minimum(ccxt_inst, ccxt_symbol, amount, price):
     """Return a human-readable violation string when an order would fall
     below the exchange's minimum amount/cost limits, else None. Missing
-    limit metadata is treated as no restriction. `amount` is in base units;
-    on derivatives the amount limit is in contracts."""
+    limit metadata is treated as no restriction. `amount` is the position
+    size (base units on spot/linear, contracts on inverse); the exchange's
+    amount limit is in contracts and its cost limit in the quote currency."""
     try:
+        spec = spec_for_instance(ccxt_inst, ccxt_symbol)
         limits = (ccxt_inst.market(ccxt_symbol) or {}).get("limits") or {}
         min_amount = (limits.get("amount") or {}).get("min")
         min_cost = (limits.get("cost") or {}).get("min")
         if min_amount is not None:
-            cs = contract_size(ccxt_inst, ccxt_symbol)
-            if amount / cs < float(min_amount):
-                unit = " contracts" if cs != 1.0 else ""
-                return f"amount {amount / cs:g}{unit} below exchange minimum {float(min_amount)}{unit}"
+            contracts = spec.to_contracts(amount)
+            if contracts < float(min_amount):
+                unit = " contracts" if contracts != amount or spec.is_inverse else ""
+                return f"amount {contracts:g}{unit} below exchange minimum {float(min_amount)}{unit}"
         if min_cost is not None and price:
-            order_value = amount * float(price)
+            order_value = spec.notional_quote(amount, float(price))
             if order_value < float(min_cost):
-                return f"order ${order_value:.2f} below exchange minimum ${float(min_cost):.2f}"
+                return f"order {order_value:.2f} {spec.quote} below exchange minimum {float(min_cost):.2f} {spec.quote}"
     except Exception:
         return None
     return None
 
-def fee_in_quote(fee_info, ccxt_symbol, price):
-    """CCXT fee cost can be denominated in base currency (typical for buys);
-    convert to quote so it can be netted against PnL."""
+def fee_cash(fee_info, ccxt_symbol, price, ccxt_inst=None):
+    """CCXT fee cost converted to the pair's cash currency (quote on spot,
+    settle on derivatives) so it can be netted against PnL. Base-denominated
+    fees (typical for spot buys) use the fill price, quote-denominated fees
+    on an inverse contract are divided by it; a third currency (BNB, KCS, MX
+    discounts) is converted via `fetch_ticker("<ccy>/<cash>")` on `ccxt_inst`
+    when given. When no rate can be found the fee is booked as 0 with a
+    warning — never as if it were cash (a 0.001 BNB fee is not 0.001 USDT)."""
     if not fee_info:
         return 0.0
     try:
         cost = float(fee_info.get("cost", 0) or 0)
     except (TypeError, ValueError):
         return 0.0
+    if not cost:
+        return 0.0
     currency = fee_info.get("currency")
-    base = base_of(ccxt_symbol) if '/' in ccxt_symbol else None
-    if currency and base and currency.upper() == base.upper() and price:
-        return cost * float(price)
-    return cost
+    if not currency or '/' not in ccxt_symbol:
+        return cost
+    spec = spec_for_instance(ccxt_inst, ccxt_symbol) if ccxt_inst is not None else None
+    if spec is None:
+        from backend.engine.contracts import spec_from_symbol
+        spec = spec_from_symbol(ccxt_symbol)
+    converted = spec.fee_cash_from_fill(fee_info, price)
+    if converted is not None:
+        return converted
+    ccy = str(currency).upper()
+    cash = spec.cash_currency
+    rate = None
+    if ccxt_inst is not None:
+        try:
+            ticker = ccxt_inst.fetch_ticker(f"{ccy}/{cash}")
+            rate = float(ticker.get("last") or ticker.get("close") or 0) or None
+        except Exception as exc:
+            logger.warning("fee_cash: no %s/%s rate for the fee on %s: %s", ccy, cash, ccxt_symbol, exc)
+    if rate:
+        return cost * rate
+    logger.warning("fee_cash: fee of %s %s on %s could not be converted to %s — booked as 0", cost, ccy, ccxt_symbol, cash)
+    return 0.0
+
+
+# Pre-sprint-D name, kept for the BotManager seam and older callers
+fee_in_quote = fee_cash
 
 def wallet_held(balance: dict, token: str) -> float:
     """free + used of `token` from a ccxt fetch_balance() result."""
@@ -188,7 +219,8 @@ def reconcile_positions_with_exchange(db, bot, ccxt_inst, mode: str):
                 step = prec if prec < 1 else 10.0 ** (-prec)
         except Exception:
             pass
-        tol[sym] = max(tol.get(sym, 0.0), 2 * step * contract_size(ccxt_inst, sym))
+        # Tolerance in position units: two precision steps (contracts)
+        tol[sym] = max(tol.get(sym, 0.0), spec_for_instance(ccxt_inst, sym).from_contracts(2 * step))
     held: dict = {}
     for p in ccxt_inst.fetch_positions(list(expected)) or []:
         sym = normalize(p.get("symbol"))
@@ -198,8 +230,8 @@ def reconcile_positions_with_exchange(db, bot, ccxt_inst, mode: str):
         if contracts <= 0:
             continue
         side = str(p.get("side") or "long").lower()
-        cs = float(p.get("contractSize") or 0) or contract_size(ccxt_inst, sym)
-        held[sym] = held.get(sym, 0.0) + (contracts * cs if side == "long" else -contracts * cs)
+        qty = spec_for_instance(ccxt_inst, sym).from_contracts(contracts)
+        held[sym] = held.get(sym, 0.0) + (qty if side == "long" else -qty)
     problems = []
     for sym, want in expected.items():
         have = held.get(sym, 0.0)
@@ -221,6 +253,33 @@ def reconcile_positions_with_exchange(db, bot, ccxt_inst, mode: str):
 # in this process — set_leverage is a real API call, do it once, not per tick
 _leverage_applied: set = set()
 _leverage_lock = threading.Lock()
+
+
+def invalidate_leverage_cache(key_name=None):
+    """Forget which (key, symbol, leverage, margin mode) combinations were
+    confirmed on the exchange — called when a key is saved or deleted so a
+    re-created key with the same name is set up again."""
+    with _leverage_lock:
+        if key_name is None:
+            _leverage_applied.clear()
+        else:
+            for tag in [t for t in _leverage_applied if t[0] == str(key_name)]:
+                _leverage_applied.discard(tag)
+
+
+def exchange_position_gone(ccxt_inst, ccxt_symbol, side="long"):
+    """True when `fetch_positions([symbol])` shows no open contracts on
+    `side` — the position was liquidated or closed outside the bot. Raises
+    when the exchange cannot be asked (the caller decides what to do)."""
+    sym = normalize(ccxt_symbol)
+    for p in ccxt_inst.fetch_positions([sym]) or []:
+        if normalize(p.get("symbol")) != sym:
+            continue
+        if float(p.get("contracts") or 0) <= 0:
+            continue
+        if str(p.get("side") or "long").lower() == side:
+            return False
+    return True
 
 
 def ensure_leverage(ccxt_inst, api_key_record, ccxt_symbol, leverage, margin_mode, bot_name):
@@ -273,11 +332,12 @@ def _benign_leverage_error(exc) -> bool:
 
 
 def get_live_capital(balance_cache, ccxt_inst, api_key_record, ccxt_symbol, bot_name, ttl=30):
-    """Free cash balance on the exchange (quote currency on spot, settle
-    currency on derivatives), cached briefly to spare rate limits. Returns
-    None when the balance cannot be determined so the caller can fall back
-    to the configured capital. `balance_cache` maps
-    (key_name, quote) -> (fetched_at, free)."""
+    """Free balance of the pair's cash currency on the exchange (quote on
+    spot — USDT, EUR, BTC —, settle on derivatives — USDT on linear, BTC on
+    BTC/USD:BTC), cached briefly to spare rate limits. Returns None when the
+    balance cannot be determined so the caller can fall back to the
+    configured capital. `balance_cache` maps
+    (key_name, cash_currency) -> (fetched_at, free)."""
     quote = cash_currency(ccxt_symbol)
     cache_key = (api_key_record.name, quote)
     now = time.monotonic()

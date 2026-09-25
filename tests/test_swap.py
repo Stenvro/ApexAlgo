@@ -11,8 +11,7 @@ import asyncio
 
 import pytest
 
-from backend.engine import broker
-from backend.engine.backtest import liquidation_price
+from backend.engine import broker, pnl
 from backend.engine.bot_manager import BotManager
 from backend.engine.settings_validator import validate_bot_settings
 from backend.engine.sizing import _config_fingerprint
@@ -331,16 +330,28 @@ def test_backtest_liquidation_closes_at_minus_margin(db):
     assert summary["liquidations"] >= 1 and liq
     p = liq[0]
     margin = p.entry_price * p.amount / lev
-    assert p.profit_abs == pytest.approx(-margin, rel=1e-6)
+    buy = db.query(Order).filter(Order.position_id == p.id, Order.side == "buy").one()
+    # The whole locked capital is gone: margin plus the entry fee paid on open
+    assert p.profit_abs == pytest.approx(-(margin + buy.fee), rel=1e-6)
+    assert p.profit_pct == pytest.approx(-100.0, rel=1e-6)
     sell = db.query(Order).filter(Order.position_id == p.id, Order.side == "sell").one()
-    assert sell.price == pytest.approx(liquidation_price(p.entry_price, lev), rel=1e-9)
+    assert sell.price == pytest.approx(pnl.liquidation_price("long", p.entry_price, lev), rel=1e-9)
     assert sell.fee == 0
 
 
 def test_liquidation_price_formula():
-    assert liquidation_price(100.0, 1) == pytest.approx(0.5)  # 1x: only a total wipe-out
-    assert liquidation_price(100.0, 10) == pytest.approx(100 * (1 - 0.995 / 10))
-    assert liquidation_price(100.0, 2) < 100.0
+    assert pnl.liquidation_price("long", 100.0, 1) is None  # 1x long: can only lose its margin, never liquidated
+    assert pnl.liquidation_price("short", 100.0, 1) == pytest.approx(100 * (1 + 0.995))  # 1x short: ~doubling
+    assert pnl.liquidation_price("long", 100.0, 10) == pytest.approx(100 * (1 - 0.995 / 10))
+    assert pnl.liquidation_price("long", 100.0, 2) < 100.0
+
+
+def test_locked_capital_basis():
+    assert pnl.locked_capital(100.0, 2.0) == pytest.approx(200.0)
+    assert pnl.locked_capital(100.0, 2.0, 1, 0.001) == pytest.approx(200.2)
+    assert pnl.locked_capital(100.0, 2.0, 4, 0.001) == pytest.approx(50.0 + 0.2)
+    assert pnl.close_epsilon(1.0) == pytest.approx(1e-6)
+    assert pnl.close_epsilon(1e-6) == pytest.approx(1e-9)
 
 
 # ── forward test ───────────────────────────────────────────────────────────
@@ -362,3 +373,230 @@ def test_forward_swap_entry_sizes_margin_from_pool(db, swap_bot, run_tick):
     # 50% of the 1000 pool as margin, x4 notional; must fit margin + fee
     assert pos[0].amount == pytest.approx(0.5 * 1000 * 4 / close, rel=1e-6)
     assert pos[0].amount * entry_price * (1 / 4 + 0.001) <= 1000 + 1e-6
+
+
+# ── audit 2026-09-24: liquidation outside the backtest, reconciliation, caps ─
+
+def _forward_swap_settings(leverage=10, sl_pct=50, **kw):
+    s = _swap_settings(leverage=leverage, entry_always=False, sl_pct=sl_pct, **kw)
+    s["api_execution"] = False
+    s["api_key_name"] = None
+    return s
+
+
+def _open_forward_swap_position(db, candles, entry=100.0, amount=1.0, leverage=10.0, fee=0.1):
+    ts = candles[-2].timestamp
+    pos = Position(exchange=EXCHANGE, bot_name="live-bot", symbol=SWAP, mode="forward_test", status="open", side="long",
+                   entry_price=entry, amount=amount, created_at=ts, market_type="swap", leverage=leverage)
+    db.add(pos)
+    db.flush()
+    db.add(Order(position_id=pos.id, exchange=EXCHANGE, bot_name="live-bot", mode="forward_test", symbol=SWAP, side="buy",
+                 order_type="market", price=entry, amount=amount, fee=fee, status="filled", timestamp=ts, market_type="swap"))
+    db.commit()
+    return pos
+
+
+def test_forward_position_is_liquidated_on_the_candle_low(db, swap_bot, run_tick):
+    """Item 11: the forward test applies the backtest's price rule — a candle
+    low through the liquidation level loses margin + entry fee, no exit fee,
+    and the pool cannot go negative on a wide stop."""
+    _, candles = swap_bot(_forward_swap_settings(leverage=10, sl_pct=50), last_low=85.0)
+    pos = _open_forward_swap_position(db, candles, entry=100.0, amount=1.0, leverage=10.0, fee=0.1)
+    bm = run_tick(SwapExchangeMock())
+    db.expire_all()
+    closed = db.get(Position, pos.id)
+    assert closed.status == "closed"
+    assert "liquidation" in (closed.triggered_exits or [])
+    assert closed.profit_abs == pytest.approx(-(100.0 * 1.0 / 10 + 0.1))
+    assert closed.profit_pct == pytest.approx(-100.0)
+    sell = db.query(Order).filter(Order.position_id == pos.id, Order.side == "sell").one()
+    assert sell.reduce_only == 1 and sell.fee == 0
+    assert sell.exchange_order_id.startswith("liq_")
+    assert sell.price == pytest.approx(pnl.liquidation_price("long", 100.0, 10))
+    assert bm._drawdown_cache.get(("live-bot", "forward"), {}).get("running_pnl", closed.profit_abs) == pytest.approx(closed.profit_abs)
+
+
+def test_forward_stop_loss_fires_before_liquidation_on_the_same_candle(db, swap_bot, run_tick):
+    """Item 12 mirrored in the forward test: a 3% stop that fills at its
+    trigger wins from a low that also crosses the liquidation level."""
+    _, candles = swap_bot(_forward_swap_settings(leverage=10, sl_pct=3), last_low=85.0)
+    pos = _open_forward_swap_position(db, candles, entry=100.0, amount=1.0, leverage=10.0, fee=0.1)
+    run_tick(SwapExchangeMock())
+    db.expire_all()
+    closed = db.get(Position, pos.id)
+    assert closed.status == "closed"
+    assert "liquidation" not in (closed.triggered_exits or [])
+    sell = db.query(Order).filter(Order.position_id == pos.id, Order.side == "sell").one()
+    fill = min(97.0, candles[-1].open)  # a gap below the trigger fills at the open, still above the liq level
+    assert fill > pnl.liquidation_price("long", 100.0, 10)
+    assert sell.price == pytest.approx(fill)
+    assert closed.profit_abs == pytest.approx((fill - 100.0) * 1.0 - 0.1 - fill * 0.001)
+
+
+def test_backtest_stop_loss_fires_before_liquidation_on_the_same_candle(db):
+    """Item 12: exits run first; only an exit whose fill would be beyond the
+    liquidation level is replaced by the liquidation. With a 3% stop at 10x
+    the seed that liquidates on a 50% stop books stop-loss exits instead."""
+    bot, positions = _run_backtest(db, _bt_settings(leverage=10, sl=3, tp=500, amount_pct=20), seed=5)
+    assert positions
+    assert bot.settings["last_backtest_summary"]["liquidations"] == 0
+    assert not any("liquidation" in (p.triggered_exits or []) for p in positions)
+    for p in positions:
+        if p.status != "closed":
+            continue
+        sell = db.query(Order).filter(Order.position_id == p.id, Order.side == "sell").first()
+        assert sell.price >= pnl.liquidation_price("long", p.entry_price, 10) - 1e-9
+
+
+def test_profit_pct_basis_is_locked_capital_in_backtest_and_live(db, swap_bot, run_tick):
+    """Item 10: profit_pct = realized / (margin + entry fee) everywhere."""
+    _, candles = swap_bot(_swap_settings(entry_always=False, sl_pct=10), last_low=80.0)
+    pos = _open_swap_position(db, candles, entry=100.0, amount=0.5, leverage=3.0)
+    run_tick(SwapExchangeMock(average=90.0))
+    db.expire_all()
+    closed = db.get(Position, pos.id)
+    assert closed.profit_abs == pytest.approx(-5.0)
+    assert closed.profit_pct == pytest.approx(100 * closed.profit_abs / pnl.locked_capital(100.0, 0.5, 3))
+
+    bt_s = _bt_settings(leverage=3)
+    bt_s["symbols"] = ["ETH/USDT:USDT"]
+    bot, bt_positions = _run_backtest(db, bt_s, symbol="ETH/USDT:USDT")
+    checked = 0
+    for p in bt_positions:
+        if p.status != "closed" or "liquidation" in (p.triggered_exits or []):
+            continue
+        buy = db.query(Order).filter(Order.position_id == p.id, Order.side == "buy").one()
+        basis = pnl.locked_capital(p.entry_price, buy.amount, 3) + buy.fee
+        assert p.profit_pct == pytest.approx(100 * p.profit_abs / basis, rel=1e-6)
+        checked += 1
+    assert checked > 0
+
+
+def test_rejected_reduce_only_close_books_liquidation_when_exchange_has_no_position(db, swap_bot, run_tick):
+    """Item 11 (live): a rejected reduce-only close plus `fetch_positions`
+    showing nothing means the exchange liquidated us — book it, stop retrying."""
+    _, candles = swap_bot(_swap_settings(entry_always=False, sl_pct=10), last_low=80.0)
+    pos = _open_swap_position(db, candles, entry=100.0, amount=0.5, leverage=3.0)
+    mock = SwapExchangeMock(positions=[])
+
+    def refuse(symbol, order_type, side, amount, price=None, params=None):
+        raise RuntimeError("ReduceOnly Order is rejected")
+    mock.create_order = refuse
+    run_tick(mock)
+    db.expire_all()
+    closed = db.get(Position, pos.id)
+    assert closed.status == "closed" and "liquidation" in closed.triggered_exits
+    assert closed.profit_abs == pytest.approx(-(100.0 * 0.5 / 3))
+    statuses = sorted(o.status for o in db.query(Order).filter(Order.position_id == pos.id, Order.side == "sell").all())
+    assert statuses == ["filled", "rejected"]
+
+    # ...but not when the exchange still holds it (a transient rejection)
+    _, _ = None, None
+    pos2 = _open_swap_position(db, candles, entry=100.0, amount=0.5, leverage=3.0)
+    mock.positions = [{"symbol": SWAP, "side": "long", "contracts": 500, "contractSize": CONTRACT_SIZE}]
+    run_tick(mock)
+    db.expire_all()
+    assert db.get(Position, pos2.id).status == "open"
+
+
+def test_exchange_position_gone_probe():
+    inst = SwapExchangeMock(positions=[{"symbol": SWAP, "side": "long", "contracts": 5}])
+    assert broker.exchange_position_gone(inst, SWAP, "long") is False
+    assert broker.exchange_position_gone(inst, SWAP, "short") is True
+    inst.positions = [{"symbol": SWAP, "side": "long", "contracts": 0}]
+    assert broker.exchange_position_gone(inst, SWAP, "long") is True
+
+
+def _startup(monkeypatch, mock, bot_id):
+    bm = BotManager()
+    monkeypatch.setattr(bm, "_get_ccxt_instance", lambda key_record: mock)
+    bm._execute_sync_backfill(bot_id)
+    return bm
+
+
+def test_startup_refuses_to_go_live_when_reconciliation_fails(db, swap_bot, monkeypatch):
+    """Item 20: a live bot whose positions cannot be verified is stopped,
+    a sandbox (paper) bot only warns."""
+    from backend.models.bot_logs import BotLog
+    bot, candles = swap_bot()
+    _open_swap_position(db, candles, amount=0.5)
+    mock = SwapExchangeMock()
+
+    def down():
+        raise RuntimeError("exchange unreachable")
+    mock.fetch_balance = down
+    _startup(monkeypatch, mock, bot.id)
+    db.expire_all()
+    bot = db.get(BotConfig, bot.id)
+    assert bot.is_active is False
+    assert "reconciliation failed" in (bot.settings.get("last_stop_reason") or "").lower()
+    errs = [l.msg for l in db.query(BotLog).filter(BotLog.bot_name == "live-bot", BotLog.level == "ERROR").all()]
+    assert any("refusing to go live" in m for m in errs)
+
+    # Paper: same failure is a WARN, the bot keeps running
+    key = db.query(ExchangeKey).filter(ExchangeKey.name == KEY_NAME).one()
+    key.is_sandbox = True
+    bot.is_active = True
+    bot.settings = {**bot.settings, "last_stop_reason": None}
+    db.query(Position).filter(Position.bot_name == "live-bot").update({"mode": "paper"})
+    db.query(Order).filter(Order.bot_name == "live-bot").update({"mode": "paper"})
+    db.commit()
+    _startup(monkeypatch, mock, bot.id)
+    db.expire_all()
+    assert db.get(BotConfig, bot.id).is_active is True
+    warns = [l.msg for l in db.query(BotLog).filter(BotLog.bot_name == "live-bot", BotLog.level == "WARN").all()]
+    assert any("unverified" in m for m in warns)
+
+
+def test_startup_books_liquidation_for_positions_the_exchange_no_longer_holds(db, swap_bot, monkeypatch):
+    """Item 11 (startup): a swap position that vanished while the bot was
+    down is booked as a liquidation, not managed as a ghost."""
+    bot, candles = swap_bot()
+    pos = _open_swap_position(db, candles, entry=100.0, amount=0.5, leverage=3.0)
+    _startup(monkeypatch, SwapExchangeMock(positions=[]), bot.id)
+    db.expire_all()
+    closed = db.get(Position, pos.id)
+    assert closed.status == "closed" and "liquidation" in closed.triggered_exits
+    assert closed.profit_abs == pytest.approx(-(100.0 * 0.5 / 3))
+    assert db.get(BotConfig, bot.id).is_active is True
+
+
+def test_leverage_cache_is_invalidated_per_key():
+    broker._leverage_applied.update({("k1", SWAP, 3, "isolated"), ("k1", "ETH/USDT:USDT", 3, "isolated"), ("k2", SWAP, 3, "isolated")})
+    broker.invalidate_leverage_cache("k1")
+    assert broker._leverage_applied == {("k2", SWAP, 3, "isolated")}
+    broker.invalidate_leverage_cache()
+    assert broker._leverage_applied == set()
+
+
+def test_backtest_max_order_value_caps_every_entry_and_is_a_variant(db):
+    """Item 21: max_order_value caps the simulated entry too (so the backtest
+    trades what live would), hence it is part of the config fingerprint."""
+    s = _bt_settings(leverage=1, market_type="spot", amount_pct=50)
+    s["max_order_value"] = 100
+    bot, positions = _run_backtest(db, s, symbol="BTC/USDT")
+    assert positions
+    for p in positions:
+        buy = db.query(Order).filter(Order.position_id == p.id, Order.side == "buy").one()
+        assert buy.price * buy.amount <= 100.0 * (1 + 1e-9)
+    assert max(db.query(Order.price * Order.amount).filter(Order.side == "buy").all())[0] > 90.0
+    assert _config_fingerprint({**s, "max_order_value": 100}) != _config_fingerprint({**s, "max_order_value": 200})
+
+
+def test_dedup_ignores_a_reduce_only_cover_on_the_same_candle(db, swap_bot, run_tick):
+    """Item 16: a cover (reduce-only buy) on candle T must not be mistaken
+    for an entry already placed on T."""
+    _, candles = swap_bot(_swap_settings(max_positions=1))
+    ts = candles[-1].timestamp
+    old = Position(exchange=EXCHANGE, bot_name="live-bot", symbol=SWAP, mode="live", status="closed", side="short",
+                   entry_price=100.0, amount=0.5, created_at=candles[-3].timestamp, closed_at=ts, market_type="swap", leverage=3.0)
+    db.add(old)
+    db.flush()
+    db.add(Order(position_id=old.id, exchange=EXCHANGE, bot_name="live-bot", mode="live", symbol=SWAP, side="buy",
+                 order_type="market", price=100.0, amount=0.5, fee=0.0, status="filled", timestamp=ts,
+                 exchange_order_id="cover", market_type="swap", reduce_only=1))
+    db.commit()
+    mock = SwapExchangeMock()
+    run_tick(mock)
+    assert [o["side"] for o in mock.created] == ["buy"]
+    assert len(_positions(db, status="open")) == 1

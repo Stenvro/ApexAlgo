@@ -3,6 +3,18 @@ import { Handle, Position } from 'reactflow';
 import { useIndicators } from './indicatorConfig';
 import { useExchanges, marketCaps } from '../../api/exchanges';
 import { DEFAULT_PAIR, parsePairs } from './pairs';
+import { fmtMoney, marketKind, marketCurrency } from '../../utils/money';
+
+// Cash-currency picture of the whitelist, pushed in by the builder as
+// `data.marketCtx` ({ cashCurrency, cashCurrencies, quoteCurrency, hasInverse,
+// inverseBases }); 'mixed' = pairs settle in different currencies.
+const ccyLabel = (code, fallback = 'cash currency of the whitelist') =>
+  (!code ? fallback : code === 'mixed' ? 'mixed currencies' : code);
+const CcyChip = ({ code, title }) => (
+  <span className="ml-1.5 px-1 py-px rounded border border-border bg-inset text-3xs font-num text-accent normal-case tracking-normal align-middle" title={title}>
+    {code === 'mixed' ? 'mixed' : code}
+  </span>
+);
 
 // All known timeframes with display labels
 const ALL_TIMEFRAMES = [
@@ -100,9 +112,12 @@ export const BotConfigNode = ({ id, data }) => (
         </div>
       )}
       <div className="pt-2 border-t border-border">
-        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Max Order Value USD (0 = Off)</label>
+        <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">
+          Max order value (quote notional{data.marketCtx?.quoteCurrency && data.marketCtx.quoteCurrency !== 'mixed' ? `, ${data.marketCtx.quoteCurrency}` : ''}) · 0 = off
+          {data.marketCtx?.quoteCurrency && <CcyChip code={data.marketCtx.quoteCurrency} title={data.marketCtx.quoteCurrency === 'mixed' ? 'The whitelist pairs are quoted in different currencies — the cap applies in each pair\'s own quote' : `Quote currency of the whitelist pairs`} />}
+        </label>
         <input type="number" step="1" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-purple outline-none font-num text-center" value={data.maxOrderValue !== undefined ? data.maxOrderValue : 0} onChange={(e) => data.onChange(id, 'maxOrderValue', e.target.value === "" ? "" : parseFloat(e.target.value))} />
-        <span className="text-3xs text-muted block mt-1">Safety guard: rejects live orders exceeding this USD value</span>
+        <span className="text-3xs text-muted block mt-1">Safety guard: rejects live orders whose notional (size × price, in the pair's quote currency{data.marketCtx?.quoteCurrency && data.marketCtx.quoteCurrency !== 'mixed' ? ` — ${data.marketCtx.quoteCurrency}` : ''}) exceeds this value</span>
       </div>
       <div className="pt-2 border-t border-border">
         <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Live Allocation % of Wallet</label>
@@ -113,6 +128,11 @@ export const BotConfigNode = ({ id, data }) => (
     </div>
   </div>
 );
+
+// Isolated-margin liquidation distance the engine models (engine/pnl.py):
+// entry × (1 ∓ (1 − MMR) / leverage) with MMR = 0.5 % → ≈ −19.9 % at 5×.
+const LIQ_MMR = 0.005;
+const liquidationPct = (lev) => Number((((1 - LIQ_MMR) / Math.max(1, Number(lev) || 1)) * 100).toFixed(1));
 
 // Execution mode + go-live checklist. `data.liveContext` is pushed in by the
 // builder: { keyName, exchange, isSandbox, entryFee, marketType, leverage,
@@ -126,17 +146,24 @@ const ExecutionModeSection = ({ id, data }) => {
   const wantsExchange = mode === 'exchange';
   const isLiveMoney = wantsExchange && hasKey && !ctx.isSandbox;
   const cap = Number(data.maxOrderValue) || 0;
+  const mctx = data.marketCtx || {};
+  // The cap is a quote notional; null when the whitelist quotes in several currencies
+  const quoteCcy = mctx.quoteCurrency && mctx.quoteCurrency !== 'mixed' ? mctx.quoteCurrency : null;
   const fee = Number(ctx.entryFee);
   const isSwap = ctx.marketType === 'swap';
   const lev = isSwap ? (Number(ctx.leverage) || 1) : 1;
-  // Isolated-margin liquidation sits roughly one margin's worth of adverse
-  // move away: −100%/leverage on the notional (maintenance margin ignored)
-  const liqPct = Math.round(100 / lev);
+  // Liquidation distance as the engine models it: (1 − MMR) / leverage with
+  // MMR 0.5 %, e.g. ≈ −19.9 % at 5× (not the naive 100 % / leverage)
+  const liqPct = liquidationPct(lev);
   const checks = [
     { ok: hasKey, label: hasKey ? `Key "${ctx.keyName}" on ${String(ctx.exchange || '').toUpperCase()} (${ctx.isSandbox ? 'sandbox → paper' : 'real → live'})` : 'Select an API key in the Exchange Routing block' },
-    { ok: cap > 0, label: cap > 0 ? `Max order value $${cap} caps every order${isSwap ? ' (notional = margin × leverage)' : ''}` : `Set Max Order Value USD above (required for live orders${isSwap ? '; caps the notional, i.e. margin × leverage' : ''})` },
+    { ok: cap > 0, label: cap > 0 ? `Max order value ${fmtMoney(cap, quoteCcy, { digits: 0 })}${quoteCcy ? '' : ' (quote notional)'} caps every order${isSwap ? ' (notional = margin × leverage)' : ''}` : `Set the max order value above (required for live orders${isSwap ? '; caps the notional, i.e. margin × leverage' : ''})` },
     { ok: fee > 0, label: fee > 0 ? `Entry fee ${fee}% modelled` : 'Entry fee is 0% — the backtest ignores what the exchange will charge' },
-    ...(isSwap ? [{ ok: lev <= 3, label: `Perpetuals ${lev}× ${ctx.marginMode || 'isolated'} · liquidation ≈ −${liqPct}% from entry · funding not modelled` }] : []),
+    ...(isSwap ? [{ ok: lev <= 3, label: `Perpetuals ${lev}× ${ctx.marginMode || 'isolated'} · liquidation ≈ −${liqPct}% from entry · funding not modelled${mctx.hasInverse ? ` · inverse: margin and PnL in ${mctx.inverseBases.join('/')}` : ''}` }] : []),
+    ...(ctx.hasShort ? [
+      { ok: isSwap, label: isSwap ? 'Short entries — routed through a swap key' : 'Short entries — requires a swap (perpetuals) key; this key trades spot' },
+      { ok: !!(ctx.hasCover || ctx.hasShortStop), label: (ctx.hasCover || ctx.hasShortStop) ? 'Short leg has an exit (COVER block or stop-loss)' : 'Short leg has no COVER block and no stop-loss — a short could only be closed by liquidation' },
+    ] : []),
   ];
   return (
     <div className={`pt-2 border-t ${isLiveMoney ? 'border-accent/40' : 'border-border'}`}>
@@ -182,6 +209,12 @@ export const WhitelistNode = ({ id, data }) => {
   // bot (or vice versa) is flagged before the validator would reject it
   const isSwap = market?.marketType === 'swap';
   const wrongForm = market ? pairs.filter(p => p.includes(':') !== isSwap) : [];
+  // Per-pair contract kind and cash currency: from the exchange's market list
+  // when the API sent it, else derived from the symbol form
+  const markets = market?.markets;
+  const kindOf = (p) => marketKind(markets, p);
+  const ccyOf = (p) => marketCurrency(markets, p);
+  const ccys = [...new Set(pairs.map(ccyOf).filter(Boolean))];
   return (
     <div className={`bg-raised/90 backdrop-blur-xl border rounded-xl shadow-lg min-w-[260px] max-w-[340px] ${unknown.length ? 'border-danger' : 'border-warn'}`}>
       <div className="bg-warn/10 px-3 py-2 border-b border-warn/30 flex justify-between items-center">
@@ -192,7 +225,7 @@ export const WhitelistNode = ({ id, data }) => {
         <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Tradeable Pairs (Comma Separated)</label>
         <textarea
           className={`w-full bg-inset border text-text text-xs rounded-md p-2 nodrag outline-none min-h-[60px] resize-none font-num ${unknown.length ? 'border-danger focus:border-danger' : 'border-border focus:border-warn'}`}
-          placeholder={isSwap ? 'BTC/USDT:USDT, ETH/USDT:USDT' : 'BTC/USDT, ETH/USDT, SOL/USDT'}
+          placeholder={isSwap ? 'BTC/USDT:USDT, ETH/USDC:USDC, BTC/USD:BTC' : 'BTC/USDT, ETH/EUR, SOL/USDC'}
           value={data.pairs !== undefined ? data.pairs : DEFAULT_PAIR}
           onChange={(e) => data.onChange(id, 'pairs', e.target.value)}
           onBlur={(e) => data.onChange(id, 'pairs', parsePairs(e.target.value).join(', '))}
@@ -202,10 +235,17 @@ export const WhitelistNode = ({ id, data }) => {
           <div className="flex flex-wrap gap-1">
             {pairs.map(p => {
               const bad = listed && !listed.has(p);
+              const kind = kindOf(p);
+              const ccy = ccyOf(p);
+              const kindTip = kind === 'inverse'
+                ? `Inverse contract — margin and PnL in ${ccy}`
+                : kind === 'linear' ? `Linear contract — settled in ${ccy}` : (ccy ? `Spot — cash in ${ccy}` : undefined);
               return (
-                <span key={p} title={bad ? `${p} is not listed on ${exch}` : (listed ? `Listed on ${exch}` : undefined)}
-                  className={`px-1.5 py-0.5 rounded text-3xs font-num font-bold border ${bad ? 'border-danger/50 bg-danger/10 text-danger' : 'border-border bg-inset text-text'}`}>
+                <span key={p} title={bad ? `${p} is not listed on ${exch}` : [listed ? `Listed on ${exch}` : null, kindTip].filter(Boolean).join(' · ') || undefined}
+                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-3xs font-num font-bold border ${bad ? 'border-danger/50 bg-danger/10 text-danger' : 'border-border bg-inset text-text'}`}>
                   {bad ? '✕ ' : ''}{p}
+                  {kind !== 'spot' && <span className={`px-1 rounded font-normal ${kind === 'inverse' ? 'bg-warn/15 text-warn' : 'bg-info/15 text-info'}`}>{kind}</span>}
+                  {ccy && <span className="text-muted font-normal">{ccy}</span>}
                 </span>
               );
             })}
@@ -214,12 +254,12 @@ export const WhitelistNode = ({ id, data }) => {
         <span className={`text-3xs block ${unknown.length || wrongForm.length ? 'text-danger' : 'text-muted'}`}>
           {wrongForm.length
             ? (isSwap
-                ? `${wrongForm.join(', ')}: perpetual swaps use the BASE/QUOTE:SETTLE form (e.g. BTC/USDT:USDT).`
+                ? `${wrongForm.join(', ')}: perpetual swaps use the BASE/QUOTE:SETTLE form (linear e.g. BTC/USDT:USDT, inverse e.g. BTC/USD:BTC).`
                 : `${wrongForm.join(', ')} are perpetual swaps — a spot bot needs BASE/QUOTE pairs (or pick a perps market in the routing block).`)
             : unknown.length
             ? `${unknown.join(', ')} not listed on ${exch} — the bot cannot start with these.`
             : listed
-              ? `${pairs.length} ${isSwap ? 'perpetual' : 'pair'}${pairs.length === 1 ? '' : 's'} · all listed on ${exch}${isSwap ? ' perps' : ''}`
+              ? `${pairs.length} ${isSwap ? 'perpetual' : 'pair'}${pairs.length === 1 ? '' : 's'} · all listed on ${exch}${isSwap ? ' perps' : ''}${ccys.length > 1 ? ` · settle in ${ccys.join(', ')} — capital and PnL are tracked per currency, never summed` : (ccys[0] ? ` · cash in ${ccys[0]}` : '')}`
               : (market ? `Could not load ${exch} markets — pairs are checked when the bot starts.` : 'Checked against the exchange in the routing block.')}
         </span>
       </div>
@@ -240,8 +280,13 @@ export const BacktestNode = ({ id, data }) => (
       </label>
       <div className="flex space-x-2 pt-2 border-t border-border">
         <div className="w-1/2">
-            <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Start Capital</label>
-            <input type="number" className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-accent outline-none font-num text-center" value={data.capital !== undefined ? data.capital : 1000} onChange={(e) => data.onChange(id, 'capital', e.target.value === "" ? "" : parseFloat(e.target.value))} />
+            <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">
+              Start capital
+              {data.marketCtx?.cashCurrency
+                ? <CcyChip code={data.marketCtx.cashCurrency} title={data.marketCtx.cashCurrency === 'mixed' ? `Whitelist pairs settle in ${(data.marketCtx.cashCurrencies || []).join(', ')} — one pool per currency` : `Cash currency of the whitelist — the pool is ${data.marketCtx.cashCurrency}`} />
+                : <span className="block text-3xs font-normal normal-case tracking-normal text-faint">cash currency of the whitelist</span>}
+            </label>
+            <input type="number" title={`Start capital in the ${ccyLabel(data.marketCtx?.cashCurrency)}`} className="w-full bg-inset border border-border text-accent text-xs rounded-md p-2 nodrag focus:border-accent outline-none font-num text-center" value={data.capital !== undefined ? data.capital : 1000} onChange={(e) => data.onChange(id, 'capital', e.target.value === "" ? "" : parseFloat(e.target.value))} />
         </div>
         <div className="w-1/2">
             <label className="text-2xs text-muted font-bold uppercase mb-1.5 block">Candles (Lookback)</label>
@@ -269,9 +314,12 @@ export const ApiKeyNode = ({ id, data }) => {
   const maxLev = Math.max(1, Number(swapCaps?.max_leverage) || 1);
   const leverage = Number(data.leverage) || 1;
   React.useEffect(() => {
-    // Exchange or key changed underneath a swap choice the new one cannot serve
-    if (!keyMarket && data.marketType === 'swap' && !hasSwap) data.onChange(id, 'marketType', 'spot');
-  }, [keyMarket, data.marketType, hasSwap, id]); // eslint-disable-line react-hooks/exhaustive-deps -- data.onChange is stable
+    // Exchange changed underneath a swap choice the new one cannot serve. With
+    // a key selected the key's market wins (even before the key list has
+    // loaded), so never rewrite the node then — a reopened bot must not turn
+    // dirty from this mount effect.
+    if (!selectedKey && !keyMarket && data.marketType === 'swap' && !hasSwap) data.onChange(id, 'marketType', 'spot');
+  }, [selectedKey, keyMarket, data.marketType, hasSwap, id]); // eslint-disable-line react-hooks/exhaustive-deps -- data.onChange is stable
 
   return (
     <div className="bg-raised/90 backdrop-blur-xl border border-info rounded-xl shadow-lg min-w-[260px]">
@@ -313,12 +361,12 @@ export const ApiKeyNode = ({ id, data }) => {
             onChange={(e) => data.onChange(id, 'marketType', e.target.value)}
           >
             <option value="spot">Spot</option>
-            <option value="swap" disabled={!hasSwap}>Perpetual swaps (USDT/USDC-settled)</option>
+            <option value="swap" disabled={!hasSwap}>Perpetual swaps</option>
           </select>
           <span className="text-3xs text-muted block mt-1">
             {keyMarket
               ? `Follows the key — "${selectedKey}" is a ${keyMarket === 'swap' ? 'perpetuals' : 'spot'} key.`
-              : hasSwap ? 'Perps trade the BASE/QUOTE:SETTLE form (e.g. BTC/USDT:USDT).' : `${exchangeId.toUpperCase()} has spot only in ApexAlgo.`}
+              : hasSwap ? 'Perps trade the BASE/QUOTE:SETTLE form — linear (BTC/USDT:USDT, settled in the quote) or inverse (BTC/USD:BTC, settled in the base coin); each pair shows its kind in the whitelist.' : `${exchangeId.toUpperCase()} has spot only in ApexAlgo.`}
           </span>
         </div>
         {isSwap && (
@@ -342,7 +390,7 @@ export const ApiKeyNode = ({ id, data }) => {
         )}
         {isSwap && (
           <span className="text-3xs text-muted block">
-            Up to {maxLev}× on {exchangeId.toUpperCase()}. {leverage > 3 ? `${leverage}× liquidates after a ≈ −${Math.round(100 / leverage)}% move — ` : ''}Position size = margin × leverage; funding payments are not modelled.
+            Up to {maxLev}× on {exchangeId.toUpperCase()}. {leverage > 3 ? `${leverage}× liquidates after a ≈ −${liquidationPct(leverage)}% move — ` : ''}Position size = margin × leverage; funding payments are not modelled.{data.marketCtx?.hasInverse ? ` Inverse pairs: margin and PnL in ${data.marketCtx.inverseBases.join('/')}.` : ''}
           </span>
         )}
       </div>
@@ -564,7 +612,7 @@ export const StopLossNode = ({ id, data }) => (
         <div className="flex space-x-2">
             <select className="w-1/2 bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-danger outline-none" value={data.closeType !== undefined ? data.closeType : "percentage"} onChange={(e) => data.onChange(id, 'closeType', e.target.value)}>
                 <option value="percentage">% of Position</option>
-                <option value="fixed">Fixed Amount</option>
+                <option value="fixed">Fixed amount (units)</option>
             </select>
             <input type="number" placeholder="100" className="w-1/2 bg-inset border border-border text-text text-xs rounded-md p-2 nodrag font-num focus:border-danger outline-none text-center" value={data.closeValue !== undefined ? data.closeValue : 100} onChange={(e) => data.onChange(id, 'closeValue', e.target.value === "" ? "" : parseFloat(e.target.value))} />
         </div>
@@ -603,7 +651,7 @@ export const TakeProfitNode = ({ id, data }) => (
         <div className="flex space-x-2">
             <select className="w-1/2 bg-inset border border-border text-text text-xs rounded-md p-2 nodrag focus:border-success outline-none" value={data.closeType !== undefined ? data.closeType : "percentage"} onChange={(e) => data.onChange(id, 'closeType', e.target.value)}>
                 <option value="percentage">% of Position</option>
-                <option value="fixed">Fixed Amount</option>
+                <option value="fixed">Fixed amount (units)</option>
             </select>
             <input type="number" placeholder="100" className="w-1/2 bg-inset border border-border text-text text-xs rounded-md p-2 nodrag font-num focus:border-success outline-none text-center" value={data.closeValue !== undefined ? data.closeValue : 100} onChange={(e) => data.onChange(id, 'closeValue', e.target.value === "" ? "" : parseFloat(e.target.value))} />
         </div>
@@ -631,6 +679,10 @@ export const ActionNode = ({ id, data }) => {
   const actionType = data.actionType || 'buy';
   const meta = ACTION_META[actionType] || ACTION_META.buy;
   const isBuy = meta.opens;
+  // Pushed in by the builder from the routing key; short/cover need perps.
+  // An existing short/cover block stays selectable so it can be switched back.
+  const swapOk = data.liveMarketType === 'swap';
+  const perpsOnlyTitle = swapOk ? undefined : 'Perpetual swaps only — select a swap API key in the Exchange Routing block';
   // CSS var resolves at paint time so the tint follows the active theme
   const color = meta.color;
   
@@ -654,8 +706,8 @@ export const ActionNode = ({ id, data }) => {
                     <select className="w-full bg-inset border border-border text-text text-xs rounded-md p-2 nodrag font-bold outline-none focus:border-info" style={{ color: color }} value={actionType} onChange={(e) => data.onChange(id, 'actionType', e.target.value)}>
                         <option value="buy">BUY (Open long)</option>
                         <option value="sell">SELL (Close long)</option>
-                        <option value="short">SHORT (Open short · perps)</option>
-                        <option value="cover">COVER (Close short · perps)</option>
+                        <option value="short" disabled={!swapOk && actionType !== 'short'} title={perpsOnlyTitle}>SHORT (Open short · perps)</option>
+                        <option value="cover" disabled={!swapOk && actionType !== 'cover'} title={perpsOnlyTitle}>COVER (Close short · perps)</option>
                     </select>
                 </div>
                 <div className="w-1/2">
@@ -684,7 +736,7 @@ export const ActionNode = ({ id, data }) => {
              <div className="flex space-x-2">
                  <select className="w-1/2 bg-inset border border-border text-text text-xs rounded-md p-2 nodrag outline-none focus:border-info" value={data.amountType !== undefined ? data.amountType : "percentage"} onChange={(e) => data.onChange(id, 'amountType', e.target.value)}>
                      <option value="percentage">{isBuy ? '% of Capital' : '% of Position'}</option>
-                     <option value="fixed">Fixed Amount</option>
+                     <option value="fixed">{isBuy ? `Fixed (cash${data.marketCtx?.cashCurrency && data.marketCtx.cashCurrency !== 'mixed' ? `, ${data.marketCtx.cashCurrency}` : ''})` : 'Fixed amount (units)'}</option>
                  </select>
                  <input type="number" placeholder="100" className="w-1/2 bg-inset border border-border text-info text-xs rounded-md p-2 nodrag text-center font-num focus:border-info outline-none" value={data.amountValue !== undefined ? data.amountValue : 100} onChange={(e) => data.onChange(id, 'amountValue', e.target.value === "" ? "" : parseFloat(e.target.value))} />
              </div>

@@ -7,8 +7,10 @@ from datetime import datetime, timezone
 from sqlalchemy import text, func
 from backend.models.bots import BotConfig
 from backend.models.positions import Position
+from backend.models.orders import Order
 from backend.engine import pnl
-from backend.engine.symbols import cash_currency, is_derivative
+from backend.engine.contracts import ContractSpec, spec_for, spec_from_symbol
+from backend.engine.symbols import cash_currency
 
 logger = logging.getLogger("apexalgo.bot_manager")
 
@@ -63,8 +65,10 @@ def _naive_utc(ts):
 # Settings that do not change what the strategy does on the data: layout,
 # order routing, live sizing, the pinned backtest window (which data, not
 # what the strategy does on it) and the engine's own runtime bookkeeping.
+# `max_order_value` is *not* here: it caps the backtest/forward sizing too,
+# so it changes the trades and counts as a variant.
 _NON_STRATEGY_KEYS = frozenset({
-    "ui_layout", "api_execution", "api_key_name", "live_allocation_pct", "max_order_value",
+    "ui_layout", "api_execution", "api_key_name", "live_allocation_pct",
     "backtest_on_start", "backtest_from", "backtest_to",
     "last_backtest_summary", "last_backtest_max_drawdown",
     "last_stop_reason", "drawdown_peak_reset_at", "live_starting_capital",
@@ -184,23 +188,33 @@ def sim_frictions(settings, side="long"):
     return entry_fee, exit_fee, entry_slip, exit_slip
 
 
+def position_spec(symbol, contract_kind=None, contract_size=None, exchange=None):
+    """`ContractSpec` for a stored position: the kind/size it was booked
+    with (so a later contract-size change on the exchange never rewrites
+    history), else the registry's cached market, else the symbol's shape."""
+    if contract_kind:
+        shape = spec_from_symbol(symbol, contract_size)
+        return ContractSpec(symbol=shape.symbol, kind=str(contract_kind), base=shape.base, quote=shape.quote,
+                            settle=shape.settle, contract_size=shape.contract_size)
+    return spec_for(exchange, symbol)
+
+
 def deployed_capital(db, bot_names, quote, modes=("paper", "live")):
     """Cash locked by the open positions of the given bots in the given
-    modes, in pairs funded in `quote`: entry price x amount on spot, the
-    margin (notional / leverage) on derivatives."""
+    modes, in pairs funded in `quote` (the cash currency): entry price x
+    amount on spot, the margin (notional / leverage) on derivatives."""
     if not bot_names:
         return 0.0
-    rows = db.query(Position.entry_price, Position.amount, Position.symbol, Position.leverage).filter(
+    rows = db.query(Position.entry_price, Position.amount, Position.symbol, Position.leverage,
+                    Position.contract_kind, Position.contract_size, Position.exchange).filter(
         Position.bot_name.in_(list(bot_names)), Position.status == "open",
         Position.mode.in_(list(modes))).all()
     total = 0.0
-    for entry, amount, sym, lev in rows:
-        if cash_currency(sym) != quote:
+    for entry, amount, sym, lev, kind, size, exchange in rows:
+        spec = position_spec(sym, kind, size, exchange)
+        if spec.cash_currency != quote:
             continue
-        cost = (entry or 0.0) * (amount or 0.0)
-        if is_derivative(sym) and lev and lev > 1:
-            cost /= lev
-        total += cost
+        total += spec.margin(amount, entry, lev if (lev and lev > 1) else 1)
     return total
 
 
@@ -214,7 +228,16 @@ def forward_pool(db, bot, quote):
         Position.bot_name == bot.name, Position.status == "closed",
         Position.mode == "forward_test").scalar() or 0.0
     deployed = deployed_capital(db, [bot.name], quote, modes=("forward_test",))
-    return _num(bot.settings.get("backtest_capital"), 1000) + float(realized) - deployed
+    # The entry fee left the pool on open as well (bt_equity -= cost + fee)
+    open_ids = [pid for (pid, sym) in db.query(Position.id, Position.symbol).filter(
+        Position.bot_name == bot.name, Position.status == "open",
+        Position.mode == "forward_test").all() if cash_currency(sym) == quote]
+    entry_fees = 0.0
+    if open_ids:
+        entry_fees = db.query(func.coalesce(func.sum(Order.fee), 0.0)).filter(
+            Order.position_id.in_(open_ids), Order.mode == "forward_test",
+            func.coalesce(Order.reduce_only, 0) == 0).scalar() or 0.0
+    return _num(bot.settings.get("backtest_capital"), 1000) + float(realized) - deployed - float(entry_fees)
 
 
 def live_allocation(db, bot, quote, free_balance):
@@ -234,12 +257,44 @@ def live_allocation(db, bot, quote, free_balance):
     return max(bot_total - deployed_bot, 0.0), wallet_total, bot_total
 
 
-def calculate_trade_amount(current_price, bot_settings, current_equity=None, leverage=1, side="long"):
-    """Base amount to buy (or sell short). `amount_value` is what the bot puts
-    up (percentage of its pool, or a fixed cash amount); on derivatives that
-    is the margin, so the notional — and the returned amount — is `leverage`
-    times bigger. Spot callers never pass leverage and get the pre-existing
-    sizing; a short reads `trade_settings.short` (fallback `entry`)."""
+def max_affordable_amount(equity, entry_price, leverage=1, fee=0.0, spec=None):
+    """Largest size whose locked capital (margin plus entry fee on the
+    notional) fits in `equity` at `entry_price`. Used to clamp percentage
+    sizing so slippage + fee never push an entry past the pool; reduces to
+    `equity / (price * (1 + fee))` on spot. Contracts on an inverse `spec`."""
+    if spec is not None and spec.is_inverse:
+        return spec.max_affordable_qty(equity, entry_price, leverage, fee)
+    lev = max(float(leverage or 1), 1.0)
+    return equity / (entry_price * (1 / lev + float(fee or 0.0)))
+
+
+def cap_by_max_order_value(trade_amount, price, settings, spec=None):
+    """Backtest/forward/live mirror of the `max_order_value` clamp: the
+    *quote* notional of one entry (USD on ``BTC/USD:BTC``, EUR on
+    ``BTC/EUR``) never exceeds the cap. `max_order_value` is defined in the
+    pair's quote currency on every market kind."""
+    cap = _num(settings.get("max_order_value"), 0)
+    if trade_amount is None or cap <= 0 or not price or price <= 0:
+        return trade_amount
+    if spec is not None and spec.is_inverse:
+        if spec.notional_quote(trade_amount, price) > cap:
+            return spec.qty_for_quote_notional(cap, price)
+        return trade_amount
+    if trade_amount * price > cap:
+        return cap / price
+    return trade_amount
+
+
+def calculate_trade_amount(current_price, bot_settings, current_equity=None, leverage=1, side="long", spec=None):
+    """Position size to buy (or sell short): base amount on spot/linear,
+    contracts on an inverse `spec`. `amount_value` is what the bot puts up
+    (in its cash currency): a `percentage` of the *free cash* in its pool
+    (`current_equity` = cash not locked in open positions, not the
+    mark-to-market equity — so a second layer at 50% is 50% of what is left,
+    not of the account), or a `fixed` cash amount; on derivatives that is the
+    margin, so the notional — and the returned size — is `leverage` times
+    bigger. Spot callers never pass leverage and get the pre-existing sizing;
+    a short reads `trade_settings.short` (fallback `entry`)."""
     if not current_price or current_price <= 0:
         logger.warning("Invalid current_price (%s), cannot calculate trade amount", current_price)
         return None
@@ -260,16 +315,16 @@ def calculate_trade_amount(current_price, bot_settings, current_equity=None, lev
         amount_value = 100.0
 
     if amount_type == "fixed":
-        trade_amount = amount_value / current_price
-        if leverage != 1.0:
-            trade_amount *= leverage
-        return max(trade_amount, 0.0001)
+        investment = amount_value
     else:
         capital = current_equity if current_equity is not None else _num(bot_settings.get("backtest_capital"), 1000)
         if capital <= 0:
             return None
         investment = capital * (amount_value / 100)
+    if spec is not None and spec.is_inverse:
+        trade_amount = spec.qty_for_cash(investment, current_price, leverage)
+    else:
         trade_amount = investment / current_price
         if leverage != 1.0:
             trade_amount *= leverage
-        return max(trade_amount, 0.0001)
+    return max(trade_amount, 0.0001)

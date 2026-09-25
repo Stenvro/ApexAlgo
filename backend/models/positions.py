@@ -32,6 +32,12 @@ class Position(Base):
     market_type = Column(String, default="spot")
     leverage = Column(Float, default=1.0)
     contracts = Column(Float, nullable=True)
+    # Currency-aware books (sprint D): the currency `profit_abs` and the
+    # margin are in, and how to read `amount` back (base units on
+    # spot/linear, contracts of `contract_size` quote units on inverse)
+    cash_currency = Column(String, nullable=True)
+    contract_kind = Column(String, nullable=True)   # "spot" | "linear" | "inverse"
+    contract_size = Column(Float, nullable=True)
     triggered_exits = Column(JSON, nullable=True, default=list)
 
     orders = relationship("Order", back_populates="position", cascade="all, delete-orphan")

@@ -59,6 +59,19 @@ def run_migrations():
             if 'contracts' not in pos_cols:
                 conn.execute(text("ALTER TABLE positions ADD COLUMN contracts REAL"))
                 logger.info("Migration: added 'contracts' to positions")
+            # Currency-aware books: the currency the position is funded in
+            # and the contract kind/size its `amount` is expressed in
+            _backfill_ccy = 'cash_currency' not in pos_cols
+            if _backfill_ccy:
+                conn.execute(text("ALTER TABLE positions ADD COLUMN cash_currency TEXT"))
+                logger.info("Migration: added 'cash_currency' to positions")
+            if 'contract_kind' not in pos_cols:
+                conn.execute(text("ALTER TABLE positions ADD COLUMN contract_kind TEXT"))
+                logger.info("Migration: added 'contract_kind' to positions")
+            if 'contract_size' not in pos_cols:
+                conn.execute(text("ALTER TABLE positions ADD COLUMN contract_size REAL"))
+                logger.info("Migration: added 'contract_size' to positions")
+            _backfill_position_currency(conn)
 
         # ── orders ───────────────────────────────────────────────────────────────
         if "orders" in existing_tables:
@@ -72,6 +85,15 @@ def run_migrations():
             if 'reduce_only' not in ord_cols:
                 conn.execute(text("ALTER TABLE orders ADD COLUMN reduce_only INTEGER DEFAULT 0"))
                 logger.info("Migration: added 'reduce_only' to orders")
+            # `fee` stays the fee in the position's cash currency (what the
+            # books use); `fee_currency`/`fee_cash` record what the exchange
+            # actually charged, when known
+            if 'fee_currency' not in ord_cols:
+                conn.execute(text("ALTER TABLE orders ADD COLUMN fee_currency TEXT"))
+                logger.info("Migration: added 'fee_currency' to orders")
+            if 'fee_cash' not in ord_cols:
+                conn.execute(text("ALTER TABLE orders ADD COLUMN fee_cash REAL"))
+                logger.info("Migration: added 'fee_cash' to orders")
 
         # ── exchange_keys ────────────────────────────────────────────────────────
         if "exchange_keys" in existing_tables:
@@ -211,6 +233,28 @@ def run_migrations():
         conn.commit()
 
         _sweep_orphaned_bot_rows(conn, existing_tables)
+
+
+def _backfill_position_currency(conn) -> None:
+    """Fill `positions.cash_currency` / `contract_kind` from the symbol for
+    rows that predate the columns (spot → quote, ``:SETTLE`` → settle;
+    ``BTC/USD:BTC`` → inverse). Idempotent: only NULL rows are touched."""
+    from backend.engine.contracts import spec_from_symbol
+    rows = conn.execute(text(
+        "SELECT DISTINCT symbol FROM positions WHERE symbol IS NOT NULL AND (cash_currency IS NULL OR contract_kind IS NULL)"
+    )).fetchall()
+    for (symbol,) in rows:
+        try:
+            spec = spec_from_symbol(symbol)
+        except Exception:
+            continue
+        conn.execute(text(
+            "UPDATE positions SET cash_currency = COALESCE(cash_currency, :ccy), contract_kind = COALESCE(contract_kind, :kind) "
+            "WHERE symbol = :sym AND (cash_currency IS NULL OR contract_kind IS NULL)"
+        ), {"ccy": spec.cash_currency, "kind": spec.kind, "sym": symbol})
+    if rows:
+        conn.commit()
+        logger.info("Migration: backfilled cash_currency/contract_kind on positions for %d symbol(s)", len(rows))
 
 
 def _sweep_orphaned_bot_rows(conn, existing_tables) -> None:

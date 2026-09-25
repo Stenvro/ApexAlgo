@@ -11,7 +11,8 @@ import { useEffect, useSyncExternalStore } from 'react';
 import { apiClient } from './client';
 
 // Market types per exchange mirror backend ExchangeSpec.markets (spot always;
-// swap = USDT-margined perpetuals where ApexAlgo supports them)
+// swap = perpetual swaps where ApexAlgo supports them — linear or inverse per
+// symbol, see markets[symbol].kind from /api/data/symbols)
 const SPOT = { spot: { has_sandbox: false, max_leverage: 1 } };
 const fb = (id, name, needs_passphrase, has_sandbox, swap) => ({
   id, name, needs_passphrase, has_sandbox,

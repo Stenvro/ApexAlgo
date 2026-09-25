@@ -2,9 +2,10 @@ import logging
 import re
 from datetime import datetime
 
-from backend.core.exchange_registry import exchange_spec, get_exchange_timeframes, market_caps
+from backend.core.exchange_registry import exchange_spec, get_exchange_timeframes, market_caps, supported_kinds
 from backend.engine.indicator_registry import get_spec
-from backend.engine.symbols import DEFAULT_MARGIN_MODE, DEFAULT_MARKET_TYPE, MARGIN_MODES, MARKET_TYPES, is_derivative
+from backend.engine.symbols import DEFAULT_MARGIN_MODE, DEFAULT_MARKET_TYPE, MARGIN_MODES, MARKET_TYPES, base_of, cash_currency, is_derivative, settle_of
+from backend.engine.pnl import MAINTENANCE_MARGIN
 
 logger = logging.getLogger("apexalgo.settings_validator")
 # BASE/QUOTE for spot, BASE/QUOTE:SETTLE for perpetual swaps
@@ -73,6 +74,10 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
             errors.append(f"Symbol '{raw}' is a spot pair; a swap bot needs the BASE/QUOTE:SETTLE form, e.g. {norm}:{norm.split('/')[-1]}.")
         elif not derivative and is_derivative(norm):
             errors.append(f"Symbol '{raw}' is a perpetual swap; a spot bot needs BASE/QUOTE, e.g. {norm.split(':')[0]} (or set market_type to 'swap').")
+        elif is_derivative(norm) and settle_of(norm) == base_of(norm) and exchange_spec(eid) is not None \
+                and "inverse" not in supported_kinds(eid, "swap"):
+            errors.append(f"Symbol '{raw}' is an inverse (coin-margined) contract, which {exchange_spec(eid).name} does not offer in ApexAlgo — "
+                          f"use the linear contract, e.g. {base_of(norm)}/USDT:USDT.")
         return norm
 
     # Symbols — normalize and validate BASE/QUOTE format, write back normalized values
@@ -86,6 +91,15 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
             errors.append("No trading symbols configured.")
     if settings.get("symbol"):
         settings["symbol"] = _check_symbol(settings["symbol"])
+
+    # One cash currency per bot: the capital pool, PnL and drawdown are all
+    # summed in one unit — BTC/USDT and ETH/BTC in one whitelist would add
+    # USDT to BTC
+    _pairs = [s for s in ([*settings.get("symbols", [])] or ([settings["symbol"]] if settings.get("symbol") else []))
+              if SYMBOL_PATTERN.match(str(s))]
+    _cash = sorted({cash_currency(s) for s in _pairs})
+    if len(_cash) > 1:
+        errors.append(f"Whitelist mixes cash currencies ({', '.join(_cash)}): all pairs of a bot must be quoted/settled in the same currency.")
 
     # Leverage and margin mode only mean something on a swap
     lev_raw = settings.get("leverage")
@@ -103,8 +117,8 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
                 if caps is not None and lev > caps.max_leverage:
                     errors.append(f"leverage {int(lev)}x exceeds the {caps.max_leverage}x ApexAlgo allows on {exchange_spec(eid).name} swaps.")
                 elif lev > LEVERAGE_WARN_ABOVE:
-                    warnings.append(f"leverage {int(lev)}x: the estimated liquidation sits about {100 / lev:.0f}% below the entry — "
-                                    "a stop loss that is not tighter than that never fires.")
+                    warnings.append(f"leverage {int(lev)}x: the estimated liquidation sits about {100 * (1 - MAINTENANCE_MARGIN) / lev:.1f}% "
+                                    "from the entry — a stop loss that is not tighter than that never fires.")
             elif lev > 1:
                 errors.append(f"leverage {int(lev)}x has no effect on a spot bot; set it to 1 or switch market_type to 'swap'.")
     mm_raw = settings.get("margin_mode")
@@ -261,6 +275,24 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
     for cyc in _find_cycles(nodes):
         errors.append(f"Node graph has a cycle: {' -> '.join(cyc)}. A node cannot depend on itself.")
 
+    # Integer settings the engine reads with sizing._int: coerce here so a
+    # "150.0" from a form is stored as 150, and refuse anything non-numeric
+    for _key, _min in (("backtest_lookback", 20), ("cooldown_trades", 0), ("cooldown_candles", 0)):
+        _raw = settings.get(_key)
+        if _raw in (None, ""):
+            continue
+        try:
+            _val = float(_raw)
+        except (ValueError, TypeError):
+            errors.append(f"{_key} '{_raw}' is not a valid whole number.")
+            continue
+        if _val < _min:
+            errors.append(f"{_key} must be at least {_min}.")
+            continue
+        if _val != int(_val) or not isinstance(_raw, int) or isinstance(_raw, bool):
+            warnings.append(f"{_key} '{_raw}' stored as {int(_val)}.")
+            settings[_key] = int(_val)
+
     # Backtest lookback must cover the longest indicator warm-up
     longest = _longest_indicator_length(nodes)
     try:
@@ -331,8 +363,8 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
                 if planned > max_order_value > 0:
                     warnings.append(
                         f"max_order_value ({max_order_value:,.0f}) is below the planned entry size "
-                        f"({planned:,.0f}): live entries will be capped to {max_order_value:,.0f}, "
-                        "so live sizing differs from the backtest. Raise the cap or lower the entry amount."
+                        f"({planned:,.0f}): entries are capped to {max_order_value:,.0f} in the backtest, "
+                        "forward test and live alike (the cap is part of the strategy). Raise the cap or lower the entry amount."
                     )
             except (ValueError, TypeError):
                 pass

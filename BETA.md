@@ -77,7 +77,20 @@ The repo contains `STRATEGY_CONTEXT.md`. Paste that file into any capable AI ass
 - **`Max order value` is mandatory for live bots** — the app refuses to start a live bot without this hard cap per order. Set it low.
 - Set **Max drawdown** (e.g. 10–15%): by default the bot then automatically closes its positions and stops if the equity curve drops that far from its peak. You can switch **On max drawdown** to *Block new entries* instead (exits keep working, no forced liquidation) — if you do, also set **Max capital loss %** as the hard stop, since blocking entries alone does not cap losses on open positions.
 - Fill in your exchange's real **fee** (e.g. 0.1%) in the trade settings — backtests without fees are misleadingly optimistic.
-- After any backend restart the bot reconciles its open positions with your exchange balances before going live and stops with an error if they don't match — still glance at the exchange yourself before letting it continue.
+- After any backend restart the bot reconciles its open positions with your exchange balances (or, on perpetual swaps, the exchange's position list) before going live and stops with an error if they don't match or cannot be checked — still glance at the exchange yourself before letting it continue.
+- **`Max order value` is a cap on the quote notional** (e.g. USDT for `BTC/USDT`), not on the margin you put up — at 5× leverage a 500 cap lets the bot risk a 100 margin. It applies in backtest and forward test too, so changing it counts as a new strategy variant.
+
+### Perpetual swaps: known limitations of the simulation
+
+Backtest and forward test model leverage, margin, fees, slippage and liquidation (flat 0.5% maintenance margin), but **not**:
+
+- **Funding payments** — perps pay/receive funding every few hours; a long-running position can lose (or gain) a few percent that the simulation does not show.
+- **Tiered maintenance margin** — big positions liquidate earlier on the real exchange than the flat 0.5% suggests.
+- **Cross margin** — `cross` is sent to the exchange, but the simulation treats it like isolated (one position cannot drain the whole account in the backtest; on the exchange it can).
+- **Spot margin / borrowing** — not supported; spot bots only ever spend the cash they hold.
+- **Hedge mode** — not supported; keep the account in one-way position mode. The bot never holds a long and a short on the same pair at once, and reconciliation nets both sides into one number, so hedged positions would be misread.
+
+Whatever you do on the exchange yourself (manual trades, changing the leverage, switching position mode) is invisible to the bot until the next restart.
 
 ### If you suspect a leak or anything weird
 

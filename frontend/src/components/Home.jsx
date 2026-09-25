@@ -5,6 +5,7 @@ import ModeBadge from './ui/ModeBadge';
 import Button from './ui/Button';
 import EmptyState from './ui/EmptyState';
 import ExampleLoader from './ExampleLoader';
+import { sumByCurrency, fmtByCurrency, positionNotional, positionMargin, currenciesOf } from '../utils/money';
 
 /**
  * Home — dashboard landing screen.
@@ -20,7 +21,10 @@ const openAnalytics = (mode) =>
   window.dispatchEvent(new CustomEvent('open-analytics', { detail: { bot: 'all', mode } }));
 
 const REAL_MODES = new Set(['paper', 'live']);
-const fmtUsd = (n) => `$${Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+// Dashboard amounts are whole units of their own currency; a sum over
+// several currencies renders one figure per currency, never one total.
+const fmtSums = (sums) => fmtByCurrency(sums, { digits: 0 }) || '0';
+const fmtSum = (rows, pick) => fmtSums(sumByCurrency(rows, pick));
 
 /* Everything the operator should look at before walking away: broken keys,
    engine auto-stops, and real positions nobody is managing any more. */
@@ -55,7 +59,7 @@ function AttentionStrip({ items }) {
   );
 }
 
-const StatTile = ({ label, value, sub, accent, icon, onClick, delay }) => (
+const StatTile = ({ label, value, sub, accent, icon, onClick, delay, chip = null }) => (
   <button
     onClick={onClick}
     className={`terminal-card relative text-left p-4 group transition-all duration-300 hover:border-border-strong hover:-translate-y-0.5 overflow-hidden fade-in-delay-${delay}`}
@@ -75,8 +79,11 @@ const StatTile = ({ label, value, sub, accent, icon, onClick, delay }) => (
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
       </svg>
     </div>
-    <p className="text-2xl font-num font-bold text-text leading-none mb-1.5">{value}</p>
-    <p className="text-2xs font-bold uppercase tracking-widest text-muted">{label}</p>
+    <p className={`font-num font-bold text-text leading-none mb-1.5 ${String(value).length > 14 ? 'text-base' : 'text-2xl'}`}>{value}</p>
+    <p className="text-2xs font-bold uppercase tracking-widest text-muted">
+      {label}
+      {chip && <Badge variant="warn" className="ml-2 normal-case tracking-normal" title="Positions in several cash currencies — amounts are listed per currency and never added up">{chip}</Badge>}
+    </p>
     {sub && <p className="text-2xs text-faint mt-1">{sub}</p>}
   </button>
 );
@@ -85,38 +92,53 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
   // Real-money state lives in positions and keys, not in the bots summary.
   const [openPositions, setOpenPositions] = useState([]);
   const [keys, setKeys] = useState(null);
+  const [fetchError, setFetchError] = useState(null);
   const activeCount = bots.filter((b) => b.is_active).length;
+  // Positions and keys refresh on the same cadence as the bots summary
+  // (every 30 s while the backend answers, plus whenever the active count
+  // changes), so the exposure tile and the attention strip never go stale
+  // for as long as the dashboard is open. Failures show as a chip, not a toast.
   useEffect(() => {
+    if (!backendOk) return undefined;
     let cancelled = false;
-    apiClient.get('/api/trades/positions', { params: { status: 'open', limit: 5000 } })
-      .then((r) => { if (!cancelled) setOpenPositions(Array.isArray(r.data) ? r.data : []); })
-      .catch(() => {});
-    return () => { cancelled = true; };
+    const load = async () => {
+      const results = await Promise.allSettled([
+        apiClient.get('/api/trades/positions', { params: { status: 'open', limit: 5000 } }),
+        apiClient.get('/api/keys'),
+      ]);
+      if (cancelled) return;
+      const [pos, k] = results;
+      if (pos.status === 'fulfilled') setOpenPositions(Array.isArray(pos.value.data) ? pos.value.data : []);
+      if (k.status === 'fulfilled') setKeys(Array.isArray(k.value.data) ? k.value.data : []);
+      const failed = [pos.status === 'rejected' && 'positions', k.status === 'rejected' && 'keys'].filter(Boolean);
+      setFetchError(failed.length ? `${failed.join(' & ')} not refreshed` : null);
+    };
+    load();
+    const timer = setInterval(load, 30_000);
+    return () => { cancelled = true; clearInterval(timer); };
   }, [activeCount, backendOk]);
-  useEffect(() => {
-    let cancelled = false;
-    apiClient.get('/api/keys')
-      .then((r) => { if (!cancelled) setKeys(Array.isArray(r.data) ? r.data : []); })
-      .catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
 
   const realOpen = useMemo(() => openPositions.filter((p) => REAL_MODES.has(p.mode)), [openPositions]);
   // Notional at entry; on perpetuals the capital actually at risk is the
   // margin (notional / leverage), shown next to it when any leveraged
-  // position is open
+  // position is open. Every figure is summed per cash currency (USDT, EUR,
+  // BTC on inverse contracts, …) — a mixed book shows one amount per
+  // currency and a "mixed currencies" chip instead of one meaningless total.
   const exposure = useMemo(() => {
-    const notional = (p) => (p.entry_price || 0) * (p.amount || 0);
-    const margin = (p) => notional(p) / Math.max(1, Number(p.leverage) || 1);
     const live = realOpen.filter((p) => p.mode === 'live');
+    const isShort = (p) => p.side === 'short';
+    // Long and short notional are kept apart: a short profits from a fall,
+    // so adding it to the longs would overstate directional exposure
+    const liveLongRows = live.filter((p) => !isShort(p));
+    const liveShortRows = live.filter(isShort);
     return {
-      live: live.reduce((s, p) => s + notional(p), 0),
-      paper: realOpen.filter((p) => p.mode === 'paper').reduce((s, p) => s + notional(p), 0),
-      liveMargin: live.reduce((s, p) => s + margin(p), 0),
+      liveLong: fmtSum(liveLongRows, positionNotional),
+      hasLiveShort: liveShortRows.length > 0,
+      liveShort: fmtSum(liveShortRows, positionNotional),
+      paper: fmtSum(realOpen.filter((p) => p.mode === 'paper'), positionNotional),
+      liveMargin: fmtSum(live, positionMargin),
       leveraged: realOpen.some((p) => (Number(p.leverage) || 1) > 1),
-      // Short notional shown separately: it profits from a fall, so it
-      // must not read as long exposure
-      liveShort: live.filter((p) => p.side === 'short').reduce((s, p) => s + notional(p), 0),
+      currencies: currenciesOf(realOpen),
     };
   }, [realOpen]);
 
@@ -136,15 +158,15 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
     for (const p of realOpen) {
       const bot = byName.get(p.bot_name);
       if (bot && bot.is_active) continue;
-      const cur = unmanaged.get(p.bot_name) || { count: 0, notional: 0, mode: p.mode, missing: !bot };
+      const cur = unmanaged.get(p.bot_name) || { count: 0, rows: [], mode: p.mode, missing: !bot };
       cur.count += 1;
-      cur.notional += (p.entry_price || 0) * (p.amount || 0);
+      cur.rows.push(p);
       unmanaged.set(p.bot_name, cur);
     }
     for (const [name, u] of unmanaged) {
       items.push({
         key: `unmanaged:${name}`, kind: 'Unmanaged', tone: 'danger',
-        text: `${u.count} open ${u.mode} position${u.count === 1 ? '' : 's'} (~${fmtUsd(u.notional)} at entry) on ${u.missing ? 'deleted bot' : 'stopped bot'} ${name} — no stop-loss or take-profit is being evaluated`,
+        text: `${u.count} open ${u.mode} position${u.count === 1 ? '' : 's'} (~${fmtSum(u.rows, positionNotional)} at entry) on ${u.missing ? 'deleted bot' : 'stopped bot'} ${name} — no stop-loss or take-profit is being evaluated`,
         action: 'Analytics', onClick: () => openAnalytics(u.mode),
       });
     }
@@ -186,6 +208,9 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
               : <Badge variant="warn" dot pulse>Reconnecting…</Badge>}
             {activeBots.length > 0 && (
               <Badge variant="accent">{activeBots.length} running</Badge>
+            )}
+            {fetchError && (
+              <Badge variant="warn" title="Exposure and attention items may be stale — retrying every 30 s">{fetchError}</Badge>
             )}
           </div>
           <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight text-text mb-3">
@@ -247,10 +272,11 @@ export default function Home({ setActiveView, bots = [], backendOk = true, refet
           <StatTile
             delay={4}
             label="Open exposure"
-            value={fmtUsd(exposure.live)}
+            value={exposure.hasLiveShort ? `${exposure.liveLong} long · ${exposure.liveShort} short` : exposure.liveLong}
             sub={realOpen.length
-              ? `${realOpen.filter((p) => p.mode === 'live').length} live · ${realOpen.filter((p) => p.mode === 'paper').length} paper (${fmtUsd(exposure.paper)}) at entry${exposure.leveraged ? ` · ${fmtUsd(exposure.liveMargin)} margin` : ''}${exposure.liveShort > 0 ? ` · ${fmtUsd(exposure.liveShort)} short` : ''}`
+              ? `${realOpen.filter((p) => p.mode === 'live').length} live · ${realOpen.filter((p) => p.mode === 'paper').length} paper (${exposure.paper}) at entry${exposure.leveraged ? ` · ${exposure.liveMargin} margin` : ''}${exposure.currencies.length > 1 ? ' · mixed currencies, never summed' : ''}`
               : 'no real positions open'}
+            chip={exposure.currencies.length > 1 ? 'mixed currencies' : null}
             accent="var(--color-info)"
             onClick={() => openAnalytics(realOpen.length ? 'real' : undefined)}
             icon={<svg className="w-4.5 h-4.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>}

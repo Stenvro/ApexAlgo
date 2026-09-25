@@ -16,7 +16,8 @@ from backend.models.orders import Order
 from backend.models.positions import Position
 from backend.models.exchange_keys import ExchangeKey
 from backend.engine.evaluator import NodeEvaluator
-from backend.engine import backtest
+from backend.engine import backtest, broker, live_cycle, risk
+from sqlalchemy.orm import selectinload
 from backend.engine.sizing import _num, _int, _tf_seconds, _naive_utc, backtest_pin, data_fingerprint
 from backend.engine.symbols import DEFAULT_MARGIN_MODE, base_of, cash_currency, is_derivative, leverage_for, market_type_for
 from backend.core.exchange_registry import get_exchange_timeframes
@@ -131,10 +132,7 @@ def execute_sync_backfill(engine, bot_id: int):
         for symbol in symbols:
             _window = f"pinned {pin_from:%Y-%m-%d} → {pin_to:%Y-%m-%d}" if pinned else f"lookback={lookback_limit}"
             blb.push(bot.name, "INFO", f"Starting: {symbol} | {timeframe} | {live_mode} | {_window}")
-            tf_seconds = 60
-            if timeframe.endswith('m'): tf_seconds = int(timeframe[:-1]) * 60
-            elif timeframe.endswith('h'): tf_seconds = int(timeframe[:-1]) * 3600
-            elif timeframe.endswith('d'): tf_seconds = int(timeframe[:-1]) * 86400
+            tf_seconds = _tf_seconds(timeframe)
 
             # Use fresh sessions for all polling queries. The main `db` session starts an
             # implicit SQLite transaction on its first read (line above), so any subsequent
@@ -331,12 +329,18 @@ def execute_sync_backfill(engine, bot_id: int):
             on_progress=lambda detail, progress=None: engine.set_runtime(bot.name, "backtesting", detail, progress),
             check_abort=_check_abort)
         bt_equity = res.equity
+        _ccy = res.cash_currency or (cash_currency(sym_contexts[0]["symbol"]) if sym_contexts else "USDT")
+        # Console lines the simulation buffered: pushed only now, after its
+        # commit — the log buffer writes on a second connection and would
+        # otherwise wait on the uncommitted backtest rows
+        for _lvl, _msg in res.console:
+            blb.push(bot.name, _lvl, _msg)
 
         for ctx in sym_contexts:
             trade_count = len(ctx["trade_entry_indices"]) if run_backtest else 0
-            logger.info("Backfill complete: '%s' on %s | mode=%s | %d candles | %d trades | equity=$%.2f", bot.name, ctx["symbol"], live_mode.upper(), len(ctx["df"]), trade_count, bt_equity)
+            logger.info("Backfill complete: '%s' on %s | mode=%s | %d candles | %d trades | equity=%.2f %s", bot.name, ctx["symbol"], live_mode.upper(), len(ctx["df"]), trade_count, bt_equity, _ccy)
             if run_backtest:
-                blb.push(bot.name, "INFO", f"Backtest complete: {ctx['symbol']} | {len(ctx['df'])} candles | {trade_count} trades | equity=${bt_equity:.2f}")
+                blb.push(bot.name, "INFO", f"Backtest complete: {ctx['symbol']} | {len(ctx['df'])} candles | {trade_count} trades | equity={bt_equity:.2f} {_ccy}")
             else:
                 blb.push(bot.name, "INFO", f"Ready: {ctx['symbol']} | {len(ctx['df'])} candles | mode={live_mode.upper()}")
 
@@ -374,9 +378,9 @@ def execute_sync_backfill(engine, bot_id: int):
         # as the base for live drawdown / capital-loss percentages.
         if live_mode in ("paper", "live"):
             try:
-                _ccxt = engine._get_ccxt_instance(api_key)
-                _bal = _ccxt.fetch_balance()
                 _pairs = [str(s).replace('-', '/').upper() for s in symbols]
+                _ccxt = engine._ccxt_for(api_key, _pairs[0] if _pairs else None)
+                _bal = _ccxt.fetch_balance()
                 # The backtest ran on public (production) candles; a demo
                 # account or another region can list fewer pairs, and an
                 # order on a missing one can only fail
@@ -413,24 +417,53 @@ def execute_sync_backfill(engine, bot_id: int):
 
             # Startup reconciliation: open DB positions must still be backed
             # by the exchange balance, otherwise exits would be sent for
-            # coins that are no longer there
-            if _bal is not None:
+            # coins that are no longer there. A reconciliation that cannot
+            # be performed (no balance, exchange error) is a WARN for a
+            # sandbox and a refusal to go live for real money: an
+            # unverified live bot must not manage positions blind.
+            _open_real = db.query(Position).filter(
+                Position.bot_name == bot.name, Position.status == "open", Position.mode == live_mode).count()
+            _recon_error = None
+            _problems = []
+            if _bal is None:
+                _recon_error = "wallet balance unavailable"
+            else:
                 try:
                     if market_type_for(bot.settings, api_key) != "spot":
-                        # A perp position is not a coin in the wallet: compare
-                        # against the exchange's open positions instead
+                        # A perp position is not a coin in the wallet: a
+                        # position the exchange no longer holds was
+                        # liquidated (or closed by hand) while the bot was
+                        # down — book it as such instead of managing a ghost
+                        for _pos in db.query(Position).options(selectinload(Position.orders)).filter(
+                                Position.bot_name == bot.name, Position.status == "open", Position.mode == live_mode).all():
+                            if broker.exchange_position_gone(_ccxt, _pos.symbol, _pos.side or "long"):
+                                _last = db.query(Candle.close).filter(
+                                    Candle.exchange == _pos.exchange, Candle.symbol == _pos.symbol, Candle.timeframe == timeframe
+                                ).order_by(Candle.timestamp.desc()).first()
+                                live_cycle._book_liquidation(engine, db, bot, _pos, float(_last[0]) if _last else _pos.entry_price,
+                                                             _naive_utc(datetime.now(timezone.utc)), risk.mode_group_for(live_mode),
+                                                             "exchange holds no such position at startup — booked as liquidation, check the exchange")
+                        db.commit()
+                        # Then compare what is left against the exchange's open positions
                         _problems = engine._reconcile_positions_with_exchange(db, bot, _ccxt, live_mode)
                     else:
                         _problems = engine._reconcile_positions_with_wallet(db, bot, _ccxt, _bal, live_mode)
                 except Exception as _exc:
                     logger.warning("Bot '%s': position reconciliation failed: %s", bot.name, _exc)
-                    _problems = []
-                if _problems:
-                    for _p in _problems:
-                        blb.push(bot.name, "ERROR", f"{_p} — reconcile manually (close or delete the position in Analytics) before starting")
-                    engine._engine_stop(bot, db, f"{_problems[0]} — reconcile manually")
+                    _recon_error = str(_exc)
+            if _recon_error is not None:
+                if live_mode == "live":
+                    blb.push(bot.name, "ERROR", f"Could not reconcile positions with {api_key.exchange.upper()} ({_recon_error}) — refusing to go live unverified")
+                    engine._engine_stop(bot, db, f"Position reconciliation failed: {_recon_error} — fix the key/connection and restart")
                     db.commit()
                     return
+                blb.push(bot.name, "WARN", f"Could not reconcile positions with the exchange ({_recon_error}) — {_open_real} open {live_mode} position(s) unverified")
+            if _problems:
+                for _p in _problems:
+                    blb.push(bot.name, "ERROR", f"{_p} — reconcile manually (close or delete the position in Analytics) before starting")
+                engine._engine_stop(bot, db, f"{_problems[0]} — reconcile manually")
+                db.commit()
+                return
 
             # Derivatives: confirm leverage and margin mode on the exchange
             # for every pair before the first order — a bot that cannot set
@@ -440,8 +473,8 @@ def execute_sync_backfill(engine, bot_id: int):
                 _lev = leverage_for(bot.settings, _mt)
                 _mm = bot.settings.get("margin_mode") or DEFAULT_MARGIN_MODE
                 try:
-                    _ccxt = engine._get_ccxt_instance(api_key)
                     for _p in [str(s).replace('-', '/').upper() for s in symbols]:
+                        _ccxt = engine._ccxt_for(api_key, _p)
                         if _ccxt.markets and _p not in _ccxt.markets:
                             continue
                         engine._ensure_leverage(_ccxt, api_key, _p, _lev, _mm, bot.name)

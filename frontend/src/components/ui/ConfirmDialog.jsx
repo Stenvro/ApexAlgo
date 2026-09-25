@@ -39,8 +39,12 @@ export const ConfirmDialogHost = () => {
     const handler = (e) =>
       setRequest((prev) => {
         // A new confirm while one is pending: resolve the old promise as
-        // "cancelled" so its caller never hangs forever.
-        prev?.resolve?.(false);
+        // "cancelled" so its caller never hangs forever. Callers should guard
+        // against this (re-entrancy) — warn so the double request is visible.
+        if (prev) {
+          console.warn('[ConfirmDialog] pending request superseded:', prev.title, '->', e.detail?.title);
+          prev.resolve?.(false);
+        }
         return e.detail || null;
       });
     window.addEventListener('apex-confirm', handler);

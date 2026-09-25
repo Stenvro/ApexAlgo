@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from backend.core.database import get_db, SessionLocal
 from backend.models.candles import Candle
 from backend.core.security import verify_api_key
-from backend.core.exchange_registry import build_exchange_for_symbol, SUPPORTED_EXCHANGES, get_exchange_timeframes, get_exchange_symbols, market_caps
+from backend.core.exchange_registry import build_exchange_for_symbol, SUPPORTED_EXCHANGES, get_exchange_timeframes, get_exchange_markets, market_caps
 from backend.engine.data_verify import verify_window
 
 logger = logging.getLogger("apexalgo.data")
@@ -40,18 +40,22 @@ async def get_timeframes(exchange_id: str):
 
 @router.get("/symbols/{exchange_id}")
 async def get_symbols(exchange_id: str, market_type: str = Query(default="spot")):
-    """Tradeable symbols on an exchange (spot pairs, or linear perpetuals with
-    ``?market_type=swap``) — the builder validates the whitelist against this.
-    ``symbols`` is empty (and ``known`` false) when the exchange could not be
-    reached, so callers do not reject every pair."""
+    """Tradeable symbols on an exchange (spot pairs, or linear *and* inverse
+    perpetuals with ``?market_type=swap``) — the builder validates the
+    whitelist against this. ``markets`` carries per symbol
+    ``{kind, base, quote, settle, contract_size, cash_currency}`` so the UI
+    can show what unit a pair trades in. ``symbols`` is empty (and ``known``
+    false) when the exchange could not be reached, so callers do not reject
+    every pair."""
     exchange_id = exchange_id.lower()
     market_type = (market_type or "spot").lower()
     if exchange_id not in SUPPORTED_EXCHANGES:
         raise HTTPException(status_code=400, detail=f"Unknown exchange '{exchange_id}'.")
     if market_caps(exchange_id, market_type) is None:
         raise HTTPException(status_code=400, detail=f"{SUPPORTED_EXCHANGES[exchange_id]} has no '{market_type}' market in ApexAlgo.")
-    symbols = await asyncio.to_thread(get_exchange_symbols, exchange_id, market_type)
-    return {"exchange": exchange_id, "market_type": market_type, "symbols": symbols, "known": bool(symbols)}
+    markets = await asyncio.to_thread(get_exchange_markets, exchange_id, market_type)
+    symbols = sorted(markets)
+    return {"exchange": exchange_id, "market_type": market_type, "symbols": symbols, "known": bool(symbols), "markets": markets}
 
 
 class HistoricalDataFetch(BaseModel):

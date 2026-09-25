@@ -18,7 +18,11 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.core.security import verify_api_key
 from backend.core.exchange_registry import get_authenticated_exchange
 from backend.engine.bot_manager import bot_manager
-from backend.engine.symbols import is_derivative
+from backend.engine.symbols import cash_currency, is_derivative
+from backend.engine import pnl
+from backend.engine.contracts import spec_from_symbol
+from backend.engine.sizing import position_spec
+from backend.core.exchange_registry import market_caps
 
 logger = logging.getLogger("apexalgo.trades")
 
@@ -86,7 +90,8 @@ def get_positions(
         Position.id, Position.exchange, Position.bot_name, Position.symbol,
         Position.mode, Position.status, Position.side, Position.entry_price,
         Position.amount, Position.profit_abs, Position.profit_pct,
-        Position.created_at, Position.closed_at, Position.market_type, Position.leverage
+        Position.created_at, Position.closed_at, Position.market_type, Position.leverage,
+        Position.cash_currency, Position.contract_kind, Position.contract_size
     )
     if symbol:
         formatted_symbol = symbol.replace('-', '/').upper()
@@ -112,7 +117,12 @@ def get_positions(
          "amount": r[8], "profit_abs": r[9], "profit_pct": r[10],
          "created_at": r[11].isoformat() if r[11] else None,
          "closed_at": r[12].isoformat() if r[12] else None,
-         "market_type": r[13] or "spot", "leverage": r[14] or 1}
+         "market_type": r[13] or "spot", "leverage": r[14] or 1,
+         # Money unit of entry/PnL (quote on spot, settle on swaps) and how
+         # `amount` reads: base units (spot/linear) or contracts (inverse)
+         "cash_currency": r[15] or cash_currency(r[3]),
+         "contract_kind": r[16] or spec_from_symbol(r[3]).kind,
+         "contract_size": r[17] if r[17] is not None else spec_from_symbol(r[3]).contract_size}
         for r in query.all()
     ]
 
@@ -130,8 +140,9 @@ def get_orders(
         Order.id, Order.position_id, Order.exchange, Order.bot_name,
         Order.mode, Order.symbol, Order.side, Order.order_type,
         Order.price, Order.amount, Order.fee, Order.status, Order.timestamp,
-        Order.market_type, Order.reduce_only
-    )
+        Order.market_type, Order.reduce_only, Order.fee_currency, Order.fee_cash,
+        Position.cash_currency, Position.contract_kind
+    ).outerjoin(Position, Position.id == Order.position_id)
     if symbol:
         formatted_symbol = symbol.replace('-', '/').upper()
         query = query.filter(Order.symbol == formatted_symbol)
@@ -146,7 +157,13 @@ def get_orders(
          "mode": r[4], "symbol": r[5], "side": r[6], "order_type": r[7],
          "price": r[8], "amount": r[9], "fee": r[10], "status": r[11],
          "timestamp": r[12].isoformat() if r[12] else None,
-         "market_type": r[13] or "spot", "reduce_only": int(r[14] or 0)}
+         "market_type": r[13] or "spot", "reduce_only": int(r[14] or 0),
+         # `fee` is always in `cash_currency`; `fee_currency`/`fee_cash` are
+         # what the exchange actually charged (before conversion)
+         "cash_currency": r[17] or cash_currency(r[5]),
+         "contract_kind": r[18] or spec_from_symbol(r[5]).kind,
+         "fee_currency": r[15] or r[17] or cash_currency(r[5]),
+         "fee_cash": r[16]}
         for r in query.all()
     ]
 
@@ -166,8 +183,58 @@ def get_trade_stats(
 
     closed = query.all()
     if not closed:
-        return {"netPnl": 0, "winRate": 0, "wins": 0, "losses": 0, "total": 0, "profitFactor": 0, "maxDDpct": 0, "avgHoldMs": 0, "sharpe": 0, "totalFees": 0, "avgWin": 0, "avgLoss": 0}
+        return {"netPnl": 0, "winRate": 0, "wins": 0, "losses": 0, "total": 0, "profitFactor": 0, "maxDDpct": 0, "avgHoldMs": 0, "sharpe": 0, "totalFees": 0, "avgWin": 0, "avgLoss": 0,
+                "by_currency": {}, "cash_currency": None}
 
+    # Money never crosses currencies: the stats are computed per cash
+    # currency (`by_currency`), and the top-level fields carry the
+    # single-currency case unchanged. With several currencies in view the
+    # top-level PnL fields are None — the caller must use `by_currency`.
+    by_ccy: dict = {}
+    for p in closed:
+        by_ccy.setdefault(p.cash_currency or cash_currency(p.symbol), []).append(p)
+    by_currency = {ccy: _stats_for(db, rows) for ccy, rows in sorted(by_ccy.items())}
+    if len(by_currency) == 1:
+        ccy, stats = next(iter(by_currency.items()))
+        return {**stats, "by_currency": by_currency, "cash_currency": ccy}
+    money_fields = ("netPnl", "profitFactor", "maxDDpct", "totalFees", "avgWin", "avgLoss")
+    counts = {
+        "wins": sum(s["wins"] for s in by_currency.values()),
+        "losses": sum(s["losses"] for s in by_currency.values()),
+        "total": sum(s["total"] for s in by_currency.values()),
+    }
+    counts["winRate"] = counts["wins"] / counts["total"] * 100 if counts["total"] else 0
+    hold = [s["avgHoldMs"] * s["total"] for s in by_currency.values()]
+    counts["avgHoldMs"] = sum(hold) / counts["total"] if counts["total"] else 0
+    counts["sharpe"] = _sharpe(closed)
+    counts["bySide"] = _by_side(closed)
+    return {**{f: None for f in money_fields}, **counts, "by_currency": by_currency, "cash_currency": None}
+
+
+def _sharpe(closed):
+    # Simplified Sharpe on per-trade returns (percentages are unit-free)
+    returns = [p.profit_pct or 0 for p in closed]
+    mean_ret = sum(returns) / len(returns) if returns else 0
+    variance = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) - 1) if len(returns) > 1 else 0
+    stddev = math.sqrt(variance) if variance > 0 else 0
+    return mean_ret / stddev if stddev > 0 else 0
+
+
+def _by_side(closed):
+    # Per-side breakdown (shorts exist on perpetual markets only)
+    return {
+        side: {
+            "total": len(rows),
+            "wins": sum(1 for p in rows if (p.profit_abs or 0) > 0),
+            "netPnl": sum(p.profit_abs or 0 for p in rows),
+        }
+        for side, rows in (("long", [p for p in closed if p.side != "short"]), ("short", [p for p in closed if p.side == "short"]))
+        if rows
+    }
+
+
+def _stats_for(db: Session, closed):
+    """Trade statistics of closed positions that share one cash currency."""
     wins = [p for p in closed if (p.profit_abs or 0) > 0]
     losses = [p for p in closed if (p.profit_abs or 0) <= 0]
     gross_profit = sum(p.profit_abs or 0 for p in wins)
@@ -186,7 +253,9 @@ def get_trade_stats(
         bc = db.query(_BC.settings).filter(_BC.name == bn).first()
         if bc and bc[0]:
             bot_capitals.append(float(bc[0].get("backtest_capital", 1000)))
-    starting_capital = max(bot_capitals) if bot_capitals else 1000.0
+    # Capital basis = the sum of the distinct bots' pools in view (each bot
+    # trades its own pool; the curve below is their combined realized PnL)
+    starting_capital = sum(bot_capitals) if bot_capitals else 1000.0
 
     equity = starting_capital
     peak_eq = starting_capital
@@ -204,12 +273,7 @@ def get_trade_stats(
             if diff > 0: hold_times.append(diff)
     avg_hold_ms = sum(hold_times) / len(hold_times) if hold_times else 0
 
-    # Simplified Sharpe
-    returns = [p.profit_pct or 0 for p in closed]
-    mean_ret = sum(returns) / len(returns) if returns else 0
-    variance = sum((r - mean_ret) ** 2 for r in returns) / (len(returns) - 1) if len(returns) > 1 else 0
-    stddev = math.sqrt(variance) if variance > 0 else 0
-    sharpe = mean_ret / stddev if stddev > 0 else 0
+    sharpe = _sharpe(closed)
 
     # Total fees
     pos_ids = [p.id for p in closed]
@@ -231,16 +295,7 @@ def get_trade_stats(
         "totalFees": total_fees,
         "avgWin": gross_profit / len(wins) if wins else 0,
         "avgLoss": gross_loss / len(losses) if losses else 0,
-        # Per-side breakdown (shorts exist on perpetual markets only)
-        "bySide": {
-            side: {
-                "total": len(rows),
-                "wins": sum(1 for p in rows if (p.profit_abs or 0) > 0),
-                "netPnl": sum(p.profit_abs or 0 for p in rows),
-            }
-            for side, rows in (("long", [p for p in closed if p.side != "short"]), ("short", [p for p in closed if p.side == "short"]))
-            if rows
-        },
+        "bySide": _by_side(closed),
     }
 
 
@@ -320,11 +375,11 @@ def _execute_live_close(pos: Position, db: Session):
         raise HTTPException(status_code=400, detail=f"API key '{key_name}' no longer exists; cannot close a live position on the exchange.")
 
     ccxt_symbol = pos.symbol.replace('-', '/').upper()
-    close_side = "sell" if pos.side == "long" else "buy"
+    close_side = pnl.close_order_side(pos.side or "long")  # legacy rows without a side are longs
     derivative = is_derivative(ccxt_symbol)
 
     try:
-        exchange = get_authenticated_exchange(key_record)
+        exchange = get_authenticated_exchange(key_record, symbol=ccxt_symbol)
         if derivative:
             # Derivatives: amount in contracts, reduce-only so a stale record
             # can never open the opposite position
@@ -334,7 +389,12 @@ def _execute_live_close(pos: Position, db: Session):
         if close_qty <= 0:
             raise HTTPException(status_code=400, detail="Position amount rounds to zero at exchange precision; cannot place a close order.")
         if derivative:
-            exch_order = exchange.create_order(ccxt_symbol, "market", close_side, close_qty, None, {"reduceOnly": True})
+            params = {"reduceOnly": True}
+            caps = market_caps(key_record.exchange, "swap")
+            if caps is not None and caps.leverage_in_order:
+                # Same as the engine's entry/exit path (kucoinfutures wants it per order)
+                params["leverage"] = int(float(pos.leverage or 1))
+            exch_order = exchange.create_order(ccxt_symbol, "market", close_side, close_qty, None, params)
         else:
             exch_order = exchange.create_order(ccxt_symbol, "market", close_side, close_qty)
     except HTTPException:
@@ -378,8 +438,8 @@ def _execute_live_close(pos: Position, db: Session):
         latest_candle = db.query(Candle).filter(Candle.symbol == pos.symbol, Candle.exchange == (pos.exchange or "okx")).order_by(Candle.timestamp.desc()).first()
         fill_price = latest_candle.close if latest_candle else pos.entry_price
 
-    exit_fee = bot_manager._fee_in_quote(exch_order.get("fee"), ccxt_symbol, fill_price)
-    return float(fill_price), filled_amount, exit_fee, order_id
+    exit_fee = bot_manager._fee_cash(exch_order.get("fee"), ccxt_symbol, fill_price, exchange)
+    return float(fill_price), filled_amount, exit_fee, order_id, exch_order.get("fee")
 
 
 def _record_unfilled_close_order(db: Session, pos: Position, close_side: str, order_id, order_status):
@@ -418,6 +478,14 @@ def close_position_now(pos: Position, db: Session) -> float:
     paper = real orders on the exchange sandbox) are closed on the exchange;
     forward_test at the last candle close. Raises HTTPException on failure and
     leaves the position open. Shared by the force-close route and bot deletion."""
+    # Serialize with the engine's tick for this bot: the open→closing update
+    # below guards the record, the lock guards the exchange (no second sell
+    # while a tick is mid-order on the same position)
+    with bot_manager._bot_locks[pos.bot_name]:
+        return _close_position_locked(pos, db)
+
+
+def _close_position_locked(pos: Position, db: Session) -> float:
     # Atomically mark as closing to prevent a double-close race with the engine
     rows_updated = db.query(Position).filter(
         Position.id == pos.id,
@@ -432,32 +500,46 @@ def close_position_now(pos: Position, db: Session) -> float:
         exit_fee = 0.0
         exchange_order_id = None
         close_qty = pos.amount
+        spec = position_spec(pos.symbol, pos.contract_kind, pos.contract_size, pos.exchange)
+        fee_cols = {"fee_currency": spec.cash_currency}
 
+        pos_side = pos.side or "long"  # legacy rows without a side are longs
         if pos.mode in ("live", "paper"):
-            close_price, close_qty, exit_fee, exchange_order_id = _execute_live_close(pos, db)
+            close_price, close_qty, exit_fee, exchange_order_id, _fee_info = _execute_live_close(pos, db)
+            if isinstance(_fee_info, dict) and _fee_info.get("cost") is not None:
+                fee_cols = {"fee_currency": str(_fee_info.get("currency") or spec.cash_currency).upper(), "fee_cash": float(_fee_info["cost"])}
         else:
-            # Simulated modes: use the most recent candle close price
+            # Simulated modes: the most recent candle close, with the
+            # backtest's exit frictions on forward-test positions so a manual
+            # close books like an engine exit would
             latest_candle = db.query(Candle).filter(Candle.symbol == pos.symbol, Candle.exchange == (pos.exchange or "okx")).order_by(Candle.timestamp.desc()).first()
             close_price = latest_candle.close if latest_candle else pos.entry_price
+            if pos.mode == "forward_test":
+                bot = db.query(BotConfig).filter(BotConfig.name == pos.bot_name).first()
+                if bot is not None:
+                    _, exit_fee_pct, _, exit_slip = bot_manager._sim_frictions(bot.settings or {}, pos_side)
+                    close_price = close_price * (1 + exit_slip) if pos_side == "short" else close_price * (1 - exit_slip)
+                    exit_fee = spec.fee_cash(close_qty, close_price, exit_fee_pct)
 
         # Fee-adjusted P&L accumulated on top of earlier partial exits
         # Opening orders: buys for a long, the (non-reduce-only) sells for a short
-        _open_side = "sell" if pos.side == "short" else "buy"
+        _open_side = pnl.open_order_side(pos_side)
         filled_buys = [o for o in (pos.orders or []) if o.side == _open_side and o.status == "filled"]
         original_amount = sum((o.amount or 0.0) for o in filled_buys) or pos.amount or close_qty
         total_buy_fees = sum((o.fee or 0.0) for o in filled_buys)
         entry_fee_portion = total_buy_fees * (close_qty / original_amount) if original_amount > 0 else 0.0
 
-        if pos.side == "long":
-            realized_pnl = (close_price - pos.entry_price) * close_qty - entry_fee_portion - exit_fee
-        else:
-            realized_pnl = (pos.entry_price - close_price) * close_qty - entry_fee_portion - exit_fee
+        realized_pnl = pnl.price_pnl(pos_side, pos.entry_price, close_price, close_qty, spec=spec) - entry_fee_portion - exit_fee
 
         pos.status = "closed"
         pos.closed_at = datetime.now(timezone.utc)
         pos.profit_abs = (pos.profit_abs or 0.0) + realized_pnl
-        entry_value = (pos.entry_price or 0.0) * original_amount
-        pos.profit_pct = (pos.profit_abs / entry_value) * 100 if entry_value > 0 else 0.0
+        # profit_pct on the capital this leg had locked (margin + entry fee),
+        # added to what earlier partial exits already booked — same basis as
+        # the backtest and the engine's exits
+        locked = pnl.locked_capital(pos.entry_price or 0.0, close_qty, pos.leverage or 1, spec=spec) + entry_fee_portion
+        leg_pct = (realized_pnl / locked) * 100 if locked > 0 else 0.0
+        pos.profit_pct = (pos.profit_pct or 0.0) + leg_pct * (close_qty / original_amount if original_amount > 0 else 1.0)
 
         close_order = Order(
             position_id=pos.id,
@@ -465,7 +547,7 @@ def close_position_now(pos: Position, db: Session) -> float:
             bot_name=pos.bot_name,
             mode=pos.mode,
             symbol=pos.symbol,
-            side="sell" if pos.side == "long" else "buy",
+            side=pnl.close_order_side(pos_side),
             order_type="market",
             price=close_price,
             amount=close_qty,
@@ -475,6 +557,7 @@ def close_position_now(pos: Position, db: Session) -> float:
             status="filled",
             market_type=pos.market_type or "spot",
             reduce_only=1 if is_derivative(pos.symbol) else 0,
+            **fee_cols,
         )
         db.add(close_order)
         db.commit()
@@ -500,7 +583,7 @@ def force_close_position(position_id: int, db: Session = Depends(get_db)):
         close_price = close_position_now(pos, db)
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
-    return {"status": "success", "message": f"Position forcefully closed at ${close_price:.2f}"}
+    return {"status": "success", "message": f"Position forcefully closed at {close_price:.2f} {spec_from_symbol(pos.symbol).quote}"}
 
 @router.get("/export")
 def export_trades_csv(mode: str = "live"):

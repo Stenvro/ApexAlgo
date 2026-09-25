@@ -118,8 +118,13 @@ Color props are **semantic only**: `accent|info|success|danger|purple|neutral`.
 ```jsx
 <Button variant="danger" size="sm" loading={deleting} onClick={handleDelete}>Delete</Button>
 
-<Input label="Capital (USDT)" mono value={cap} onChange={e => setCap(e.target.value)}
-       error={capError} hint="Backtest starting equity" />
+<Input label={`Capital (${cashCcy})`} mono value={cap} onChange={e => setCap(e.target.value)}
+       error={capError} hint="Backtest starting equity — cash currency of the whitelist" />
+
+// Money: never a bare "$"/"USD". Format through utils/money.js with the currency
+// the row is denominated in; sum per currency, never across.
+fmtMoney(1234.5, 'USDT')  // '1,234.50 USDT'   fmtMoney(0.0213, 'BTC') // '0.0213 BTC'
+fmtByCurrency(sumByCurrency(positions, p => p.profit_abs))  // '12.30 USDT · 0.001 BTC'
 
 <Badge variant="success" dot pulse>Running</Badge>
 

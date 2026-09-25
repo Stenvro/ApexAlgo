@@ -10,6 +10,8 @@ import { getToken } from '../../theme';
 import Button from '../ui/Button';
 import { toast } from '../ui/Toast';
 import { confirmDialog } from '../ui/ConfirmDialog';
+import { marketCaps } from '../../api/exchanges';
+import { whitelistCurrency } from '../../utils/money';
 
 const nodeTypes = {
   botConfig: BotConfigNode,
@@ -281,6 +283,22 @@ function rebuildLayoutFromSettings(settings, updateNodeData, deleteNode) {
 // user-editable data (runtime keys pushed in by effects are ignored), plus
 // edge topology. Used to decide whether closing would lose work.
 const TRANSIENT_DATA_KEYS = new Set(['onChange', 'onDelete', 'availableKeys', 'knownSymbols', 'liveContext', 'supportedTimeframes']);
+// Builder-pushed hint on action blocks (which market the routing key trades);
+// stripped like the other transients — the key/settings remain the source.
+TRANSIENT_DATA_KEYS.add('liveMarketType');
+// Builder-pushed cash-currency picture of the whitelist (code, inverse pairs)
+// for the capital/order-cap labels; derived from the market list, not saved.
+TRANSIENT_DATA_KEYS.add('marketCtx');
+// ReactFlow bookkeeping on the node object itself (selection, measured size,
+// drag state). Never persisted and never part of the dirty snapshot: a bot
+// reopened from ui_layout must compare equal until the user edits something.
+const TRANSIENT_NODE_KEYS = ['selected', 'width', 'height', 'dragging', 'measured', 'positionAbsolute'];
+const stripNodeTransients = (n) => {
+    const safe = { ...n, data: { ...(n.data || {}) } };
+    for (const k of TRANSIENT_NODE_KEYS) delete safe[k];
+    for (const k of TRANSIENT_DATA_KEYS) delete safe.data[k];
+    return safe;
+};
 const graphSnapshot = (nodes, edges) => JSON.stringify({
     nodes: nodes.map(n => ({
         id: n.id, type: n.type,
@@ -343,9 +361,19 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
 
     const hasLayout = editingBot && editingBot.settings.ui_layout && editingBot.settings.ui_layout.nodes && editingBot.settings.ui_layout.nodes.length > 0;
     if (hasLayout) {
-        const restoredNodes = editingBot.settings.ui_layout.nodes.map(n => ({
-            ...n, data: { ...n.data, onChange: updateNodeData, onDelete: deleteNode }
-        }));
+        const restoredNodes = editingBot.settings.ui_layout.nodes.map(n => {
+            const node = stripNodeTransients(n);
+            node.data.onChange = updateNodeData;
+            node.data.onDelete = deleteNode;
+            // The persisted layout may carry a stale name (duplicate/import
+            // rename): the bot record is the truth.
+            if (node.type === 'botConfig') node.data.botName = editingBot.name;
+            // Same correction ApiKeyNode would apply on mount — do it here so
+            // the restored graph is already settled when the baseline is taken.
+            if (node.type === 'apiKey' && !node.data.apiKeyName && node.data.marketType === 'swap'
+                && !marketCaps(node.data.dataExchange || 'okx', 'swap')) node.data.marketType = 'spot';
+            return node;
+        });
         setNodes(restoredNodes);
         setEdges(editingBot.settings.ui_layout.edges || []);
         initRef.current = true;
@@ -400,8 +428,9 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
       }).catch(() => setSupportedTimeframes(null));
       let cancelled = false;
       apiClient.get(`/api/data/symbols/${exchange}`, { params: { market_type: activeMarketType } }).then(res => {
-          if (!cancelled) setKnownSymbols({ exchange, marketType: activeMarketType, symbols: res.data.symbols || [], known: !!res.data.known });
-      }).catch(() => { if (!cancelled) setKnownSymbols({ exchange, marketType: activeMarketType, symbols: [], known: false }); });
+          // `markets` (per-symbol kind/settle/quote) is additive — older backends only send `symbols`
+          if (!cancelled) setKnownSymbols({ exchange, marketType: activeMarketType, symbols: res.data.symbols || [], known: !!res.data.known, markets: res.data.markets || {} });
+      }).catch(() => { if (!cancelled) setKnownSymbols({ exchange, marketType: activeMarketType, symbols: [], known: false, markets: {} }); });
       return () => { cancelled = true; };
   }, [activeApiKeyName, activeDataExchange, activeMarketType, availableKeys]);
 
@@ -434,18 +463,46 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   const entryFee = entryActionNode ? (entryActionNode.data.fee === '' || entryActionNode.data.fee === undefined ? 0.1 : Number(entryActionNode.data.fee)) : null;
   const liveLeverage = activeMarketType === 'swap' ? (Number(activeApiKeyNode?.data.leverage) || 1) : 1;
   const liveMarginMode = activeApiKeyNode?.data.marginMode || 'isolated';
+  // Short leg presence for the go-live checklist: a SHORT block, and whether
+  // it has any way out (COVER block or a stop-loss on its SL port).
+  const shortActionNode = nodes.find(n => n.type === 'action' && n.data.actionType === 'short');
+  const hasShort = !!shortActionNode;
+  const hasCover = nodes.some(n => n.type === 'action' && n.data.actionType === 'cover');
+  const hasShortStop = !!shortActionNode && edges.some(e => e.source === shortActionNode.id && e.sourceHandle === 'sl');
   useEffect(() => {
       if (!initRef.current) return;
       const liveContext = { keyName: liveKeyName, exchange: liveKeyExchange, isSandbox: liveKeySandbox, entryFee,
-                            marketType: activeMarketType, leverage: liveLeverage, marginMode: liveMarginMode };
+                            marketType: activeMarketType, leverage: liveLeverage, marginMode: liveMarginMode,
+                            hasShort, hasCover, hasShortStop };
       setNodes(nds => nds.map(n => {
+          if (n.type === 'action') {
+              // Action blocks only need the market type (SHORT/COVER are swap-only)
+              if (n.data.liveMarketType === activeMarketType) return n;
+              return { ...n, data: { ...n.data, liveMarketType: activeMarketType } };
+          }
           if (n.type !== 'botConfig') return n;
           const cur = n.data.liveContext;
           if (cur && cur.keyName === liveContext.keyName && cur.exchange === liveContext.exchange && cur.isSandbox === liveContext.isSandbox && cur.entryFee === liveContext.entryFee
-              && cur.marketType === liveContext.marketType && cur.leverage === liveContext.leverage && cur.marginMode === liveContext.marginMode) return n;
+              && cur.marketType === liveContext.marketType && cur.leverage === liveContext.leverage && cur.marginMode === liveContext.marginMode
+              && cur.hasShort === hasShort && cur.hasCover === hasCover && cur.hasShortStop === hasShortStop) return n;
           return { ...n, data: { ...n.data, liveContext } };
       }));
-  }, [liveKeyName, liveKeyExchange, liveKeySandbox, entryFee, activeMarketType, liveLeverage, liveMarginMode, setNodes]);
+  }, [liveKeyName, liveKeyExchange, liveKeySandbox, entryFee, activeMarketType, liveLeverage, liveMarginMode, hasShort, hasCover, hasShortStop, setNodes]);
+
+  // Cash currency of the whitelist (from the exchange's market list, else the
+  // symbol form) for the capital / order-cap labels and the inverse note.
+  // Serialised so the effect only fires when the picture actually changes.
+  const whitelistPairsText = nodes.find(n => n.type === 'whitelist')?.data.pairs;
+  const marketCtxKey = JSON.stringify(whitelistCurrency(knownSymbols?.markets, parsePairs(whitelistPairsText !== undefined ? whitelistPairsText : DEFAULT_PAIR)));
+  useEffect(() => {
+      if (!initRef.current) return;
+      const marketCtx = JSON.parse(marketCtxKey);
+      setNodes(nds => nds.map(n => {
+          if (n.type !== 'botConfig' && n.type !== 'backtest' && n.type !== 'apiKey' && n.type !== 'action') return n;
+          if (JSON.stringify(n.data.marketCtx) === marketCtxKey) return n;
+          return { ...n, data: { ...n.data, marketCtx } };
+      }));
+  }, [marketCtxKey, setNodes]);
 
   // Esc asks to close (same dirty-check as the buttons); a browser reload with
   // unsaved work gets the native "leave page?" prompt.
@@ -579,21 +636,30 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   }, [nodes, edges]);
   const isDirty = () => baselineRef.current !== null && graphSnapshot(nodes, edges) !== baselineRef.current;
 
+  // Re-entrancy guard: a second Close/Esc while the "Unsaved changes" dialog is
+  // open must not fire another confirmDialog (which would resolve the first
+  // one as "cancelled" and leave the user with a dialog that does nothing).
+  const closingRef = useRef(false);
   const requestClose = async () => {
-      if (saving) return;
+      if (saving || closingRef.current) return;
       if (!isDirty()) return closeBuilder();
-      const choice = await confirmDialog({
-          type: 'warning',
-          title: 'Unsaved changes',
-          message: editingBot
-              ? `"${editingBot.name}" has changes that are not saved. Save & close keeps them; Discard throws them away and the bot stays as it was.`
-              : 'This strategy has not been saved yet. Save & close keeps it; Discard throws the whole draft away.',
-          confirmText: 'Save & close',
-          secondaryText: 'Discard',
-          cancelText: 'Keep editing',
-      });
-      if (choice === true) await handleSaveAndCompile();
-      else if (choice === 'secondary') closeBuilder();
+      closingRef.current = true;
+      try {
+          const choice = await confirmDialog({
+              type: 'warning',
+              title: 'Unsaved changes',
+              message: editingBot
+                  ? `"${editingBot.name}" has changes that are not saved. Save & close keeps them; Discard throws them away and the bot stays as it was.`
+                  : 'This strategy has not been saved yet. Save & close keeps it; Discard throws the whole draft away.',
+              confirmText: 'Save & close',
+              secondaryText: 'Discard',
+              cancelText: 'Keep editing',
+          });
+          if (choice === true) await handleSaveAndCompile();
+          else if (choice === 'secondary') closeBuilder();
+      } finally {
+          closingRef.current = false;
+      }
   };
   requestCloseRef.current = requestClose;
 
@@ -620,7 +686,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         if (symbolsList.length === 0) return showError("Whitelist must contain at least one pair.");
         if (marketType === 'swap') {
             const spotPairs = symbolsList.filter(sym => !sym.includes(':'));
-            if (spotPairs.length) return showError(`Perpetual swaps use the BASE/QUOTE:SETTLE form (e.g. BTC/USDT:USDT); fix ${spotPairs.join(', ')} in the whitelist.`);
+            if (spotPairs.length) return showError(`Perpetual swaps use the BASE/QUOTE:SETTLE form (e.g. BTC/USDT:USDT for a linear, BTC/USD:BTC for an inverse contract); fix ${spotPairs.join(', ')} in the whitelist.`);
         } else {
             const swapPairs = symbolsList.filter(sym => sym.includes(':'));
             if (swapPairs.length) return showError(`${swapPairs.join(', ')} are perpetual swaps; a spot bot needs BASE/QUOTE pairs (or pick a perps market in the Exchange Routing block).`);
@@ -633,16 +699,9 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
         const wantsExchange = configNode.data.executionMode === 'exchange';
         if (wantsExchange && !apiKeyRecord) return showError("Exchange orders need an API key — select one in the Exchange Routing block or switch Execution back to forward test.");
 
-        // Strip non-serialisable function refs and runtime keys before persisting
-        const uiNodesSafe = nodes.map(n => {
-            const safeNode = { ...n, data: { ...n.data } };
-            delete safeNode.data.onChange;
-            delete safeNode.data.onDelete;
-            delete safeNode.data.availableKeys;
-            delete safeNode.data.knownSymbols;
-            delete safeNode.data.liveContext;
-            return safeNode;
-        });
+        // Strip non-serialisable function refs, runtime keys and ReactFlow
+        // bookkeeping (selected/width/height/…) before persisting
+        const uiNodesSafe = nodes.map(stripNodeTransients);
 
         const payload = {
             name: configNode.data.botName || "Untitled Algorithm",
@@ -883,7 +942,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
           { type: 'stopLoss', label: 'Stop Loss (Risk)', cls: 'border-danger/50 text-danger hover:bg-danger/10' },
       ]},
       { title: '4. Execution', items: [
-          { type: 'action', label: 'Entry / Exit Actions (Buy · Sell)', cls: 'border-text/20 text-text hover:bg-text/10' },
+          { type: 'action', label: 'Entry / Exit Actions (Buy · Sell · Short · Cover)', cls: 'border-text/20 text-text hover:bg-text/10' },
       ]},
   ];
 
@@ -960,7 +1019,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
               <p className="text-xs text-text-secondary leading-relaxed">
                 <span className="font-semibold text-text">Build:</span> Indicator → Condition → Entry Action.
               </p>
-              <p className="text-2xs text-muted mt-1">Drag or click blocks from the toolbox.</p>
+              <p className="text-2xs text-muted mt-1">Drag or click blocks from the toolbox. Actions: Buy · Sell (spot and perps), Short · Cover (perps only).</p>
             </div>
           </div>
         )}

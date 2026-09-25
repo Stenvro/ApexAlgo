@@ -145,8 +145,28 @@ class BotManager:
     # ── Exchange plumbing lives in engine/broker.py ──
     # `_get_ccxt_instance` and `_reconcile_order` stay real methods: tests
     # monkeypatch them per instance to inject a fake exchange
-    def _get_ccxt_instance(self, api_key_record: ExchangeKey):
-        return broker.get_ccxt_instance(api_key_record)
+    def _get_ccxt_instance(self, api_key_record: ExchangeKey, symbol=None):
+        return broker.get_ccxt_instance(api_key_record, symbol)
+
+    @staticmethod
+    def _needs_own_instance(api_key_record: ExchangeKey, symbol) -> bool:
+        """True when `symbol` is served by a different ccxt class than the
+        key's default one (binance inverse -> binancecoinm)."""
+        from backend.core.exchange_registry import ccxt_id_for, key_kind_for_symbol, key_market_type
+        if not symbol or key_market_type(api_key_record) != "swap":
+            return False
+        kind = key_kind_for_symbol(api_key_record, symbol)
+        ex = api_key_record.exchange
+        return ccxt_id_for(ex, "swap", kind) != ccxt_id_for(ex, "swap")
+
+    def _ccxt_for(self, api_key_record: ExchangeKey, symbol=None):
+        """Client for `symbol`: the key's shared instance unless the contract
+        kind lives on its own ccxt class. Tests that monkeypatch
+        `_get_ccxt_instance` with a one-argument fake keep working because
+        the symbol is only passed when it actually matters."""
+        if self._needs_own_instance(api_key_record, symbol):
+            return self._get_ccxt_instance(api_key_record, symbol)
+        return self._get_ccxt_instance(api_key_record)
 
     def _reconcile_order(self, ccxt_inst, order, ccxt_symbol, attempts=5, delay=1.0):
         return broker.reconcile_order(ccxt_inst, order, ccxt_symbol, attempts, delay)
@@ -156,6 +176,7 @@ class BotManager:
 
     _below_market_minimum = staticmethod(broker.below_market_minimum)
     _fee_in_quote = staticmethod(broker.fee_in_quote)
+    _fee_cash = staticmethod(broker.fee_cash)
 
     # Sizing helpers live in engine/sizing.py; kept as attributes so callers
     # and tests keep addressing them through the manager
@@ -226,8 +247,8 @@ class BotManager:
     def mark_deleted(self, bot_name: str):
         """Mark a bot as deleted so _process_bots skips it."""
         self._deleted_bots.add(bot_name)
-        self._drawdown_cache.pop((bot_name, "live"), None)
-        self._drawdown_cache.pop((bot_name, "backtest"), None)
+        for _grp in risk.MODES_BY_GROUP:
+            self._drawdown_cache.pop((bot_name, _grp), None)
         # Purge position states for this bot to prevent memory accumulation
         try:
             db = SessionLocal()
@@ -243,8 +264,8 @@ class BotManager:
         """Drop every in-memory cache the engine keeps for a bot (cache wipe):
         drawdown state, entry block, position states of positions that no
         longer exist. Open real positions keep their state."""
-        self._drawdown_cache.pop((bot_name, "live"), None)
-        self._drawdown_cache.pop((bot_name, "backtest"), None)
+        for _grp in risk.MODES_BY_GROUP:
+            self._drawdown_cache.pop((bot_name, _grp), None)
         self._entries_blocked.discard(bot_name)
         self._balance_cache.clear()
         try:

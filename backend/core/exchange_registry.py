@@ -14,13 +14,26 @@ class MarketCaps:
     max_leverage: int = 1               # cap the validator/UI enforce (1 = no leverage)
     leverage_in_order: bool = False     # exchange takes leverage per order instead of set_leverage
     note: str | None = None             # shown in the key form / go-live checklist
+    # Contract kinds this market type serves → ccxt class override per kind
+    # (None = the market type's own class). Spot is always {"spot": None};
+    # swaps list "linear" (stablecoin-settled) and/or "inverse" (coin-margined).
+    kinds: tuple = (("spot", None),)
+
+    @property
+    def kind_ids(self) -> dict:
+        return dict(self.kinds)
+
+    def supports_kind(self, kind: str) -> bool:
+        return str(kind or "").lower() in self.kind_ids
 
 
 SPOT = MarketCaps()
+LINEAR_ONLY = (("linear", None),)
+LINEAR_AND_INVERSE = (("linear", None), ("inverse", None))
 
 
 def _swap(**kw) -> MarketCaps:
-    return MarketCaps(max_leverage=kw.pop("max_leverage", 10), **kw)
+    return MarketCaps(max_leverage=kw.pop("max_leverage", 10), kinds=kw.pop("kinds", LINEAR_AND_INVERSE), **kw)
 
 
 @dataclass(frozen=True)
@@ -31,8 +44,11 @@ class ExchangeSpec:
     and the builder derive their lists from here (via `GET /api/keys/exchanges`).
     ccxt itself is id-agnostic, so nothing engine-side needs to change.
     `markets` lists the market types a key/bot may use: every exchange has
-    "spot"; "swap" (USDT/USDC-margined linear perpetuals, long and short)
-    only where ccxt can place, reduce and list positions.
+    "spot"; "swap" (perpetuals, long and short) only where ccxt can place,
+    reduce and list positions. `MarketCaps.kinds` says which contract kinds
+    the swap market serves — linear (stablecoin-settled) and/or inverse
+    (coin-margined) — and which ccxt class serves each (Binance keeps its
+    coin-margined futures behind a separate class, `binancecoinm`).
     """
     name: str                                   # display name
     needs_passphrase: bool = False              # api_key + secret + passphrase
@@ -53,7 +69,8 @@ EXCHANGES: dict[str, ExchangeSpec] = {
     "binance": ExchangeSpec(
         "Binance", keys_url="https://www.binance.com/en/my/settings/api-management",
         sandbox_note="Spot testnet keys come from testnet.binance.vision, futures testnet keys from testnet.binancefuture.com (separate accounts).",
-        markets={"spot": SPOT, "swap": _swap(note="USDⓈ-M futures; account must be in one-way position mode.")}),
+        markets={"spot": SPOT, "swap": _swap(note="USDⓈ-M and COIN-M futures; account must be in one-way position mode.",
+                                             kinds=(("linear", None), ("inverse", "binancecoinm")))}),
     "bitvavo": ExchangeSpec("Bitvavo", keys_url="https://account.bitvavo.com/user/api"),
     "coinbase": ExchangeSpec("Coinbase", keys_url="https://www.coinbase.com/settings/api"),
     "cryptocom": ExchangeSpec(
@@ -91,7 +108,7 @@ EXCHANGES: dict[str, ExchangeSpec] = {
     "bingx": ExchangeSpec(
         "BingX", keys_url="https://bingx.com/en/account/api/",
         sandbox_note="VST demo-trading keys are created under Demo Trading → API on bingx.com.",
-        markets={"spot": SPOT, "swap": _swap(note="Perpetual futures, one-way position mode.")}),
+        markets={"spot": SPOT, "swap": _swap(note="Perpetual futures (USDT-margined), one-way position mode.", kinds=LINEAR_ONLY)}),
 }
 
 # Backwards-compatible views used by the routers: {id: display name} and the
@@ -114,10 +131,30 @@ def market_caps(exchange_id: str, market_type: str = "spot") -> MarketCaps | Non
     return spec.markets.get(str(market_type or "spot").lower())
 
 
-def ccxt_id_for(exchange_id: str, market_type: str = "spot") -> str:
-    """The ccxt class that serves this market type (kucoin swap = kucoinfutures)."""
+def ccxt_id_for(exchange_id: str, market_type: str = "spot", kind: str | None = None) -> str:
+    """The ccxt class that serves this market type (kucoin swap =
+    kucoinfutures) and, within a swap market, this contract kind (binance
+    inverse = binancecoinm)."""
     caps = market_caps(exchange_id, market_type)
-    return (caps.ccxt_id if caps and caps.ccxt_id else str(exchange_id).lower())
+    if caps is None:
+        return str(exchange_id).lower()
+    if kind:
+        override = caps.kind_ids.get(str(kind).lower())
+        if override:
+            return override
+    return caps.ccxt_id if caps.ccxt_id else str(exchange_id).lower()
+
+
+def supported_kinds(exchange_id: str, market_type: str = "swap") -> tuple:
+    """Contract kinds (``linear``/``inverse``) the exchange's market type serves."""
+    caps = market_caps(exchange_id, market_type)
+    return tuple(caps.kind_ids) if caps else ()
+
+
+def kind_of_symbol(symbol: str) -> str:
+    """Contract kind implied by a unified symbol (see `contracts.spec_from_symbol`)."""
+    from backend.engine.contracts import spec_from_symbol
+    return spec_from_symbol(symbol).kind
 
 
 _sandbox_cache: dict[tuple[str, str], bool] = {}
@@ -150,6 +187,7 @@ def build_exchange(
     passphrase: str | None = None,
     sandbox: bool = False,
     market_type: str = "spot",
+    kind: str | None = None,
 ) -> ccxt.Exchange:
     """
     Instantiate and return a configured CCXT exchange.
@@ -168,6 +206,10 @@ def build_exchange(
         "spot" (default, unchanged behaviour) or "swap": sets ccxt's
         `defaultType` and picks the derivatives class where the exchange has
         one. Raises ValueError when the spec has no such market type.
+    kind : str, optional
+        Contract kind within a swap market ("linear"/"inverse"): picks the
+        per-kind ccxt class (binance inverse → binancecoinm). Raises
+        ValueError when the market type does not serve that kind.
     """
     exchange_id = exchange_id.lower()
     market_type = str(market_type or "spot").lower()
@@ -185,7 +227,13 @@ def build_exchange(
             f"Available: {', '.join(spec.markets)}"
         )
 
-    cls = getattr(ccxt, ccxt_id_for(exchange_id, market_type), None)
+    if kind and market_type != "spot" and not caps.supports_kind(kind):
+        raise ValueError(
+            f"Exchange '{exchange_id}' has no {kind} {market_type} contracts in ApexAlgo. "
+            f"Available: {', '.join(caps.kind_ids)}"
+        )
+
+    cls = getattr(ccxt, ccxt_id_for(exchange_id, market_type, kind if market_type != "spot" else None), None)
     if cls is None:
         raise RuntimeError(
             f"Exchange '{exchange_id}' was not found in the installed CCXT version. "
@@ -229,7 +277,8 @@ def build_exchange_for_symbol(exchange_id: str, symbol: str) -> ccxt.Exchange:
     unified symbol says which market it lives on (``BTC/USDT:USDT`` → swap),
     so candle/ticker callers need no market-type plumbing of their own."""
     from backend.engine.symbols import market_type_of
-    return build_exchange(exchange_id, market_type=market_type_of(symbol))
+    mt = market_type_of(symbol)
+    return build_exchange(exchange_id, market_type=mt, kind=kind_of_symbol(symbol) if mt != "spot" else None)
 
 
 # Cache for exchange timeframes (loaded once per exchange, reused)
@@ -254,20 +303,104 @@ def get_exchange_timeframes(exchange_id: str) -> dict[str, str]:
     return tf_map
 
 
-# Active symbols per (exchange, market type), refreshed after _MARKETS_TTL
-# seconds so a newly listed pair shows up without a restart
-_markets_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
+# Active markets per (exchange, market type), refreshed after _MARKETS_TTL
+# seconds so a newly listed pair shows up without a restart. Value:
+# {symbol: {kind, base, quote, settle, contract_size}} — every swap kind the
+# exchange serves is merged in (binance linear + binancecoinm inverse).
+_markets_cache: dict[tuple[str, str], tuple[float, dict[str, dict]]] = {}
 _MARKETS_TTL = 3600
+# ContractSpec per (exchange, symbol): filled from loaded markets (public
+# lists above, authenticated instances in the broker) and never fetched on
+# demand — the engine falls back to the symbol's own shape when it is empty.
+_spec_cache: dict[tuple[str, str], object] = {}
+_spec_lock = threading.Lock()
 
 
-def get_exchange_symbols(exchange_id: str, market_type: str = "spot") -> list[str]:
-    """Sorted list of tradeable symbols on the exchange: spot pairs
-    ("BTC/USDT") or, for `market_type="swap"`, active linear (stablecoin-
-    settled) perpetuals ("BTC/USDT:USDT"). Inverse/coin-margined contracts
-    and dated futures are left out.
+def _market_info(spec) -> dict:
+    return {"kind": spec.kind, "base": spec.base, "quote": spec.quote, "settle": spec.settle,
+            "contract_size": spec.contract_size, "cash_currency": spec.cash_currency}
 
-    Empty when the exchange cannot be reached — callers must treat that as
-    "unknown", not "nothing is tradeable"."""
+
+def _remember_spec(exchange_id: str, spec) -> None:
+    with _spec_lock:
+        _spec_cache[(str(exchange_id or "").lower(), spec.symbol)] = spec
+
+
+def contract_spec(exchange_id: str, symbol: str, market: dict | None = None):
+    """`ContractSpec` for `symbol` on `exchange_id` without touching the
+    network: from `market` (a ccxt market dict, cached for later callers),
+    else from the cache filled by `get_exchange_markets`/`remember_markets`,
+    else derived from the symbol alone (contract size 1)."""
+    from backend.engine.contracts import spec_from_market, spec_from_symbol
+    from backend.engine.symbols import normalize
+    ex = str(exchange_id or "").lower()
+    sym = normalize(symbol)
+    if market:
+        spec = spec_from_market(market, sym)
+        _remember_spec(ex, spec)
+        return spec
+    with _spec_lock:
+        hit = _spec_cache.get((ex, sym))
+    return hit if hit is not None else spec_from_symbol(sym)
+
+
+def remember_markets(exchange_id: str, markets: dict) -> None:
+    """Seed the spec cache from a loaded ccxt market map (e.g. an
+    authenticated instance's `markets`) so backtests know contract sizes."""
+    from backend.engine.contracts import spec_from_market
+    for sym, m in (markets or {}).items():
+        try:
+            _remember_spec(exchange_id, spec_from_market(m, sym))
+        except Exception:
+            continue
+
+
+def _load_markets_for(exchange_id: str, market_type: str) -> dict[str, dict]:
+    """{symbol: info} for every active market of `market_type`, across all
+    contract kinds the registry lists for it. Raises when nothing could be loaded."""
+    from backend.engine.contracts import spec_from_market
+    out: dict[str, dict] = {}
+    errors = []
+    kinds = [None] if market_type == "spot" else list(supported_kinds(exchange_id, market_type))
+    # Kinds that share one ccxt class are loaded once
+    seen_classes: set[str] = set()
+    for kind in kinds:
+        cls_id = ccxt_id_for(exchange_id, market_type, kind)
+        if cls_id in seen_classes:
+            continue
+        seen_classes.add(cls_id)
+        try:
+            exchange = build_exchange(exchange_id, market_type=market_type, kind=kind)
+            markets = exchange.load_markets()
+        except Exception as exc:
+            errors.append(exc)
+            continue
+        for sym, m in markets.items():
+            if m.get("active", True) is False:
+                continue
+            if market_type == "spot":
+                if not m.get("spot", True):
+                    continue
+            else:
+                if m.get("type") != market_type:
+                    continue
+                spec = spec_from_market(m, sym)
+                if spec.kind not in supported_kinds(exchange_id, market_type):
+                    continue
+            spec = spec_from_market(m, sym)
+            _remember_spec(exchange_id, spec)
+            out[sym] = _market_info(spec)
+    if not out and errors:
+        raise errors[0]
+    return out
+
+
+def get_exchange_markets(exchange_id: str, market_type: str = "spot") -> dict[str, dict]:
+    """{symbol: {kind, base, quote, settle, contract_size, cash_currency}} of
+    the tradeable markets: spot pairs, or for `market_type="swap"` the active
+    linear and inverse perpetuals the registry lists (dated futures left
+    out). Empty when the exchange cannot be reached — callers must treat
+    that as "unknown", not "nothing is tradeable"."""
     exchange_id = exchange_id.lower()
     market_type = str(market_type or "spot").lower()
     cache_key = (exchange_id, market_type)
@@ -275,73 +408,89 @@ def get_exchange_symbols(exchange_id: str, market_type: str = "spot") -> list[st
     if hit and time.monotonic() - hit[0] < _MARKETS_TTL:
         return hit[1]
     try:
-        exchange = build_exchange(exchange_id, market_type=market_type)
-        markets = exchange.load_markets()
-        if market_type == "spot":
-            symbols = sorted(
-                sym for sym, m in markets.items()
-                if m.get("spot", True) and m.get("active", True) is not False
-            )
-        else:
-            symbols = sorted(
-                sym for sym, m in markets.items()
-                if m.get("type") == market_type and m.get("linear")
-                and m.get("active", True) is not False
-            )
+        markets = _load_markets_for(exchange_id, market_type)
     except Exception as exc:
         logger.warning("Failed to load %s markets for '%s': %s", market_type, exchange_id, exc)
-        return hit[1] if hit else []
-    _markets_cache[cache_key] = (time.monotonic(), symbols)
-    return symbols
+        return hit[1] if hit else {}
+    _markets_cache[cache_key] = (time.monotonic(), markets)
+    return markets
 
 
-def build_exchange_from_key(key_record) -> ccxt.Exchange:
+def get_exchange_symbols(exchange_id: str, market_type: str = "spot") -> list[str]:
+    """Sorted symbols of `get_exchange_markets` (linear AND inverse swaps)."""
+    return sorted(get_exchange_markets(exchange_id, market_type))
+
+
+def build_exchange_from_key(key_record, kind: str | None = None) -> ccxt.Exchange:
     """
     Convenience wrapper: build an authenticated exchange instance
     directly from a decrypted ExchangeKey record. Always a fresh instance —
-    use `get_authenticated_exchange` for the shared, cached one.
+    use `get_authenticated_exchange` for the shared, cached one. `kind`
+    picks the contract kind's class on a swap key (binance inverse).
     """
     from backend.core.encryption import decrypt_data
+    mt = key_market_type(key_record)
     return build_exchange(
         exchange_id=key_record.exchange,
         api_key=decrypt_data(key_record.api_key),
         api_secret=decrypt_data(key_record.api_secret),
         passphrase=decrypt_data(key_record.passphrase) if key_record.passphrase else None,
         sandbox=key_record.is_sandbox,
-        market_type=key_market_type(key_record),
+        market_type=mt,
+        kind=kind if mt != "spot" else None,
     )
 
 
+def key_kind_for_symbol(key_record, symbol: str | None) -> str | None:
+    """Contract kind an authenticated instance for `symbol` needs on this
+    key: None on spot keys, else the kind the symbol implies (linear when
+    no symbol is given)."""
+    if key_market_type(key_record) == "spot":
+        return None
+    return kind_of_symbol(symbol) if symbol else "linear"
+
+
 # Authenticated instances shared by the engine and the routers, keyed by
-# (exchange, key name, sandbox, market type). Building one per bot per candle
+# (exchange, key name, sandbox, market type, contract kind). Building one per bot per candle
 # re-decrypted the credentials and re-downloaded the market list every tick;
 # here markets are loaded once and the instance is rebuilt after _AUTH_TTL
 # seconds so a stale session or rate-limit bookkeeping never sticks around
 # for good. Sync ccxt instances serialize nothing themselves; order paths are
 # already serialized per bot, and concurrent REST reads on one instance are safe.
-_auth_cache: dict[tuple[str, str, bool, str], tuple[float, ccxt.Exchange]] = {}
+_auth_cache: dict[tuple[str, str, bool, str, str | None], tuple[float, ccxt.Exchange]] = {}
 _auth_lock = threading.Lock()
 _AUTH_TTL = 3600
 
 
-def _auth_key(key_record) -> tuple[str, str, bool, str]:
+def _auth_key(key_record, kind: str | None = None) -> tuple[str, str, bool, str, str | None]:
+    mt = key_market_type(key_record)
+    if mt == "spot":
+        kind = None
+    else:
+        kind = str(kind or "linear").lower()
+        # Kinds served by the same ccxt class share one instance
+        kind = ccxt_id_for(key_record.exchange, mt, kind)
     return (str(key_record.exchange).lower(), str(key_record.name),
-            bool(key_record.is_sandbox), key_market_type(key_record))
+            bool(key_record.is_sandbox), mt, kind)
 
 
-def get_authenticated_exchange(key_record, *, load_markets: bool = True) -> ccxt.Exchange:
+def get_authenticated_exchange(key_record, *, load_markets: bool = True, symbol: str | None = None) -> ccxt.Exchange:
     """Cached authenticated instance for an ExchangeKey record (1 h TTL).
-    Markets are loaded on first use, so callers' `load_markets()` is a no-op."""
-    key = _auth_key(key_record)
+    Markets are loaded on first use, so callers' `load_markets()` is a no-op.
+    On a swap key `symbol` selects the contract kind's instance
+    (``BTC/USD:BTC`` on binance → binancecoinm); default linear."""
+    kind = key_kind_for_symbol(key_record, symbol)
+    key = _auth_key(key_record, kind)
     now = time.monotonic()
     with _auth_lock:
         hit = _auth_cache.get(key)
         cached = hit[1] if hit and now - hit[0] < _AUTH_TTL else None
-    instance = cached or build_exchange_from_key(key_record)
+    instance = cached or build_exchange_from_key(key_record, kind=kind)
     # A status poll may have built the instance without markets; the order
     # path needs them, so load lazily on whichever call asks first
     if load_markets and not instance.markets:
         instance.load_markets()
+        remember_markets(key_record.exchange, instance.markets)
     if cached is None:
         with _auth_lock:
             _auth_cache[key] = (now, instance)

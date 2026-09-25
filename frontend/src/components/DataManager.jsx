@@ -15,6 +15,7 @@ import { Skeleton } from './ui/Skeleton';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
 import { useExchanges, marketCaps } from '../api/exchanges';
+import { marketKind, marketCurrency, symbolParts } from '../utils/money';
 
 /* ── Inline icons (stroke 1.8) ── */
 const IconSync = (
@@ -66,6 +67,9 @@ function RowAction({ title, onClick, disabled, tone, children }) {
   );
 }
 
+// A dataset is (exchange, symbol, timeframe): the same pair on two exchanges is two rows
+const rowKey = (row) => `${(row.exchange || 'okx').toLowerCase()}|${row.symbol}|${row.timeframe}`;
+
 export default function DataManager({ openChart }) {
   const [summary, setSummary] = useState([]);
   const [liveKeys, setLiveKeys] = useState(() => new Set());
@@ -81,6 +85,30 @@ export default function DataManager({ openChart }) {
   const [marketChoice, setMarketType] = useState('spot');
   const hasSwap = !!marketCaps(exchange, 'swap');
   const marketType = hasSwap ? marketChoice : 'spot';  // a swap choice falls back on a spot-only exchange
+  // Per-symbol market metadata for the chosen exchange/market ({ symbol: { kind,
+  // settle, quote, base } }); the swap suffix and the cash currency come from
+  // here, with the symbol form as fallback when the exchange is unreachable
+  const [markets, setMarkets] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.get(`/api/data/symbols/${exchange}`, { params: { market_type: marketType } })
+      .then(res => { if (!cancelled) setMarkets(res.data?.markets || {}); })
+      .catch(() => { if (!cancelled) setMarkets({}); });
+    return () => { cancelled = true; };
+  }, [exchange, marketType]);
+  // ccxt form of the pair in the download form and what it settles in
+  const formSymbol = useMemo(() => {
+    const raw = symbol.trim().toUpperCase().replace(/-/g, '/');
+    if (!raw.includes('/')) return null;
+    if (marketType !== 'swap' || raw.includes(':')) return raw;
+    // Swap without a settle given: take the exchange's market (linear or
+    // inverse), else assume linear (settle = quote)
+    const { quote } = symbolParts(raw);
+    const hit = Object.keys(markets).find(m => m.startsWith(`${raw}:`));
+    return `${raw}:${markets[hit]?.settle || quote || ''}`;
+  }, [symbol, marketType, markets]);
+  const formCcy = formSymbol ? marketCurrency(markets, formSymbol) : null;
+  const formKind = formSymbol ? marketKind(markets, formSymbol) : 'spot';
   const [timeframe, setTimeframe] = useState('1d');
   const [startDate, setStartDate] = useState('2024-01-01T00:00');
   const [endDate, setEndDate] = useState(new Date().toISOString().slice(0, 16));
@@ -91,6 +119,7 @@ export default function DataManager({ openChart }) {
 
   const [filterSymbol, setFilterSymbol] = useState('ALL');
   const [filterTf, setFilterTimeframe] = useState('ALL');
+  const [filterExchange, setFilterExchange] = useState('ALL');
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 50;
 
@@ -148,6 +177,10 @@ export default function DataManager({ openChart }) {
       setFilterTimeframe(val);
       setCurrentPage(1);
   }, []);
+  const handleFilterExchange = useCallback((val) => {
+      setFilterExchange(val);
+      setCurrentPage(1);
+  }, []);
 
   const handleDownload = async (e) => {
     e.preventDefault();
@@ -161,9 +194,9 @@ export default function DataManager({ openChart }) {
       };
 
       // Accept both BTC/USDC and BTC-USDC — the API path expects the dash form.
-      let normalizedSymbol = symbol.trim().toUpperCase().replace(/\//g, '-');
-      // Perps: BTC-USDT → BTC-USDT:USDT (settle = quote) unless already given
-      if (marketType === 'swap' && !normalizedSymbol.includes(':')) normalizedSymbol = `${normalizedSymbol}:${normalizedSymbol.split('-')[1] || ''}`;
+      // Perps without a settle get it from the exchange's market list
+      // (linear → quote, inverse → base), see formSymbol.
+      const normalizedSymbol = (formSymbol || symbol.trim().toUpperCase()).replace(/\//g, '-');
       const response = await apiClient.post(`/api/data/fetch/${normalizedSymbol}`, payload);
       toast.success(response.data.new_saved != null
         ? `${response.data.message} ${response.data.new_saved} new candles added.`
@@ -176,7 +209,7 @@ export default function DataManager({ openChart }) {
   };
 
   const handleSync = async (row) => {
-    setSyncingSymbol(`${row.symbol}_${row.timeframe}`);
+    setSyncingSymbol(rowKey(row));
     try {
       const payload = {
         exchange: row.exchange || 'okx',
@@ -232,11 +265,12 @@ export default function DataManager({ openChart }) {
 
   const filteredData = useMemo(() => {
       return summary.filter(row => {
+          if (filterExchange !== 'ALL' && (row.exchange || 'okx') !== filterExchange) return false;
           if (filterSymbol !== 'ALL' && row.symbol !== filterSymbol) return false;
           if (filterTf !== 'ALL' && row.timeframe !== filterTf) return false;
           return true;
       });
-  }, [summary, filterSymbol, filterTf]);
+  }, [summary, filterExchange, filterSymbol, filterTf]);
 
   const totalPages = Math.ceil(filteredData.length / itemsPerPage);
   const renderedData = filteredData.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
@@ -284,6 +318,18 @@ export default function DataManager({ openChart }) {
       render: (v, row) => (
         <span className="inline-flex items-center gap-2">
           <span className="text-text font-bold">{v}</span>
+          {(() => {
+            // Cash currency (and contract kind on swaps) from the symbol form —
+            // the overview lists every exchange, so no market lookup here
+            const kind = marketKind(null, v);
+            const ccy = marketCurrency(null, v);
+            if (!ccy) return null;
+            return (
+              <span className="text-3xs font-num text-muted" title={kind === 'inverse' ? `Inverse contract — settled in ${ccy}` : kind === 'linear' ? `Linear contract — settled in ${ccy}` : `Spot — quoted in ${ccy}`}>
+                {kind !== 'spot' && <span className={kind === 'inverse' ? 'text-warn' : 'text-info'}>{kind} · </span>}{ccy}
+              </span>
+            );
+          })()}
           {isLiveRow(row) && <Badge variant="success" dot pulse>Live</Badge>}
         </span>
       ),
@@ -307,7 +353,7 @@ export default function DataManager({ openChart }) {
     {
       key: 'actions', label: 'Actions', align: 'right',
       render: (_, row) => {
-        const isSyncing = syncingSymbol === `${row.symbol}_${row.timeframe}`;
+        const isSyncing = syncingSymbol === rowKey(row);
         return (
           <span className="inline-flex items-center gap-0.5">
             <RowAction
@@ -366,7 +412,7 @@ export default function DataManager({ openChart }) {
                 label="Prune Before Date (Optional)"
                 value={pruneDate}
                 onChange={e => setPruneDate(e.target.value)}
-                className="color-scheme-dark"
+                className="[color-scheme:dark] [html.light_&]:[color-scheme:light]"
               />
               <div className="flex justify-end gap-3 pt-2">
                 <Button
@@ -445,8 +491,12 @@ export default function DataManager({ openChart }) {
                   required
                   value={symbol}
                   onChange={e => setSymbol(e.target.value.toUpperCase())}
-                  placeholder={marketType === 'swap' ? 'BTC-USDT:USDT' : 'BTC-USDC or BTC/USDC'}
-                  hint={marketType === 'swap' ? 'Stored as BTC/USDT:USDT — separate from spot candles' : 'Both BTC-USDC and BTC/USDC work'}
+                  placeholder={marketType === 'swap' ? 'BTC-USDT:USDT or BTC-USD:BTC' : 'BTC-USDC or BTC/USDC'}
+                  hint={marketType === 'swap'
+                    ? (formSymbol
+                        ? `Stored as ${formSymbol} — ${formKind} contract, cash in ${formCcy} · separate from spot candles`
+                        : 'BASE-QUOTE:SETTLE — linear (settled in the quote) or inverse (settled in the base coin); the settle is filled in from the exchange when omitted')
+                    : (formCcy ? `Both BTC-USDC and BTC/USDC work · cash in ${formCcy}` : 'Both BTC-USDC and BTC/USDC work')}
                 />
               </div>
             </div>
@@ -470,7 +520,7 @@ export default function DataManager({ openChart }) {
                   required
                   value={startDate}
                   onChange={e => setStartDate(e.target.value)}
-                  className="color-scheme-dark"
+                  className="[color-scheme:dark] [html.light_&]:[color-scheme:light]"
                 />
                 <Input
                   type="datetime-local"
@@ -479,7 +529,7 @@ export default function DataManager({ openChart }) {
                   required
                   value={endDate}
                   onChange={e => setEndDate(e.target.value)}
-                  className="color-scheme-dark"
+                  className="[color-scheme:dark] [html.light_&]:[color-scheme:light]"
                 />
               </div>
             </div>
@@ -503,6 +553,14 @@ export default function DataManager({ openChart }) {
         <div className="flex flex-wrap gap-y-3 justify-between items-center">
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-2xs text-muted font-bold uppercase tracking-wider hidden md:inline">Filter</span>
+            {uniqueExchanges.length > 1 && (
+              <div className="w-36">
+                <Select value={filterExchange} onChange={(e) => handleFilterExchange(e.target.value)} className={filterSelectClass} aria-label="Filter by exchange">
+                  <option value="ALL">All Exchanges</option>
+                  {uniqueExchanges.map(ex => <option key={ex} value={ex}>{ex.toUpperCase()}</option>)}
+                </Select>
+              </div>
+            )}
             <div className="w-36">
               <Select value={filterSymbol} onChange={(e) => handleFilterSymbol(e.target.value)} className={filterSelectClass}>
                 <option value="ALL">All Pairs</option>

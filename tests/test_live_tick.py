@@ -577,3 +577,257 @@ def test_backlog_candle_is_evaluated_not_the_newest_row(db, live_bot, run_tick, 
     # The newer candle then processes normally and must not re-sell
     asyncio.run(bm._handle_candle_close(EXCHANGE, SYMBOL, TF, candles[-1].timestamp.replace(tzinfo=timezone.utc)))
     assert len(mock.created) == 1
+
+
+# ── audit 2026-09-24: sprint A/B backend items ─────────────────────────────
+
+def test_percentage_sizing_leaves_room_for_the_taker_fee(db, live_bot, run_tick):
+    """100% of the free balance must be clamped so price + fee fit (item 5):
+    the exchange would otherwise reject the buy with InsufficientFunds."""
+    _, candles = live_bot(_settings(amount_pct=100))
+    close = candles[-1].close
+    mock = ExchangeMock(free_quote=1000.0)
+    run_tick(mock)
+    assert len(mock.created) == 1
+    amount = mock.created[0]["amount"]
+    assert amount * close * 1.001 <= 1000.0 + 1e-6
+    assert amount == pytest.approx(1000.0 / (close * 1.001), rel=1e-4)
+
+
+def test_string_integer_settings_are_coerced_not_crashed(db, live_bot, run_tick):
+    """A form can store "60.0"/"5.0" — the tick reads them through sizing._int (item 2)."""
+    s = _settings(max_positions=2)
+    s["backtest_lookback"] = "60.0"
+    s["cooldown_trades"] = "1"
+    s["cooldown_candles"] = "5.0"
+    live_bot(s)
+    mock = ExchangeMock()
+    run_tick(mock)
+    assert [o["side"] for o in mock.created] == ["buy"]
+    assert len(_positions(db, "open")) == 1
+
+
+def test_one_failing_bot_does_not_kill_the_other_bots_tick(db, live_bot, run_tick, monkeypatch):
+    """Item 2: a crash inside one bot's body is logged for that bot; the
+    other bot on the same candle still runs its exits."""
+    from backend.engine import live_cycle
+    from backend.models.bot_logs import BotLog
+    bot, candles = live_bot(_settings(entry_always=False, sl_pct=10), last_low=50.0)
+    _open_live_position(db, candles, entry=100.0, amount=0.5)
+    db.add(BotConfig(name="boom", is_active=True, is_sandbox=False, strategy="node_graph", settings=_settings()))
+    db.commit()
+
+    real_open = live_cycle.maybe_open_position
+
+    def exploding(engine, db_, bot_, *a, **kw):
+        if bot_.name == "boom":
+            raise RuntimeError("kaboom")
+        return real_open(engine, db_, bot_, *a, **kw)
+    monkeypatch.setattr(live_cycle, "maybe_open_position", exploding)
+
+    mock = ExchangeMock(average=90.0)
+    run_tick(mock)
+    db.expire_all()
+    assert [o["side"] for o in mock.created] == ["sell"]
+    assert _positions(db, "open") == []
+    errs = [l.msg for l in db.query(BotLog).filter(BotLog.bot_name == "boom", BotLog.level == "ERROR").all()]
+    assert any("Tick" in m and "kaboom" in m for m in errs)
+
+
+def _seed_closed_buy(db, candles, idx, mode="live"):
+    ts = candles[idx].timestamp
+    pos = Position(exchange=EXCHANGE, bot_name="live-bot", symbol=SYMBOL, mode=mode, status="closed", side="long",
+                   entry_price=100.0, amount=0.1, created_at=ts, closed_at=ts, profit_abs=0.0)
+    db.add(pos)
+    db.flush()
+    db.add(Order(position_id=pos.id, exchange=EXCHANGE, bot_name="live-bot", mode=mode, symbol=SYMBOL, side="buy",
+                 order_type="market", price=100.0, amount=0.1, fee=0.0, status="filled", timestamp=ts,
+                 exchange_order_id=f"seed-{idx}"))
+    db.commit()
+
+
+@pytest.mark.parametrize("cooldown_candles,expect_buy", [(3, False), (2, True)])
+def test_cooldown_window_is_counted_in_candles_like_the_backtest(db, live_bot, run_tick, cooldown_candles, expect_buy):
+    """Item 15: a buy on the third-to-last candle is inside a 3-candle window
+    (index - idx < 3) and outside a 2-candle one, regardless of wall-clock."""
+    s = _settings(max_positions=2)
+    s["cooldown_trades"] = 1
+    s["cooldown_candles"] = cooldown_candles
+    _, candles = live_bot(s)
+    _seed_closed_buy(db, candles, -3)
+    mock = ExchangeMock()
+    run_tick(mock)
+    assert (len(mock.created) == 1) is expect_buy
+
+
+def test_tf_seconds_knows_weeks():
+    from backend.engine.sizing import _tf_seconds
+    assert _tf_seconds("1w") == 7 * 86400
+    assert _tf_seconds("2w") == 14 * 86400
+    assert _tf_seconds("1d") == 86400
+
+
+def test_unrealized_pnl_marks_at_the_candle_being_processed(db, live_bot):
+    """Item 14: a backlog replay marks open positions at `candle_ts`, not at
+    the newest stored close."""
+    from backend.engine import risk
+    _, candles = live_bot(_settings(entry_always=False))
+    pos = _open_live_position(db, candles, entry=100.0, amount=1.0)
+    newest, older = candles[-1], candles[-2]
+    assert risk.unrealized_pnl(db, [pos], EXCHANGE, TF, {}) == pytest.approx(newest.close - 100.0)
+    assert risk.unrealized_pnl(db, [pos], EXCHANGE, TF, {}, candle_ts=older.timestamp) == pytest.approx(older.close - 100.0)
+
+
+def test_forward_losses_do_not_count_against_the_live_curve(db, live_bot):
+    """Item 13: forward_test and paper/live are separate drawdown groups."""
+    from backend.engine import risk
+    _, candles = live_bot(_settings(entry_always=False))
+    ts = candles[-2].timestamp
+    db.add(Position(exchange=EXCHANGE, bot_name="live-bot", symbol=SYMBOL, mode="forward_test", status="closed",
+                    side="long", entry_price=100.0, amount=1.0, profit_abs=-500.0, created_at=ts, closed_at=ts))
+    db.add(Position(exchange=EXCHANGE, bot_name="live-bot", symbol=SYMBOL, mode="live", status="closed",
+                    side="long", entry_price=100.0, amount=1.0, profit_abs=-100.0, created_at=ts, closed_at=ts))
+    db.commit()
+    tracker = risk.DrawdownTracker()
+    live = tracker.get("live-bot", db, "live", starting_capital=1000.0)
+    fwd = tracker.get("live-bot", db, "forward", starting_capital=1000.0)
+    assert live["running_pnl"] == pytest.approx(-100.0) and live["max_dd"] == pytest.approx(10.0)
+    assert fwd["running_pnl"] == pytest.approx(-500.0) and fwd["max_dd"] == pytest.approx(50.0)
+    assert risk.mode_group_for("forward_test") == "forward"
+    assert risk.mode_group_for("paper") == risk.mode_group_for("live") == "live"
+
+
+def test_partial_take_profit_updates_the_drawdown_state(db, live_bot, run_tick):
+    """Item 14: a partial exit books its realized PnL on the drawdown state
+    immediately, not only when the last leg closes."""
+    s = _settings(entry_always=False, sl_pct=50)
+    s["max_drawdown"] = 50
+    s["trade_settings"]["entry"]["take_profits"] = [
+        {"type": "percentage", "value": 1, "close_amount_type": "percentage", "close_amount_value": 50},
+    ]
+    _, candles = live_bot(s, last_high=105.0)
+    _open_live_position(db, candles, entry=100.0, amount=1.0)
+    bm = run_tick(ExchangeMock(average=102.0))
+    db.expire_all()
+    pos = _positions(db, "open")
+    assert len(pos) == 1 and pos[0].amount == pytest.approx(0.5)
+    assert pos[0].profit_abs == pytest.approx((102.0 - 100.0) * 0.5)
+    state = bm._drawdown_cache[("live-bot", "live")]
+    assert state["running_pnl"] == pytest.approx(pos[0].profit_abs)
+
+
+def test_dust_remainder_closes_relative_to_the_position_size(db, live_bot, run_tick):
+    """Item 21: a SHIB-sized position whose fill is a few units short of the
+    amount still counts as fully closed (relative epsilon, not 1e-5 absolute)."""
+    _, candles = live_bot(_settings(entry_always=False, sl_pct=10), last_low=0.000005)
+    amount = 1e8
+    _open_live_position(db, candles, entry=0.00001, amount=amount)
+    mock = ExchangeMock(average=0.000009, filled=amount - 1e-3)
+    run_tick(mock)
+    db.expire_all()
+    assert _positions(db, "open") == []
+    assert len(_positions(db, "closed")) == 1
+
+
+def test_third_currency_fee_is_converted_or_booked_zero():
+    """Item 21: a BNB fee is not USDT."""
+    from backend.engine.broker import fee_in_quote
+
+    class Inst:
+        def fetch_ticker(self, sym):
+            assert sym == "BNB/USDT"
+            return {"last": 600.0}
+
+    class Down:
+        def fetch_ticker(self, sym):
+            raise RuntimeError("offline")
+
+    assert fee_in_quote({"currency": "USDT", "cost": 1.5}, "BTC/USDT", 100.0) == pytest.approx(1.5)
+    assert fee_in_quote({"currency": "BTC", "cost": 0.01}, "BTC/USDT", 100.0) == pytest.approx(1.0)
+    assert fee_in_quote({"currency": "BNB", "cost": 0.01}, "BTC/USDT", 100.0, Inst()) == pytest.approx(6.0)
+    assert fee_in_quote({"currency": "BNB", "cost": 0.01}, "BTC/USDT", 100.0, Down()) == 0.0
+    assert fee_in_quote({"currency": "BNB", "cost": 0.01}, "BTC/USDT", 100.0) == 0.0
+    assert fee_in_quote({"currency": "BNB", "cost": 0.01}, "BTC/USDT:USDT", 100.0, Inst()) == pytest.approx(6.0)
+
+
+def test_forward_pool_locks_the_entry_fee_of_open_positions(db, live_bot, run_tick):
+    """Item 17: the pool is capital + realized − (open cost + open entry fees)."""
+    _, candles = live_bot(_forward_settings(amount_pct=100, symbols=(SYMBOL, "ETH/USDT")))
+    close = candles[-1].close
+    ts = candles[-2].timestamp
+    eth = Position(exchange=EXCHANGE, bot_name="live-bot", symbol="ETH/USDT", mode="forward_test", status="open",
+                   side="long", entry_price=30.0, amount=10.0, created_at=ts)
+    db.add(eth)
+    db.flush()
+    db.add(Order(position_id=eth.id, exchange=EXCHANGE, bot_name="live-bot", mode="forward_test", symbol="ETH/USDT",
+                 side="buy", order_type="market", price=30.0, amount=10.0, fee=10.0, status="filled", timestamp=ts))
+    db.commit()
+    run_tick(ExchangeMock())
+    db.expire_all()
+    pos = [p for p in _fwd_positions(db, "open") if p.symbol == SYMBOL]
+    assert len(pos) == 1
+    entry_price = close * 1.005
+    assert pos[0].amount == pytest.approx((1000 - 300 - 10) / (entry_price * 1.001), rel=1e-6)
+
+
+def test_forward_manual_close_pays_exit_slippage_and_fee(db, live_bot):
+    """Item 17: a manual close of a forward position books like an engine exit."""
+    from backend.routers.trades import close_position_now
+    _, candles = live_bot(_forward_settings(entry_always=False))
+    ts = candles[-2].timestamp
+    pos = Position(exchange=EXCHANGE, bot_name="live-bot", symbol=SYMBOL, mode="forward_test", status="open",
+                   side="long", entry_price=100.0, amount=1.0, created_at=ts)
+    db.add(pos)
+    db.flush()
+    db.add(Order(position_id=pos.id, exchange=EXCHANGE, bot_name="live-bot", mode="forward_test", symbol=SYMBOL,
+                 side="buy", order_type="market", price=100.0, amount=1.0, fee=0.1, status="filled", timestamp=ts))
+    db.commit()
+    close_price = close_position_now(pos, db)
+    db.expire_all()
+    expected_price = candles[-1].close * (1 - 0.005)
+    assert close_price == pytest.approx(expected_price)
+    sell = db.query(Order).filter(Order.position_id == pos.id, Order.side == "sell").one()
+    assert sell.price == pytest.approx(expected_price)
+    assert sell.fee == pytest.approx(expected_price * 1.0 * 0.001)
+    pos = db.get(Position, pos.id)
+    assert pos.status == "closed"
+    assert pos.profit_abs == pytest.approx((expected_price - 100.0) - 0.1 - sell.fee)
+    assert pos.profit_pct == pytest.approx(pos.profit_abs / (100.0 + 0.1) * 100)
+
+
+def test_manual_close_waits_for_the_bots_tick_lock(db, live_bot):
+    """Item 20: a force-close cannot run while the engine holds the bot's lock."""
+    import threading
+    import time
+    from backend.engine.bot_manager import bot_manager
+    from backend.routers.trades import close_position_now
+    _, candles = live_bot(_forward_settings(entry_always=False))
+    pos = Position(exchange=EXCHANGE, bot_name="live-bot", symbol=SYMBOL, mode="forward_test", status="open",
+                   side="long", entry_price=100.0, amount=1.0, created_at=candles[-2].timestamp)
+    db.add(pos)
+    db.commit()
+    pos_id = pos.id
+    done = threading.Event()
+
+    def closer():
+        from backend.core.database import SessionLocal
+        s = SessionLocal()
+        try:
+            close_position_now(s.get(Position, pos_id), s)
+        finally:
+            s.close()
+            done.set()
+
+    lock = bot_manager._bot_locks["live-bot"]
+    lock.acquire()
+    try:
+        t = threading.Thread(target=closer, daemon=True)
+        t.start()
+        time.sleep(0.3)
+        assert not done.is_set(), "close ran while the bot lock was held"
+    finally:
+        lock.release()
+    t.join(5)
+    assert done.is_set()
+    db.expire_all()
+    assert db.get(Position, pos_id).status == "closed"

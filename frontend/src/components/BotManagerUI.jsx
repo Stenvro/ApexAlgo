@@ -11,6 +11,7 @@ import EmptyState from './ui/EmptyState';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
 import BotConsole from './BotConsole';
+import { contractKindOf, symbolParts } from '../utils/money';
 
 /* ── Inline icons (stroke 1.8) ── */
 const IconEdit = (
@@ -276,11 +277,16 @@ const BotCard = memo(function BotCard({ bot, index, busyAction, togglingBot, ope
               : <Badge variant="neutral" dot>Stopped</Badge>}
             <ModeBadge mode={bot.execution_mode || (isApiExecutionOn ? 'live' : 'forward_test')} />
             {isBacktestOn && <Badge variant="neutral">+ Backtest</Badge>}
-            {bot.settings?.market_type === 'swap' && (
-              <Badge variant="warn" title={`Perpetual swaps at ${Number(bot.settings?.leverage) || 1}x ${bot.settings?.margin_mode || 'isolated'} margin — liquidation is modelled, funding is not`}>
-                Perps {Number(bot.settings?.leverage) || 1}×
-              </Badge>
-            )}
+            {bot.settings?.market_type === 'swap' && (() => {
+              // Inverse pairs (settle = base) keep margin and PnL in the base coin
+              const inverse = assignedPairs.filter(p => contractKindOf(p) === 'inverse');
+              const bases = [...new Set(inverse.map(p => symbolParts(p).base).filter(Boolean))];
+              return (
+                <Badge variant="warn" title={`Perpetual swaps at ${Number(bot.settings?.leverage) || 1}× ${bot.settings?.margin_mode || 'isolated'} margin — liquidation modelled in backtest and forward; funding not modelled${inverse.length ? `. Inverse: margin and PnL in ${bases.join('/')}` : ''}`}>
+                  Perps {Number(bot.settings?.leverage) || 1}×{inverse.length ? ' · inverse' : ''}
+                </Badge>
+              );
+            })()}
           </div>
 
           {/* Metrics row */}

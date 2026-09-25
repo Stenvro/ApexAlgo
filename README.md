@@ -74,10 +74,11 @@ https://github.com/user-attachments/assets/25d03926-1e88-4749-88d4-b97b14ff9c2b
 - **Async Event-Driven Architecture** — FastAPI backend with concurrent bot management via asyncio
 - **Multi-Exchange Market Data** — universal REST polling via CCXT; each `(exchange, symbol, timeframe)` gets its own independent polling stream
 - **CCXT Integration** — exchange-agnostic order execution with market precision handling
-- **Perpetual swaps with leverage, long and short** — a bot trades spot or USDT/USDC-settled perpetuals (1–10×, isolated or cross margin); on perpetuals the strategy can open shorts (`SHORT` / `COVER` action blocks) with mirrored stop-loss/take-profit rules; backtest, forward test and live share the same margin/liquidation model, and spot bots are untouched
+- **Perpetual swaps with leverage, long and short** — a bot trades spot or perpetuals (1–10×, isolated or cross margin), **linear** (stablecoin-settled, `BTC/USDT:USDT`) or **inverse** (coin-margined, `BTC/USD:BTC`); the kind is a property of the symbol, not of the key. On perpetuals the strategy can open shorts (`SHORT` / `COVER` action blocks) with mirrored stop-loss/take-profit rules; backtest, forward test and live share the same margin/liquidation model, and spot bots are untouched
+- **One cash currency per bot** — every pair of a whitelist must be quoted (spot) or settled (swap) in the same currency (validator-enforced), so a bot can run in USDT, USDC, EUR, USD or BTC. Money is always shown in that currency and never summed across currencies
 
 ### Multi-Exchange Support
-- **13 Exchanges out of the box** — OKX, Binance, Bitvavo, Coinbase, Crypto.com, Kraken, KuCoin, Bybit, Gate, Bitget, MEXC, HTX, BingX; perpetual swaps on nine of them
+- **13 Exchanges out of the box** — OKX, Binance, Bitvavo, Coinbase, Crypto.com, Kraken, KuCoin, Bybit, Gate, Bitget, MEXC, HTX, BingX; perpetual swaps on nine of them (linear and inverse contracts, BingX linear only; Binance COIN-M runs through ccxt's `binancecoinm` class)
 - **Isolated data streams** — bots on different exchanges poll independently and store candles separately; no cross-exchange data mixing
 - **Exchange Registry** — centralized `exchange_registry.py` handles per-exchange config (OKX EU hostname, passphrase exchanges, sandbox modes)
 - **Automatic migration** — existing databases are upgraded non-destructively on startup; all historical data is preserved
@@ -94,7 +95,7 @@ https://github.com/user-attachments/assets/25d03926-1e88-4749-88d4-b97b14ff9c2b
 - **Incremental Backfill Commits** — candle data is committed to the database after each exchange batch, not all at once; eliminates startup race conditions when multiple bots start simultaneously
 - **Indicator Fingerprinting** — bots sharing the same indicator configuration reuse computed results via MD5-based fingerprint keys, avoiding redundant pandas_ta calls in the live processing loop
 - **Evaluator Memoization** — `resolve_node()` caches resolved Series per evaluation cycle so diamond-shaped node graphs don't recompute shared indicator nodes
-- **Drawdown Caching** — drawdown is tracked per `(bot, mode_group)` with separate backtest and live caches. Lazy-initialized from DB, updated incrementally on position close
+- **Drawdown Caching** — drawdown is tracked per `(bot, mode_group)` with separate `backtest`, `forward` (forward test) and `live` (paper + live) caches, so a simulated forward loss never counts against the real-money curve. Lazy-initialized from DB, updated incrementally on every closed leg
 - **Backfill Lock** — `_backfilling_bots` set prevents live processing from creating duplicate signals while a bot is mid-backfill
 - **Signal Deduplication** — unique constraint on `(bot_name, symbol, timestamp)` with `INSERT OR IGNORE` prevents duplicate signals on bot restart
 - **Incremental Signal Polling** — ChartEngine uses `since_id` to fetch only new signals after initial load, reducing per-poll payload from thousands of rows to near-zero
@@ -111,8 +112,9 @@ https://github.com/user-attachments/assets/25d03926-1e88-4749-88d4-b97b14ff9c2b
 - **Container Resource Limits** — docker-compose sets CPU/memory caps per service to prevent resource starvation
 
 ### Backtesting
-- **Shared Capital Pool** — `backtest_capital` is a single pool shared across all whitelist pairs. When BTC uses $140, only the remainder is available for ETH/SOL/XRP. Capital is locked on position open and sale proceeds returned on close
-- **Dynamic Trade Sizing** — trade amounts are calculated from running equity, not static starting capital. As capital depletes, position sizes shrink proportionally. Trading halts when equity reaches zero
+- **Shared Capital Pool** — `backtest_capital` is a single pool in the bot's cash currency, shared across all whitelist pairs (`engine/capital.py`, `CapitalPools`). When BTC uses 140 of it, only the remainder is available for ETH/SOL/XRP. An entry locks margin plus the entry fee; on close the proceeds (spot) or margin + PnL − exit fee (derivatives) return to the pool
+- **Dynamic Trade Sizing** — `percentage` sizing is a percentage of the **free cash** left in the pool (not of mark-to-market equity), so sizes compound across pairs and shrink as capital is locked. A `fixed` amount is a cash amount in the bot's currency. `max_order_value` (a quote-currency notional) caps every entry in the backtest, forward test and live alike and is therefore part of the strategy fingerprint. Trading halts when the pool reaches zero
+- **Honest returns** — `profit_pct` is the return on the capital a trade had locked (margin + entry fee), in the backtest, forward test, live tick and manual close alike; liquidation is modelled in the backtest and forward test and detected live
 - **Capital Depletion Guard** — before opening any position, the engine verifies sufficient capital. No phantom-money trades
 - **Post-Backtest Drawdown Gate** — backtest always runs to completion; max drawdown is evaluated over all closed positions afterward. If the threshold is exceeded, the bot is stopped and not allowed to go live
 - **Vectorized Historical Evaluation** — fast backtest over configurable lookback periods with numpy-backed arrays
@@ -126,10 +128,10 @@ https://github.com/user-attachments/assets/25d03926-1e88-4749-88d4-b97b14ff9c2b
 ### Risk Management
 - **Tiered Take Profit / Stop Loss** — multiple TP/SL levels with percentage or fixed close amounts
 - **ATR & Trailing Stops** — dynamic stop-loss adjustment based on price action
-- **Trade Cooldown** — configurable max entries per N candles
+- **Trade Cooldown** — configurable max entries per N candles, counted per symbol and in candles (the window starts at the N-th most recent stored candle, in the backtest and live alike)
 - **Position Limits** — per-pair or global max concurrent positions
-- **Max Drawdown Guard** — evaluated after full backtest to gate live entry; during live trading, checked after every closed position. Default action `close_all` closes every position and stops the bot; opt-in `block_entries` pauses new entries until drawdown recovers below half the limit — or the bot has been flat for a configurable cooldown (default 7 days), after which the peak resets — while exits keep running (simulated identically in the backtest). A separate **Max Capital Loss** guard (loss of starting capital) is the hard stop and follows the same action: close everything immediately, or wind down (no new entries, exits finish, then stop)
-- **Max Order Value Guard** — rejects live orders exceeding a configurable USD limit
+- **Max Drawdown Guard** — evaluated after full backtest to gate live entry; during live trading, checked mark-to-market on every candle (forward-test and real-money curves are tracked separately). Default action `close_all` closes every position and stops the bot; opt-in `block_entries` pauses new entries until drawdown recovers below half the limit — or the bot has been flat for a configurable cooldown (default 7 days), after which the peak resets — while exits keep running (simulated identically in the backtest). A separate **Max Capital Loss** guard (loss of starting capital) is the hard stop and follows the same action: close everything immediately, or wind down (no new entries, exits finish, then stop)
+- **Max Order Value Guard** — caps every entry to a configurable quote-currency notional (USD on `BTC/USD:BTC`, EUR on `BTC/EUR`); mandatory for live bots, applied in the backtest and forward test too
 
 ### Order Safety
 - **Order Fill Validation** — verifies exchange order status after every CCXT call
@@ -145,8 +147,9 @@ https://github.com/user-attachments/assets/25d03926-1e88-4749-88d4-b97b14ff9c2b
 
 ### Analytics
 - **Equity Curve** — inline SVG cumulative P&L chart over time (no external chart library)
-- **Buy & Hold Comparison** — per-symbol strategy return vs. passive buy-and-hold; strategy % is `total_pnl / backtest_capital * 100` using the same capital base as B&H for fair comparison; reference price anchored to the true first entry across all positions (open and closed)
+- **Buy & Hold Comparison** — per-symbol strategy return vs. passive buy-and-hold; strategy % is `total_pnl / backtest_capital * 100` using the same capital base as B&H for fair comparison; reference price anchored to the true first entry across all positions (open and closed); live prices come from the bot's own data exchange
 - **8-Metric Stats Strip** — Net P&L, Win Rate, Profit Factor, Max Drawdown (percentage of peak equity using backtest_capital), Avg Hold Time, Total Fees, Return/Risk ratio
+- **Per-currency money** — every amount is printed in the currency it is denominated in (`1,234.50 USDT`, `€1,234.50`, `0.0213 BTC`) and a currency filter scopes the view; with several currencies (or several modes) in view the money tiles switch to per-currency chips instead of summing. Open positions, the ledger and the execution log carry a Side column (long/short) and label orders `BUY / SELL / SHORT / COVER`; a short is force-closed with "Buy to cover"
 - **Avg Hold Time** — computed from entry order timestamps as fallback for backtests where position `created_at` reflects wall-clock run time rather than the candle entry time
 - **Exchange Filter** — filter all analytics sections by exchange, bot, symbol, or execution mode
 - **Real-Time Charts** — TradingView lightweight-charts with indicator overlays on correct axis scales
@@ -230,7 +233,7 @@ docker compose build && docker compose up -d
 
 ### Tests and lint
 
-The backend test suite runs against a throw-away SQLite file (your `data/` database is never touched) and covers the exit-rule table, a full live tick against a mocked exchange, backtest/live parity, the routers, and **golden backtests**: every example strategy is run on deterministic synthetic candles and its order stream is compared with `tests/golden/*.json`, so an engine change can never silently alter a strategy's trades.
+The backend test suite (227 tests) runs against a throw-away SQLite file (your `data/` database is never touched) and covers the exit-rule table, a full live tick against a mocked exchange, swaps and shorts, contract economics (`test_contracts.py`), a **parity suite** (`test_parity_modes.py`: the same candles through backtest, forward test and a live mock, long/short, 1×/5×), **property tests** with hypothesis (`test_properties.py`: PnL sign, liquidation monotone in leverage, sizing never exceeds the pool), the routers, and **golden backtests**: every example strategy (plus a synthetic long/short swap fixture) is run on deterministic synthetic candles and its order stream is compared with `tests/golden/*.json`, so an engine change can never silently alter a strategy's trades.
 
 ```bash
 pip install -r requirements-dev.txt
@@ -367,9 +370,12 @@ ApexAlgo/
 │   │   ├── backtest.py            # Chronological multi-pair simulation against one capital pool (pyramiding, MTM drawdown)
 │   │   ├── live_cycle.py          # One live candle: entries, exits, signal batch, close-all
 │   │   ├── startup.py             # Bot start: data wait/backfill, backtest, drawdown gate, reconciliation, go-live
-│   │   ├── exits.py               # SL/TP/trailing/ATR/multi-tier exit rule table (shared by backtest and live)
-│   │   ├── risk.py                # Drawdown / capital-loss tracking, unrealized PnL
-│   │   ├── sizing.py              # Trade sizing, capital pools, config fingerprints
+│   │   ├── exits.py               # SL/TP/trailing/ATR/multi-tier exit rule table, one direction-parameterised body for longs and shorts
+│   │   ├── contracts.py           # ContractSpec: spot / linear / inverse economics (notional, margin, PnL, liquidation, fees) in the cash currency
+│   │   ├── capital.py             # CapitalPools: per-currency cash/locked/start pool (one currency per bot)
+│   │   ├── pnl.py                 # Side-aware seam: direction, price_pnl, liquidation_price, locked_capital, order sides
+│   │   ├── risk.py                # Drawdown / capital-loss tracking per (bot, backtest|forward|live group), unrealized PnL
+│   │   ├── sizing.py              # Trade sizing, max_order_value cap, forward pool, config fingerprints
 │   │   ├── broker.py              # ccxt plumbing: order reconciliation, cancel, min-notional, wallet checks
 │   │   ├── candle_poller.py       # Universal multi-exchange REST polling with incremental backfill
 │   │   ├── evaluator.py           # Node graph resolver using pandas_ta (memoized per evaluation cycle)
@@ -389,6 +395,8 @@ ApexAlgo/
 │   └── src/
 │       ├── api/                   # Axios client (same-origin by default), error humanizer
 │       ├── theme.js               # Light/dark theme state + token access
+│       ├── utils/money.js         # fmtMoney(value, ccy), per-currency sums, cash currency / contract kind of symbols and rows
+│       ├── utils/orders.js        # Side-aware order helpers (isShortOpen, isCover, orderAction, modeTag)
 │       ├── examples/              # One-click loader; imports the strategies from the root examples/
 │       └── components/
 │           ├── Builder/           # Visual strategy editor (BotBuilder, CustomNodes, indicatorConfig)
@@ -414,13 +422,13 @@ ApexAlgo/
 ├── examples/                      # Verified importable strategies (.apex.json) — results in STRATEGY_CONTEXT.md §4.9
 ├── scripts/
 │   └── verify_examples.py         # Re-runs the examples on real exchange candles in a temp DB (reproduces §4.9)
-├── tests/                         # pytest suite: exit rules, live tick with exchange mock, parity, routers, golden backtests
-│   └── golden/                    # Pinned order streams of the example strategies on synthetic candles
+├── tests/                         # pytest suite: exit rules, live tick with exchange mock, swaps/shorts, contracts, parity, hypothesis properties, routers, golden backtests
+│   └── golden/                    # Pinned order streams of the example strategies (+ a synthetic swap long/short fixture) on synthetic candles
 ├── .github/workflows/ci.yml       # pytest + ruff + npm lint/build on push and PR
 ├── docker-compose.yml             # Two services; ports on 127.0.0.1 by default (BIND_ADDR opt-in)
 ├── data/                          # Database, .env, SSL certs (gitignored)
 ├── requirements.txt
-├── requirements-dev.txt           # pytest, ruff, httpx (tests + lint)
+├── requirements-dev.txt           # pytest, ruff, httpx, hypothesis (tests + lint)
 ├── BETA.md                        # Beta tester guide (setup, safety rules, troubleshooting)
 └── STRATEGY_CONTEXT.md            # AI context: builder reference + .apex.json import schema
 ```
@@ -518,29 +526,38 @@ Click **Duplicate** on any stopped bot card to create a clone with `(copy)` appe
 
 ## Supported Exchanges
 
-| Exchange | Passphrase | Spot sandbox | Perpetual swaps | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| OKX | Yes | Yes | up to 10× (sandbox) | EU hostname (eea.okx.com); net (one-way) position mode |
-| Binance | No | Yes | up to 10× (sandbox) | USDⓈ-M futures, one-way position mode |
-| Bitvavo | No | No | — | EU exchange |
-| Coinbase | No | No | — | |
-| Crypto.com | No | Yes | — | UAT environment |
-| Kraken | No | No | up to 5× (demo) | Kraken Futures uses its own keys (futures.kraken.com / demo-futures.kraken.com) |
-| KuCoin | Yes | No | up to 10× | KuCoin Futures uses its own keys (Futures → API management) |
-| Bybit | No | Yes | up to 10× (testnet) | Unified trading account, one-way position mode |
-| Gate | No | Yes | up to 10× (testnet) | |
-| Bitget | Yes | Yes | up to 10× (demo) | USDT-M futures, one-way position mode |
-| MEXC | No | No | — | Futures API is closed to the public |
-| HTX | No | No | up to 10× | |
-| BingX | No | Yes | up to 10× (demo) | Perpetual futures, one-way position mode |
+| Exchange | Passphrase | Spot sandbox | Perpetual swaps | Contract kinds | Notes |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| OKX | Yes | Yes | up to 10× (sandbox) | linear, inverse | EU hostname (eea.okx.com); net (one-way) position mode |
+| Binance | No | Yes | up to 10× (sandbox) | linear, inverse | USDⓈ-M and COIN-M futures (COIN-M via ccxt `binancecoinm`), one-way position mode |
+| Bitvavo | No | No | — | — | EU exchange |
+| Coinbase | No | No | — | — | |
+| Crypto.com | No | Yes | — | — | UAT environment |
+| Kraken | No | No | up to 5× (demo) | linear, inverse | Kraken Futures uses its own keys (futures.kraken.com / demo-futures.kraken.com) |
+| KuCoin | Yes | No | up to 10× | linear, inverse | KuCoin Futures uses its own keys (Futures → API management) |
+| Bybit | No | Yes | up to 10× (testnet) | linear, inverse | Unified trading account, one-way position mode |
+| Gate | No | Yes | up to 10× (testnet) | linear, inverse | |
+| Bitget | Yes | Yes | up to 10× (demo) | linear, inverse | USDT-M futures, one-way position mode |
+| MEXC | No | No | — | — | Futures API is closed to the public |
+| HTX | No | No | up to 10× | linear, inverse | |
+| BingX | No | Yes | up to 10× (demo) | linear | USDT-margined perpetuals, one-way position mode |
 
-Adding another CCXT-compatible exchange is one `ExchangeSpec` entry in `backend/core/exchange_registry.py`; the key form, the data manager and the builder read the list from `GET /api/keys/exchanges`.
+Adding another CCXT-compatible exchange is one `ExchangeSpec` entry in `backend/core/exchange_registry.py`; the key form, the data manager and the builder read the list from `GET /api/keys/exchanges`. `GET /api/data/symbols/{exchange}?market_type=swap` returns the tradeable symbols plus a `markets` map with `{kind, base, quote, settle, contract_size, cash_currency}` per symbol.
+
+### Cash currency
+
+Every bot keeps its books in exactly one **cash currency**: the quote of a spot pair (`BTC/EUR` → EUR) or the settle currency of a perpetual (`BTC/USDT:USDT` → USDT, `BTC/USD:BTC` → BTC). All pairs of a whitelist must share it (the validator rejects `BTC/USDT` + `ETH/BTC`), `backtest_capital` is read in it, and positions, orders, the backtest summary and the bot summary all carry `cash_currency` so the UI can print `1,234.50 USDT`, `€1,234.50` or `0.0213 BTC` — amounts are never summed across currencies. Orders additionally record `fee_currency` / `fee_cash` (what the exchange actually charged; `fee` is always converted to the cash currency), and `GET /api/trades/stats` groups its money fields in `by_currency` (the top-level fields carry the single-currency case; with several currencies in view they are `null`). Wallet valuation on the key page stays a display-only USD estimate (`valuation_currency: "USD"`).
 
 ### Perpetual swaps
 
-An API key is bound to one market: save a second key with **Market: Perpetual swaps** for derivatives (the same exchange login, with futures/derivatives trade permission; Kraken and KuCoin issue separate futures keys). A bot on a swap key trades the `BASE/QUOTE:SETTLE` symbols (`BTC/USDT:USDT`) — only USDT/USDC-settled linear perpetuals — with the leverage and margin mode set in the builder's Exchange Routing block (1–10×, isolated by default). The engine confirms leverage and margin mode on the exchange before the first order and refuses to start when that fails; on start-up, open swap positions are reconciled against `fetch_positions` instead of the wallet.
+An API key is bound to one market: save a second key with **Market: Perpetual swaps** for derivatives (the same exchange login, with futures/derivatives trade permission; Kraken and KuCoin issue separate futures keys). A bot on a swap key trades the `BASE/QUOTE:SETTLE` symbols with the leverage and margin mode set in the builder's Exchange Routing block (1–10×, isolated by default). Two contract kinds exist, decided per symbol (the whitelist shows a `linear` / `inverse` chip):
 
-Economics are identical across backtest, forward test and live: an entry locks `notional / leverage` plus fees, PnL is on the full notional, and a position whose candle low reaches `entry × (1 − (1 − 0.5%) / leverage)` is liquidated for its margin (`liquidation` in the exit list, `liquidations` in the backtest summary). Funding payments are **not** modelled (`funding: "ignored"` in the summary). `Max Order Value` caps the notional, i.e. margin × leverage. Exchanges without a swap testnet (KuCoin, HTX) can only forward test or trade real money.
+- **Linear** (`BTC/USDT:USDT`): settled in the quote stablecoin; `amount` is a base amount, PnL = `±(exit − entry) × amount` — the same arithmetic as spot.
+- **Inverse** (`BTC/USD:BTC`, coin-margined): margin and PnL are in the base coin; `amount` is a number of contracts worth `contract_size` USD each, PnL = `±contracts × contract_size × (1/entry − 1/exit)`. Positions store `contract_kind` / `contract_size` so a later contract-size change on the exchange never rewrites history.
+
+The engine confirms leverage and margin mode on the exchange before the first order and refuses to start when that fails; on start-up, open swap positions are reconciled against `fetch_positions` instead of the wallet, and a position the exchange no longer holds is booked as a liquidation rather than managed blind. A reconciliation that cannot be performed stops a real-money bot (a sandbox bot only warns).
+
+Economics are identical across backtest, forward test and live: an entry locks `notional / leverage` plus the entry fee on the notional, PnL is on the full notional, `profit_pct` is measured on that locked capital. The liquidation level is `entry × (1 − (1 − 0.5%) / leverage)` for a linear long, `entry × (1 + (1 − 0.5%) / leverage)` for a linear short (a 1× long has none, a 1× short liquidates at +99.5%), and `entry × lev / (lev + 1 − 0.5%)` / `entry × lev / (lev − 1 + 0.5%)` on inverse contracts. Stop-losses and take-profits are evaluated first; only when nothing fills — or the fill would lie beyond the liquidation price — is the layer liquidated for its margin plus the entry fee already paid, without exit fee (`liquidation` in the exit list, `liquidations` in the backtest summary). The backtest and the forward test apply this rule on every candle; live, a liquidation is booked when the candle range reaches the level or when a rejected reduce-only close is followed by an empty `fetch_positions`. Funding payments are **not** modelled (`funding: "ignored"` in the summary), nor are the exchange's tiered maintenance-margin brackets (a flat 0.5% is used). `Max Order Value` caps the **quote notional** of an entry (margin × leverage) on every market kind. Exchanges without a swap testnet (KuCoin, HTX) can only forward test or trade real money.
 
 ### Shorts
 
@@ -550,7 +567,7 @@ Rules of the road:
 
 - Long and short never coexist on one pair: a BUY while a short is open (or a SHORT while a long is open) is ignored with an INFO line in the bot console; when BUY and SHORT fire on the same candle the BUY wins. Pyramiding (`Max Positions`) counts every layer on the pair regardless of side.
 - Exit rules are mirrored: a short stop-loss sits *above* the entry and is hit by the candle high, a take-profit *below* and is hit by the low; trailing and ATR rules anchor to the lowest price reached. A gap through a level fills at the open, as for longs.
-- PnL is `(entry − exit) × amount` minus fees, slippage works against the trade (sold below the close on entry, bought above it on cover). A short is liquidated when the candle high reaches `entry × (1 + (1 − 0.5%) / leverage)`, losing its margin.
+- PnL is `(entry − exit) × amount` minus fees on a linear contract (the inverse formula above on coin-margined ones), slippage works against the trade (sold below the close on entry, bought above it on cover). A short is liquidated when the candle high reaches `entry × (1 + (1 − 0.5%) / leverage)` — even at 1×, where that is a +99.5% move — losing its margin.
 - Live orders: a short opens with a market **sell** (not reduce-only) and closes with a reduce-only **buy**; start-up reconciliation compares the side of every open position with the exchange. The backtest summary adds `long_trades` / `short_trades`, the Analytics *Trades* tile splits PnL per side, and the chart marks shorts (`S-SH` / `T-SHORT`) and covers (`S-CV` / `T-COVER`).
 
 ### Historical data per exchange
@@ -581,7 +598,7 @@ Found a security vulnerability? Please **do not** open a public issue — follow
 - The web UI never embeds or stores the master key: you enter it once in the login screen and receive an `HttpOnly`, `SameSite=Strict`, `Secure` session cookie that JavaScript cannot read; sessions end on backend restart or log-out. The browser talks to a single origin (nginx proxies `/api` to the backend)
 - Ports bind to `127.0.0.1` by default; LAN access is an explicit opt-in (`BIND_ADDR=0.0.0.0`)
 - The backend container runs as a non-root user; `.env` is created with restrictive permissions and excluded from version control
-- Live order execution requires a `max_order_value` safety cap, sizes against the verified exchange balance, and reconciles every order fill (`fetch_order`) before booking
+- Live order execution requires a `max_order_value` safety cap (quote notional per entry), sizes against the verified exchange balance in the bot's cash currency, and reconciles every order fill (`fetch_order`) before booking
 - Live sizing is wallet-based: each bot deploys up to `live_allocation_pct` of the exchange wallet (free balance + positions already open on that key), so multiple bots can share one API key by splitting the percentage
 - Sandbox-flagged keys refuse to run on exchanges without a real testnet
 - Swagger/OpenAPI docs are disabled by default; a Content-Security-Policy is set on the web UI

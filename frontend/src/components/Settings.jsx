@@ -12,6 +12,7 @@ import { SkeletonCard } from './ui/Skeleton';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
 import { useExchanges } from '../api/exchanges';
+import { fmtMoney, normCcy, isCryptoCash } from '../utils/money';
 
 /* Deterministic avatar color per exchange (token values); unknown ids get the neutral class in the avatar */
 const AVATAR_COLORS = {
@@ -47,7 +48,6 @@ const IconBlock = (
   </svg>
 );
 
-const usd = (v, digits = 2) => `$${(Number(v) || 0).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 const qty = (v) => {
   const n = Number(v) || 0;
   if (n === 0) return '0';
@@ -68,15 +68,23 @@ function ExchangeAvatar({ exchange, name }) {
   );
 }
 
-/* Wallet contents with a single USD total, largest holdings first */
-function WalletPanel({ wallet }) {
+/* Wallet contents valued in the exchange's valuation currency (the API's
+   `valuation_currency`; older backends valued in USD), largest first. Assets
+   without a spot market against that currency stay unvalued ("n/a") rather
+   than counting as zero. */
+function WalletPanel({ wallet, exchangeLabel = 'the exchange' }) {
   const [showDust, setShowDust] = useState(false);
+  const ccy = normCcy(wallet?.valuation_currency) || 'USD';
+  const val = (v) => fmtMoney(v, ccy);
   const rows = useMemo(() => {
     const entries = Object.entries(wallet?.balances || {}).map(([coin, d]) => ({ coin, ...d }));
     entries.sort((a, b) => (b.usd_value ?? -1) - (a.usd_value ?? -1) || b.total - a.total);
     return entries;
   }, [wallet]);
-  const dust = rows.filter(r => r.usd_value !== null && r.usd_value !== undefined && r.usd_value < 1);
+  // "Dust" = worth less than one unit of the valuation currency; meaningless
+  // when that currency is a coin (1 BTC is not dust), so no folding then
+  const dustLimit = isCryptoCash(ccy) ? 0 : 1;
+  const dust = rows.filter(r => r.usd_value !== null && r.usd_value !== undefined && r.usd_value < dustLimit);
   const visible = showDust ? rows : rows.filter(r => !dust.includes(r));
   const total = wallet?.total_usd || 0;
 
@@ -86,14 +94,14 @@ function WalletPanel({ wallet }) {
     <div>
       <div className="flex items-end justify-between mb-3 flex-wrap gap-2">
         <div>
-          <p className="text-3xs font-bold uppercase tracking-wider text-muted">Estimated value</p>
-          <p className="text-xl font-num font-bold text-text leading-none mt-1">{usd(total)}</p>
+          <p className="text-3xs font-bold uppercase tracking-wider text-muted">Estimated value <span className="text-faint normal-case tracking-normal">in {ccy}</span></p>
+          <p className="text-xl font-num font-bold text-text leading-none mt-1">{val(total)}</p>
         </div>
         <div className="text-right">
-          <p className="text-3xs text-faint font-num">{rows.length} asset{rows.length === 1 ? '' : 's'}{wallet.unpriced?.length ? ` · ${wallet.unpriced.length} unpriced` : ''}</p>
+          <p className="text-3xs text-faint font-num">{rows.length} asset{rows.length === 1 ? '' : 's'}{wallet.unpriced?.length ? ` · ${wallet.unpriced.length} unvalued` : ''}</p>
           {dust.length > 0 && (
             <button type="button" onClick={() => setShowDust(v => !v)} className="text-3xs text-muted hover:text-text underline-offset-2 hover:underline">
-              {showDust ? 'hide' : 'show'} {dust.length} dust (&lt;$1)
+              {showDust ? 'hide' : 'show'} {dust.length} dust (&lt;{fmtMoney(dustLimit, ccy, { digits: 0 })})
             </button>
           )}
         </div>
@@ -105,7 +113,7 @@ function WalletPanel({ wallet }) {
               <th className="px-3 py-2">Asset</th>
               <th className="px-3 py-2 text-right">Available</th>
               <th className="px-3 py-2 text-right">In orders</th>
-              <th className="px-3 py-2 text-right">Value</th>
+              <th className="px-3 py-2 text-right">Value ({ccy})</th>
               <th className="px-3 py-2 w-24">Share</th>
             </tr>
           </thead>
@@ -117,7 +125,7 @@ function WalletPanel({ wallet }) {
                   <td className="px-3 py-2 font-bold text-text">{r.coin}</td>
                   <td className="px-3 py-2 text-right text-text">{qty(r.free)}</td>
                   <td className={`px-3 py-2 text-right ${r.used > 0 ? 'text-warn' : 'text-faint'}`}>{r.used > 0 ? qty(r.used) : '—'}</td>
-                  <td className="px-3 py-2 text-right text-text-secondary">{r.usd_value !== null && r.usd_value !== undefined ? usd(r.usd_value) : <span className="text-faint" title="No USD market found for this asset on the exchange">n/a</span>}</td>
+                  <td className="px-3 py-2 text-right text-text-secondary">{r.usd_value !== null && r.usd_value !== undefined ? val(r.usd_value) : <span className="text-faint" title={`Not valued: ${exchangeLabel} has no spot market to price ${r.coin} in ${ccy}, so it is left out of the estimated total`}>n/a</span>}</td>
                   <td className="px-3 py-2">
                     <div className="h-1 rounded-full bg-border overflow-hidden">
                       <div className="h-full bg-success rounded-full" style={{ width: `${share}%` }} />
@@ -151,7 +159,7 @@ export default function Settings() {
   const [apiSecret, setApiSecret] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [isSandbox, setIsSandbox] = useState(true);
-  // A key is bound to one market type: spot or perpetual swaps (USDT-margined)
+  // A key is bound to one market type: spot or perpetual swaps
   const [marketType, setMarketType] = useState('spot');
 
   const exchangeInfo = exchanges.find(e => e.id === selectedExchange) || exchanges[0];
@@ -391,9 +399,9 @@ export default function Settings() {
 
   return (
     <PageShell>
-      {/* Swap modal */}
+      {/* Swap modal — overlay layer (z-200): the confirmDialog (Modal, z-300) must stack above it */}
       {swapModal && (
-        <div className="fixed inset-0 z-[999] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="absolute inset-0 backdrop" onClick={() => setSwapModal(null)} />
           <div className="relative modal-enter terminal-card max-w-md w-full shadow-pop">
             <div className="px-5 py-4 border-b border-border flex justify-between items-center">
@@ -507,7 +515,7 @@ export default function Settings() {
                             ? <Badge variant="success" dot>Connected</Badge>
                             : <Badge variant="danger" dot pulse>Error</Badge>}
                           <Badge variant={k.is_sandbox ? 'info' : 'accent'}>{k.is_sandbox ? 'Sandbox' : 'Live'}</Badge>
-                          {k.market_type === 'swap' && <Badge variant="warn" title="Perpetual swaps (USDT-margined) — bots on this key trade with leverage">Perps</Badge>}
+                          {k.market_type === 'swap' && <Badge variant="warn" title="Perpetual swaps — bots on this key trade with leverage; each pair is linear (settled in the quote) or inverse (settled in the base coin), shown per pair in the builder">Perps</Badge>}
                         </div>
                         <div className="flex items-center gap-2 flex-wrap mt-1 text-2xs text-muted">
                           <span className="uppercase font-bold tracking-wider">{exchangeNames[k.exchange] || k.exchange}</span>
@@ -565,7 +573,7 @@ export default function Settings() {
 
                   {balances[k.name] && (
                     <div className="mt-4 pt-4 border-t border-border/50 fade-in">
-                      <WalletPanel wallet={balances[k.name]} />
+                      <WalletPanel wallet={balances[k.name]} exchangeLabel={exchangeNames[k.exchange] || k.exchange} />
                     </div>
                   )}
                 </div>
@@ -596,7 +604,7 @@ export default function Settings() {
               onChange={e => setMarketType(e.target.value)}
               disabled={!hasSwap}
               hint={hasSwap
-                ? (marketType === 'swap' ? `USDT-margined perpetuals, up to ${marketInfo.max_leverage || 1}× in ApexAlgo. Bots on this key trade swaps only.` : 'Spot wallet. A key is bound to one market — add a second key for perpetuals.')
+                ? (marketType === 'swap' ? `Perpetual swaps (linear or inverse, per pair), up to ${marketInfo.max_leverage || 1}× in ApexAlgo. Bots on this key trade swaps only.` : 'Spot wallet. A key is bound to one market — add a second key for perpetuals.')
                 : `${exchangeInfo.name}: spot only in ApexAlgo.`}
             >
               <option value="spot">Spot</option>
