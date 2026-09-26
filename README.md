@@ -233,7 +233,7 @@ docker compose build && docker compose up -d
 
 ### Tests and lint
 
-The backend test suite (231 tests) runs against a throw-away SQLite file (your `data/` database is never touched) and covers the exit-rule table, a full live tick against a mocked exchange, swaps and shorts, contract economics (`test_contracts.py`), a **parity suite** (`test_parity_modes.py`: the same candles through backtest, forward test and a live mock, long/short, 1×/5×), **property tests** with hypothesis (`test_properties.py`: PnL sign, liquidation monotone in leverage, sizing never exceeds the pool), the routers, and **golden backtests**: every example strategy (plus a synthetic long/short swap fixture) is run on deterministic synthetic candles and its order stream is compared with `tests/golden/*.json`, so an engine change can never silently alter a strategy's trades.
+The backend test suite (244 tests) runs against a throw-away SQLite file (your `data/` database is never touched) and covers the exit-rule table, a full live tick against a mocked exchange, swaps and shorts, contract economics (`test_contracts.py`), a **parity suite** (`test_parity_modes.py`: the same candles through backtest, forward test and a live mock, long/short, 1×/5×), **property tests** with hypothesis (`test_properties.py`: PnL sign, liquidation monotone in leverage, sizing never exceeds the pool), the routers, and **golden backtests**: every example strategy (plus a synthetic long/short swap fixture) is run on deterministic synthetic candles and its order stream is compared with `tests/golden/*.json`, so an engine change can never silently alter a strategy's trades.
 
 ```bash
 pip install -r requirements-dev.txt
