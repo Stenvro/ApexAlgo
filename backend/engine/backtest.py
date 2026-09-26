@@ -13,14 +13,40 @@ from backend.models.signals import Signal
 from backend.models.orders import Order
 from backend.models.positions import Position
 from backend.engine.sizing import (
-    _num, _int, _naive_utc, sim_frictions, calculate_trade_amount, _record_config_run,
-    backtest_pin, combined_fingerprint, slice_key,
+    _num, _int, _naive_utc, sim_frictions, calculate_trade_amount, max_affordable_amount, _record_config_run,
+    backtest_pin, combined_fingerprint, slice_key, cap_by_max_order_value,
 )
+from backend.engine.symbols import DEFAULT_MARGIN_MODE, leverage_for, market_type_for
+from backend.engine import funding, pnl, tiers
+from backend.engine.capital import CapitalPools
+from backend.engine.contracts import spec_for
 from backend.core import bot_log_buffer as blb
 
 logger = logging.getLogger("apexalgo.bot_manager")
 
 _BT_COMMIT_EVERY = 500  # timeline steps between backtest commits
+# Derivatives (v2.3): isolated positions are liquidated once the candle range
+# reaches `spec.liquidation_price` at the maintenance-margin rate of their
+# exchange tier (`tiers.mmr_for`, flat `MAINTENANCE_MARGIN` without tiers);
+# cross-margin bots are liquidated as one account (`_cross_breached`);
+# funding settlements stored in `funding_rates` are charged on open
+# positions (`funding.payment`), marked at the candle close.
+
+
+def _cap_by_max_order_value(trade_amount, price, settings, spec=None):
+    """Backtest/forward mirror of the live `max_order_value` clamp: the
+    quote notional of one entry never exceeds the cap (see `sizing.cap_by_max_order_value`)."""
+    return cap_by_max_order_value(trade_amount, price, settings, spec)
+
+
+def bot_cash_currency(sym_contexts_or_symbols, exchange_name=None) -> str | None:
+    """The one cash currency a bot's whitelist is funded in (the validator
+    refuses mixed lists; the first symbol decides for legacy bots)."""
+    for c in sym_contexts_or_symbols:
+        sym = c["symbol"] if isinstance(c, dict) else c
+        if sym:
+            return spec_for(exchange_name, sym).cash_currency
+    return None
 
 
 @dataclass
@@ -35,6 +61,42 @@ class SimResult:
     block_count: int
     dd_detail: dict
     timeline: list = field(default_factory=list)
+    liquidations: int = 0
+    shorts: int = 0
+    cash_currency: str | None = None
+    console: list = field(default_factory=list)  # (level, msg) lines to push after the commit
+    funding_paid: float = 0.0        # net funding booked (cash currency, negative = paid)
+    funding_events: int = 0          # settlements charged on open positions
+    funding_info: dict = field(default_factory=dict)  # `funding.coverage` per symbol
+    mmr_source: str | None = None    # "tiers" | "flat"
+    margin_mode: str | None = None
+
+
+def _cross_breached(sym_contexts, cash, leverage, current_ctx, current_high, current_low):
+    """Cross-margin account check on one candle: the account equity — cash
+    plus every open position's margin and PnL, the current symbol marked at
+    its adverse extreme (long: low, short: high), the others at their last
+    close — against the sum of the maintenance margins. Returns the mark
+    price per symbol when the account is liquidated, else None."""
+    equity = cash
+    maint = 0.0
+    marks = {}
+    any_open = False
+    for c2 in sym_contexts:
+        spec = c2["spec"]
+        for p in c2["open_positions"]:
+            any_open = True
+            side = p.side or "long"
+            if c2 is current_ctx:
+                mark = current_high if side == "short" else current_low
+            else:
+                mark = c2["last_close"] or p.entry_price
+            marks[c2["symbol"]] = mark
+            equity += spec.margin(p.amount, p.entry_price, leverage) + spec.pnl_cash(side, p.amount, p.entry_price, mark)
+            maint += spec.notional_cash(p.amount, mark) * tiers.mmr_for(c2.get("tiers"), tiers.tier_size(spec, p.amount, p.entry_price))
+    if not any_open or equity > maint:
+        return None
+    return marks
 
 
 def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits, position_states, states_lock, on_progress, check_abort):
@@ -42,9 +104,19 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
     and book backtest positions/orders on `db`. `check_exits` is the engine's
     exit evaluator; `on_progress(detail, progress)` reports to the runtime
     strip; `check_abort()` raises when the user stopped the bot."""
-    # Shared capital pool across ALL symbols for this bot
+    # Console lines are buffered and pushed by the caller after the commit:
+    # `blb.push` opens a second SQLite connection, which would wait on this
+    # session's uncommitted rows for the full busy timeout
+    console = []
+    # Every symbol is priced through its ContractSpec (spot / linear /
+    # inverse); the bot's books are kept in one cash currency (validator)
+    for ctx in sym_contexts:
+        ctx["spec"] = spec_for(exchange_name, ctx["symbol"])
+    bt_ccy = bot_cash_currency(sym_contexts, exchange_name) or "USDT"
+    # Shared capital pool across ALL symbols for this bot, in `bt_ccy`
     bt_starting_capital = _num(bot.settings.get("backtest_capital"), 1000)
-    bt_equity = bt_starting_capital  # Available cash (not locked in positions)
+    pools = CapitalPools.for_bot(bt_ccy, bt_starting_capital)
+    bt_equity = bt_starting_capital  # Available cash (not locked in positions) — mirrors pools.cash(bt_ccy)
     bt_peak_equity = bt_starting_capital
     bt_max_dd = 0.0  # peak-to-trough on the mark-to-market equity curve
     bt_max_loss = 0.0  # worst loss of principal vs. starting capital (%)
@@ -72,6 +144,64 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
 
     cooldown_trades = _int(bot.settings.get("cooldown_trades"), 0)
     cooldown_candles = _int(bot.settings.get("cooldown_candles"), 0)
+
+    # Derivatives (phase 2): only the margin (notional / leverage) plus the
+    # entry fee leaves the pool on open; on close the margin comes back with
+    # the PnL. Every formula below keeps a literal spot branch so a spot bot
+    # simulates byte-for-byte as before.
+    bt_market_type = market_type_for(bot.settings)
+    bt_derivative = bt_market_type != "spot"
+    bt_leverage = leverage_for(bot.settings, bt_market_type) if bt_derivative else 1.0
+    bt_liquidations = 0
+    # Cross margin (v2.3): one account-level liquidation instead of a level
+    # per position; funding and the tiered maintenance margin come from the
+    # stored market data of every symbol (loaded below)
+    bt_margin_mode = (bot.settings.get("margin_mode") or DEFAULT_MARGIN_MODE) if bt_derivative else None
+    bt_cross = bt_margin_mode == "cross"
+    bt_funding_paid = 0.0
+    bt_funding_events = 0
+    bt_funding_info = {}
+    bt_mmr_source = None
+    # Extra Order columns for derivative fills (empty on spot → same rows as before)
+    _bt_open_extra = {"market_type": bt_market_type} if bt_derivative else {}
+    _bt_close_extra = {"market_type": bt_market_type, "reduce_only": 1} if bt_derivative else {}
+    _bt_extra_cols = {"cash_currency": bt_ccy}
+    if bt_derivative:
+        _tiers_syms = []
+        for ctx in sym_contexts:
+            df_ts = ctx["df"]["timestamp"]
+            ctx["funding"] = funding.load(db, exchange_name, ctx["symbol"], df_ts.iloc[0], df_ts.iloc[-1]) if len(df_ts) else []
+            ctx["tiers"] = tiers.load(db, exchange_name, ctx["symbol"])
+            ctx["funding_total"] = 0.0
+            bt_funding_info[ctx["symbol"]] = funding.coverage(ctx["funding"], None, None)
+            if ctx["tiers"]:
+                _tiers_syms.append(ctx["symbol"])
+            if ctx["funding"]:
+                console.append(("INFO", f"{ctx['symbol']}: {len(ctx['funding'])} funding settlements stored "
+                                        f"({ctx['funding'][0][0]:%Y-%m-%d} → {ctx['funding'][-1][0]:%Y-%m-%d}) — charged on open positions"))
+            else:
+                console.append(("WARN", f"{ctx['symbol']}: no funding-rate data stored for this window — funding not simulated"))
+        bt_mmr_source = "tiers" if _tiers_syms and len(_tiers_syms) == len(sym_contexts) else "flat"
+        _has_inverse = any(c["spec"].is_inverse for c in sym_contexts)
+        if bt_cross:
+            _liq_note = "cross margin — liquidated as one account when the equity falls to the maintenance margin"
+        elif _has_inverse:
+            _liq_note = "inverse contracts liquidate on the coin-margined curve"
+        else:
+            _liq_note = f"isolated liquidation at about {100 * (1 - pnl.MAINTENANCE_MARGIN) / bt_leverage:.1f}% adverse move"
+        _mmr_note = (f"maintenance margin from the exchange tiers of {', '.join(_tiers_syms)}" if bt_mmr_source == "tiers"
+                     else f"flat {100 * pnl.MAINTENANCE_MARGIN:g}% maintenance margin (no exchange tiers stored)")
+        console.append(("INFO", f"Backtest on {bt_market_type} at {bt_leverage:g}x {bt_margin_mode} in {bt_ccy}: {_liq_note}, {_mmr_note}"))
+    # Shorts (phase 3): a `short` signal opens a short layer, `cover` flattens
+    # the pair's shorts; both only exist when the strategy has the nodes and
+    # the bot runs on a derivative market (the validator rejects them on
+    # spot). Long and short never coexist on one pair — the conflicting
+    # signal is ignored (INFO once per pair). Frictions come from the
+    # `short`/`cover` legs, falling back to entry/exit.
+    bt_shorts_enabled = bt_derivative and any(c.get("short_arr") is not None for c in sym_contexts)
+    bt_s_entry_fee, bt_s_exit_fee, bt_s_entry_slippage, bt_s_exit_slippage = sim_frictions(bot.settings, "short")
+    bt_short_count = 0
+    _conflict_logged = set()
 
     # ── Merged chronological execution across all symbols ──
     timeline = []
@@ -112,11 +242,36 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
 
         is_buy = bool(ctx["entry_arr"][index])
         is_sell = bool(ctx["exit_arr"][index])
+        is_short = bool(ctx["short_arr"][index]) if ctx.get("short_arr") is not None else False
+        is_cover = bool(ctx["cover_arr"][index]) if ctx.get("cover_arr") is not None else False
         atr_arr = ctx["atr_arr"]
         current_atr = float(atr_arr[index]) if atr_arr is not None and not pd.isna(atr_arr[index]) else 0.0
 
         if run_backtest and (ctx["last_bt_ts"] is None or ts > ctx["last_bt_ts"]):
             open_list = ctx["open_positions"]
+            spec = ctx["spec"]
+
+            # Funding: every settlement since the position's last charge up
+            # to this candle close, on its notional at the close (the
+            # forward tick applies the same rule from the same table)
+            if bt_derivative and ctx.get("funding") and open_list:
+                for open_bt_pos in open_list:
+                    _since = open_bt_pos.funding_until or open_bt_pos.created_at
+                    for _f_ts, _rate in funding.settlements(ctx["funding"], _since, ts):
+                        _pay = funding.payment(spec, open_bt_pos.side or "long", open_bt_pos.amount, current_price, _rate)
+                        pools.charge(bt_ccy, _pay)
+                        open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + _pay
+                        open_bt_pos.funding_paid = (open_bt_pos.funding_paid or 0.0) + _pay
+                        open_bt_pos.funding_until = _f_ts
+                        _orig = ctx["original_amount"].get(open_bt_pos.id) or open_bt_pos.amount
+                        _locked = spec.locked_capital(_orig, open_bt_pos.entry_price, bt_leverage,
+                                                      bt_s_entry_fee if open_bt_pos.side == "short" else bt_entry_fee)
+                        if _locked > 0:
+                            open_bt_pos.profit_pct = (open_bt_pos.profit_pct or 0.0) + 100.0 * _pay / _locked
+                        ctx["funding_total"] += _pay
+                        bt_funding_paid += _pay
+                        bt_funding_events += 1
+                bt_equity = pools.cash(bt_ccy)
 
             # Cooldown check: block entry if too many trades occurred within the cooldown window
             can_buy_cooldown = True
@@ -134,9 +289,19 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
             else:
                 slot_free = sum(len(c2["open_positions"]) for c2 in sym_contexts) < max_pos
             just_opened = None
+            # Side already open on this pair (None when flat) — a long never
+            # stacks on a short and vice versa
+            pair_side = (open_list[0].side or "long") if open_list else None
+            if is_buy and pair_side == "short" and symbol not in _conflict_logged:
+                _conflict_logged.add(symbol)
+                console.append(("INFO", f"{symbol}: BUY signal ignored while a short is open (long and short never coexist on a pair)"))
             # Capital depletion halt / drawdown block: no new entries, exits keep running
-            if is_buy and slot_free and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
-                trade_amount = calculate_trade_amount(current_price, bot.settings, current_equity=bt_equity)
+            if is_buy and pair_side != "short" and slot_free and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
+                if bt_derivative:
+                    trade_amount = calculate_trade_amount(current_price, bot.settings, current_equity=bt_equity, leverage=bt_leverage, spec=spec)
+                else:
+                    trade_amount = calculate_trade_amount(current_price, bot.settings, current_equity=bt_equity, spec=spec)
+                trade_amount = _cap_by_max_order_value(trade_amount, current_price, bot.settings, spec)
                 if trade_amount is not None:
                     bt_entry_price = current_price * (1 + bt_entry_slippage)
                     # Percentage sizing spends a share of equity; cap the
@@ -144,19 +309,54 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                     # (100% sizing would otherwise always exceed it)
                     _entry_cfg = bot.settings.get("trade_settings", {}).get("entry", {})
                     if _entry_cfg.get("amount_type", "percentage") != "fixed":
-                        max_affordable = bt_equity / (bt_entry_price * (1 + bt_entry_fee))
+                        # Margin + fee on the notional must fit the pool
+                        max_affordable = max_affordable_amount(bt_equity, bt_entry_price, bt_leverage if bt_derivative else 1, bt_entry_fee, spec=spec)
                         trade_amount = min(trade_amount, max_affordable)
-                    investment_cost = bt_entry_price * trade_amount
-                    total_cost = investment_cost * (1 + bt_entry_fee)
+                    # What leaves the pool: margin + entry fee, in bt_ccy
+                    total_cost = spec.locked_capital(trade_amount, bt_entry_price, bt_leverage if bt_derivative else 1, bt_entry_fee)
                     if trade_amount > 0 and total_cost <= bt_equity + 1e-9:
                         ctx["trade_entry_indices"].append(index)
-                        bt_equity = max(bt_equity - total_cost, 0.0)  # Lock capital + entry fee
-                        just_opened = Position(exchange=exchange_name, bot_name=bot.name, symbol=symbol, mode="backtest", status="open", side="long", entry_price=bt_entry_price, amount=trade_amount, created_at=_naive_utc(ts))
+                        pools.lock(bt_ccy, total_cost)  # Lock capital + entry fee
+                        bt_equity = pools.cash(bt_ccy)
+                        just_opened = Position(exchange=exchange_name, bot_name=bot.name, symbol=symbol, mode="backtest", status="open", side="long", entry_price=bt_entry_price, amount=trade_amount, created_at=_naive_utc(ts),
+                                               contract_kind=spec.kind, contract_size=spec.contract_size, **_bt_extra_cols)
+                        if bt_derivative:
+                            just_opened.market_type = bt_market_type
+                            just_opened.leverage = bt_leverage
+                            just_opened.funding_until = _naive_utc(ts)
                         db.add(just_opened)
                         db.flush()
-                        db.add(Order(position_id=just_opened.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="buy", order_type="market", price=bt_entry_price, amount=trade_amount, timestamp=_naive_utc(ts), status="filled", fee=investment_cost * bt_entry_fee))
+                        db.add(Order(position_id=just_opened.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="buy", order_type="market", price=bt_entry_price, amount=trade_amount, timestamp=_naive_utc(ts), status="filled", fee=spec.fee_cash(trade_amount, bt_entry_price, bt_entry_fee), fee_currency=bt_ccy, **_bt_open_extra))
                         open_list.append(just_opened)
                         ctx["original_amount"][just_opened.id] = trade_amount
+            elif bt_shorts_enabled and is_short and not is_buy:
+                if pair_side == "long":
+                    if symbol not in _conflict_logged:
+                        _conflict_logged.add(symbol)
+                        console.append(("INFO", f"{symbol}: SHORT signal ignored while a long is open (long and short never coexist on a pair)"))
+                elif slot_free and can_buy_cooldown and bt_equity > 0 and not bt_entries_blocked:
+                    trade_amount = calculate_trade_amount(current_price, bot.settings, current_equity=bt_equity, leverage=bt_leverage, side="short", spec=spec)
+                    trade_amount = _cap_by_max_order_value(trade_amount, current_price, bot.settings, spec)
+                    if trade_amount is not None:
+                        # Slippage works against the seller: a short fills below the close
+                        bt_entry_price = current_price * (1 - bt_s_entry_slippage)
+                        _short_cfg = pnl.entry_cfg(bot.settings.get("trade_settings", {}), "short")
+                        if _short_cfg.get("amount_type", "percentage") != "fixed":
+                            max_affordable = max_affordable_amount(bt_equity, bt_entry_price, bt_leverage, bt_s_entry_fee, spec=spec)
+                            trade_amount = min(trade_amount, max_affordable)
+                        total_cost = spec.locked_capital(trade_amount, bt_entry_price, bt_leverage, bt_s_entry_fee)
+                        if trade_amount > 0 and total_cost <= bt_equity + 1e-9:
+                            ctx["trade_entry_indices"].append(index)
+                            pools.lock(bt_ccy, total_cost)  # Lock margin + entry fee
+                            bt_equity = pools.cash(bt_ccy)
+                            just_opened = Position(exchange=exchange_name, bot_name=bot.name, symbol=symbol, mode="backtest", status="open", side="short", entry_price=bt_entry_price, amount=trade_amount, created_at=_naive_utc(ts), market_type=bt_market_type, leverage=bt_leverage,
+                                                   contract_kind=spec.kind, contract_size=spec.contract_size, funding_until=_naive_utc(ts), **_bt_extra_cols)
+                            db.add(just_opened)
+                            db.flush()
+                            db.add(Order(position_id=just_opened.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="sell", order_type="market", price=bt_entry_price, amount=trade_amount, timestamp=_naive_utc(ts), status="filled", fee=spec.fee_cash(trade_amount, bt_entry_price, bt_s_entry_fee), fee_currency=bt_ccy, **_bt_open_extra))
+                            open_list.append(just_opened)
+                            ctx["original_amount"][just_opened.id] = trade_amount
+                            bt_short_count += 1
 
             # Every position carries its own SL/TP/trailing state; a SELL
             # signal reaches each of them, so it flattens the whole pair.
@@ -165,7 +365,26 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
             for open_bt_pos in list(open_list):
                 if open_bt_pos is just_opened:
                     continue
-                exit_events = check_exits(open_bt_pos, current_price, current_high, current_low, is_sell, bot.settings, current_atr, row_open=current_open)
+                pos_side = open_bt_pos.side or "long"
+                pos_short = pos_side == "short"
+                if bt_derivative and not bt_cross:
+                    # Isolated: the level of this position at its tier's rate
+                    _mmr = tiers.mmr_for(ctx.get("tiers"), tiers.tier_size(spec, open_bt_pos.amount, open_bt_pos.entry_price))
+                    liq_price = spec.liquidation_price(pos_side, open_bt_pos.entry_price, bt_leverage, mmr=_mmr)
+                    liq_hit = pnl.liquidated(pos_side, liq_price, current_high, current_low)
+                else:
+                    liq_price, liq_hit = None, False
+                # The regular exits are evaluated first: a stop that fills
+                # before the price reaches the liquidation level (e.g. an
+                # SL at the open) is a normal exit. Only fills at or beyond
+                # the liquidation price are impossible — those layers, and
+                # whatever is still open after the exits, are liquidated.
+                if pos_short:
+                    exit_events = check_exits(open_bt_pos, current_price, current_high, current_low, is_cover, bot.settings, current_atr, row_open=current_open, side="short")
+                else:
+                    exit_events = check_exits(open_bt_pos, current_price, current_high, current_low, is_sell, bot.settings, current_atr, row_open=current_open)
+                if liq_hit:
+                    exit_events = [ev for ev in exit_events if not pnl.liquidated(pos_side, liq_price, ev['price'], ev['price'])]
 
                 for ev in exit_events:
                     if open_bt_pos.status == "closed": break
@@ -180,16 +399,24 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                     close_qty = min(close_qty, open_bt_pos.amount)
                     if close_qty <= 0: continue
 
-                    actual_price = ev['price'] * (1 - bt_exit_slippage)
-                    db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side="sell", order_type="market", price=actual_price, amount=close_qty, timestamp=_naive_utc(ts), status="filled", fee=actual_price * close_qty * bt_exit_fee))
-
-                    entry_cost = open_bt_pos.entry_price * close_qty * (1 + bt_entry_fee)
-                    exit_proceeds = actual_price * close_qty * (1 - bt_exit_fee)
-                    realized_pnl = exit_proceeds - entry_cost
+                    _lev = bt_leverage if bt_derivative else 1
+                    if pos_short:
+                        # Covering buys back above the trigger; fees on both legs' notional
+                        actual_price = ev['price'] * (1 + bt_s_exit_slippage)
+                        _fee_in, _fee_out = bt_s_entry_fee, bt_s_exit_fee
+                    else:
+                        actual_price = ev['price'] * (1 - bt_exit_slippage)
+                        _fee_in, _fee_out = bt_entry_fee, bt_exit_fee
+                    db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side=pnl.close_order_side(pos_side), order_type="market", price=actual_price, amount=close_qty, timestamp=_naive_utc(ts), status="filled", fee=spec.fee_cash(close_qty, actual_price, _fee_out), fee_currency=bt_ccy, **_bt_close_extra))
+                    # What was locked for this slice (margin + entry fee), what
+                    # comes back (proceeds on spot; margin + PnL − exit fee on
+                    # derivatives) and the net result — all in bt_ccy
+                    entry_cost = spec.locked_capital(close_qty, open_bt_pos.entry_price, _lev, _fee_in)
+                    returned = spec.close_return(pos_side, close_qty, open_bt_pos.entry_price, actual_price, _lev, _fee_out)
+                    realized_pnl = spec.realized_pnl(pos_side, close_qty, open_bt_pos.entry_price, actual_price, _lev, _fee_in, _fee_out)
                     open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + realized_pnl
-
-                    # Return sale proceeds to capital pool
-                    bt_equity += exit_proceeds
+                    pools.release(bt_ccy, returned, entry_cost)
+                    bt_equity = pools.cash(bt_ccy)
 
                     # Weighted profit_pct: accumulate based on portion of original position closed (fee-adjusted)
                     original_amount = ctx["original_amount"].get(open_bt_pos.id)
@@ -203,7 +430,7 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                             position_states[open_bt_pos.id]['triggered_exits'].add(ev['id'])
                             open_bt_pos.triggered_exits = list(position_states[open_bt_pos.id]['triggered_exits'])
 
-                    if close_qty >= open_bt_pos.amount - 0.00001:
+                    if close_qty >= open_bt_pos.amount - pnl.close_epsilon(original_amount or open_bt_pos.amount):
                         open_bt_pos.status = "closed"
                         open_bt_pos.closed_at = _naive_utc(ts)
                         with states_lock:
@@ -213,10 +440,70 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
                     else:
                         open_bt_pos.amount -= close_qty
 
+                if liq_hit and open_bt_pos.status != "closed":
+                    # Liquidated: the whole margin is gone, nothing returns
+                    # to the pool (the entry fee was paid on open and counts
+                    # against the trade; no exit fee is charged)
+                    remaining_qty = open_bt_pos.amount
+                    _liq_entry_fee = bt_s_entry_fee if pos_short else bt_entry_fee
+                    liq_loss = spec.liquidation_loss(remaining_qty, open_bt_pos.entry_price, bt_leverage, _liq_entry_fee)
+                    pools.forget(bt_ccy, liq_loss)
+                    db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=symbol, side=pnl.close_order_side(pos_side), order_type="market", price=liq_price, amount=remaining_qty, timestamp=_naive_utc(ts), status="filled", fee=0.0, fee_currency=bt_ccy, **_bt_close_extra))
+                    open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) - liq_loss
+                    original_amount = ctx["original_amount"].get(open_bt_pos.id)
+                    if original_amount and original_amount > 0:
+                        open_bt_pos.profit_pct = (open_bt_pos.profit_pct or 0.0) - 100.0 * (remaining_qty / original_amount)
+                    with states_lock:
+                        st = position_states.pop(open_bt_pos.id, None)
+                    triggered = set((st or {}).get('triggered_exits') or ()) | set(open_bt_pos.triggered_exits or ())
+                    open_bt_pos.triggered_exits = sorted(str(t) for t in triggered) + ["liquidation"]
+                    open_bt_pos.status = "closed"
+                    open_bt_pos.closed_at = _naive_utc(ts)
+                    open_list.remove(open_bt_pos)
+                    ctx["original_amount"].pop(open_bt_pos.id, None)
+                    bt_liquidations += 1
+
+            # Cross margin: after the candle's exits, the account as a whole
+            # against its maintenance margin. A breach liquidates every open
+            # position of the bot (all symbols) and empties the wallet; the
+            # free cash lost on top of the margins is attributed to the
+            # positions in proportion to their margin, so profit_pct can go
+            # below −100 and the losses add up to the equity that vanished.
+            if bt_cross:
+                _marks = _cross_breached(sym_contexts, pools.cash(bt_ccy), bt_leverage, ctx, current_high, current_low)
+                if _marks is not None:
+                    _total_margin = sum(c2["spec"].margin(p.amount, p.entry_price, bt_leverage) for c2 in sym_contexts for p in c2["open_positions"])
+                    _cash_lost = pools.drain(bt_ccy)
+                    for c2 in sym_contexts:
+                        _spec2 = c2["spec"]
+                        for _p in list(c2["open_positions"]):
+                            _side2 = _p.side or "long"
+                            _mark = _marks.get(c2["symbol"], _p.entry_price)
+                            _remaining = _p.amount
+                            _margin_i = _spec2.margin(_remaining, _p.entry_price, bt_leverage)
+                            _fee_i = _spec2.fee_cash(_remaining, _p.entry_price, bt_s_entry_fee if _side2 == "short" else bt_entry_fee)
+                            _loss = _margin_i + _fee_i + (_cash_lost * _margin_i / _total_margin if _total_margin > 0 else 0.0)
+                            db.add(Order(position_id=_p.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=c2["symbol"], side=pnl.close_order_side(_side2), order_type="market", price=_mark, amount=_remaining, timestamp=_naive_utc(ts), status="filled", fee=0.0, fee_currency=bt_ccy, **_bt_close_extra))
+                            _p.profit_abs = (_p.profit_abs or 0.0) - _loss
+                            _orig = c2["original_amount"].get(_p.id)
+                            if _orig and _orig > 0 and (_margin_i + _fee_i) > 0:
+                                _p.profit_pct = (_p.profit_pct or 0.0) - 100.0 * (_loss / (_margin_i + _fee_i)) * (_remaining / _orig)
+                            with states_lock:
+                                _st = position_states.pop(_p.id, None)
+                            _trig = set((_st or {}).get('triggered_exits') or ()) | set(_p.triggered_exits or ())
+                            _p.triggered_exits = sorted(str(t) for t in _trig) + ["liquidation"]
+                            _p.status = "closed"
+                            _p.closed_at = _naive_utc(ts)
+                            c2["open_positions"].remove(_p)
+                            c2["original_amount"].pop(_p.id, None)
+                            bt_liquidations += 1
+                    bt_equity = pools.cash(bt_ccy)
+                    console.append(("WARN", f"{ts:%Y-%m-%d %H:%M}: cross-margin liquidation on {symbol} — account equity fell to the maintenance margin, all positions closed and the wallet ({_cash_lost:,.2f} {bt_ccy} free cash) lost"))
+
         if _naive_utc(ts) not in ctx["existing_timestamps"]:
             indicators = { col: float(row[col]) for col in ctx["indicator_cols"] if not pd.isna(row[col]) }
             if indicators:
-                action_str = "buy" if is_buy else ("sell" if is_sell else "neutral")
+                action_str = "buy" if is_buy else ("short" if is_short else ("sell" if is_sell else ("cover" if is_cover else "neutral")))
                 ctx["new_signals"].append(Signal(candle_id=int(row['id']), symbol=symbol, timestamp=ts, bot_name=bot.name, name="STRATEGY_TICK", action=action_str, extra_data=indicators))
 
         # Mark-to-market equity curve: cash + open positions at their last close
@@ -224,7 +511,7 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
             open_value = 0.0
             for c2 in sym_contexts:
                 if c2["last_close"]:
-                    open_value += sum(p2.amount for p2 in c2["open_positions"]) * c2["last_close"]
+                    open_value += c2["spec"].mark_value(c2["open_positions"], c2["last_close"], bt_leverage if bt_derivative else 1)
             equity_now = bt_equity + open_value
             if equity_now > bt_peak_equity:
                 bt_peak_equity = equity_now
@@ -279,13 +566,16 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
             last_price = float(df_s.iloc[-1]['close'])
             last_ts = df_s.iloc[-1]['timestamp']
             if last_ts.tzinfo is None: last_ts = last_ts.replace(tzinfo=timezone.utc)
+            spec = ctx["spec"]
+            _lev = bt_leverage if bt_derivative else 1
             for open_bt_pos in list(ctx["open_positions"]):
                 remaining_qty = open_bt_pos.amount
+                pos_side = open_bt_pos.side or "long"
+                pos_short = pos_side == "short"
+                _fee_in, _fee_out = (bt_s_entry_fee, bt_s_exit_fee) if pos_short else (bt_entry_fee, bt_exit_fee)
 
-                entry_cost = open_bt_pos.entry_price * remaining_qty * (1 + bt_entry_fee)
-                exit_proceeds = last_price * remaining_qty * (1 - bt_exit_fee)
-                final_pnl = exit_proceeds - entry_cost
-
+                entry_cost = spec.locked_capital(remaining_qty, open_bt_pos.entry_price, _lev, _fee_in)
+                final_pnl = spec.realized_pnl(pos_side, remaining_qty, open_bt_pos.entry_price, last_price, _lev, _fee_in, _fee_out)
                 open_bt_pos.profit_abs = (open_bt_pos.profit_abs or 0.0) + final_pnl
                 original_amount = ctx["original_amount"].get(open_bt_pos.id)
                 if original_amount and original_amount > 0:
@@ -295,8 +585,9 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
 
                 open_bt_pos.status = "closed"
                 open_bt_pos.closed_at = _naive_utc(last_ts)
-                bt_equity += exit_proceeds  # Return proceeds to capital pool
-                db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=ctx["symbol"], side="sell", order_type="market", price=last_price, amount=remaining_qty, timestamp=_naive_utc(last_ts), status="filled", fee=last_price * remaining_qty * bt_exit_fee))
+                pools.release(bt_ccy, spec.close_return(pos_side, remaining_qty, open_bt_pos.entry_price, last_price, _lev, _fee_out), entry_cost)
+                bt_equity = pools.cash(bt_ccy)
+                db.add(Order(position_id=open_bt_pos.id, exchange=exchange_name, bot_name=bot.name, mode="backtest", symbol=ctx["symbol"], side=pnl.close_order_side(pos_side), order_type="market", price=last_price, amount=remaining_qty, timestamp=_naive_utc(last_ts), status="filled", fee=spec.fee_cash(remaining_qty, last_price, _fee_out), fee_currency=bt_ccy, **_bt_close_extra))
 
                 with states_lock:
                     position_states.pop(open_bt_pos.id, None)
@@ -321,7 +612,10 @@ def simulate(db, bot, sym_contexts, exchange_name, run_backtest, *, check_exits,
     return SimResult(
         starting_capital=bt_starting_capital, equity=bt_equity, max_dd=bt_max_dd, max_loss=bt_max_loss,
         dd_action=bt_dd_action, dd_cooldown_secs=bt_dd_cooldown_secs, blocked_secs=bt_blocked_secs,
-        block_count=bt_block_count, dd_detail=bt_dd_detail, timeline=timeline,
+        block_count=bt_block_count, dd_detail=bt_dd_detail, timeline=timeline, liquidations=bt_liquidations,
+        shorts=bt_short_count, cash_currency=bt_ccy, console=console,
+        funding_paid=bt_funding_paid, funding_events=bt_funding_events, funding_info=bt_funding_info,
+        mmr_source=bt_mmr_source, margin_mode=bt_margin_mode,
     )
 
 
@@ -394,7 +688,42 @@ def build_summary(db, bot, res: SimResult, sym_contexts, exchange_name=None) -> 
         "data_changed": data_changed,
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    # The currency every money figure above is in (backtest_capital, net_pnl,
+    # the drawdown peak/trough): the whitelist's cash currency
+    ccy = res.cash_currency or bot_cash_currency(sym_contexts, exchange_name)
+    if ccy:
+        summary["cash_currency"] = ccy
+    market_type = market_type_for(bot.settings)
+    if market_type != "spot":
+        summary.update({
+            "market_type": market_type,
+            "leverage": leverage_for(bot.settings, market_type),
+            "margin_mode": res.margin_mode or (bot.settings.get("margin_mode") or DEFAULT_MARGIN_MODE),
+            "liquidations": res.liquidations,
+            # Funding: "simulated" when settlements were stored for every
+            # symbol of the window, "partial"/"no data" otherwise; the net
+            # amount booked is inside net_pnl already
+            "funding": _funding_status(res.funding_info),
+            "funding_paid": round(res.funding_paid, 8),
+            "funding_events": res.funding_events,
+            "funding_by_symbol": res.funding_info,
+            "mmr_source": res.mmr_source or "flat",
+        })
+        if res.shorts:
+            # Closed short trades (buy & hold above stays the long reference on purpose)
+            short_closed = db.query(Position.id).filter(
+                Position.bot_name == bot.name, Position.mode == "backtest", Position.status == "closed", Position.side == "short"
+            ).count()
+            summary["short_trades"] = short_closed
+            summary["long_trades"] = len(pnls) - short_closed
     return summary
+
+
+def _funding_status(info: dict) -> str:
+    states = {v.get("funding") for v in (info or {}).values()}
+    if not states or states == {"no data"}:
+        return "no data"
+    return "simulated" if states == {"simulated"} else "partial"
 
 
 def gate_stop_reason(bot, res: SimResult):
@@ -414,8 +743,9 @@ def gate_stop_reason(bot, res: SimResult):
     if max_drawdown_pct > 0 and res.max_dd >= max_drawdown_pct:
         _d = res.dd_detail
         _fmt = lambda t: t.strftime('%Y-%m-%d') if t is not None else '?'
-        detail = (f"peak {_fmt(_d['peak_ts'])} ${_d['peak_eq']:,.0f} -> trough {_fmt(_d['trough_ts'])} "
-                  f"${_d['trough_eq']:,.0f}, {_d['open_at_trough']} open position(s)")
+        _ccy = res.cash_currency or ""
+        detail = (f"peak {_fmt(_d['peak_ts'])} {_d['peak_eq']:,.2f} {_ccy} -> trough {_fmt(_d['trough_ts'])} "
+                  f"{_d['trough_eq']:,.2f} {_ccy}, {_d['open_at_trough']} open position(s)")
         if res.dd_action == "block_entries":
             # Informative only: the same rule already paused entries
             # inside the simulation, so the numbers reflect it

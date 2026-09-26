@@ -16,8 +16,11 @@ from backend.models.orders import Order
 from backend.models.positions import Position
 from backend.models.exchange_keys import ExchangeKey
 from backend.engine.evaluator import NodeEvaluator
-from backend.engine import backtest
+from backend.engine import backtest, broker, funding, live_cycle, risk, tiers
+from backend.engine.contracts import MAINTENANCE_MARGIN
+from sqlalchemy.orm import selectinload
 from backend.engine.sizing import _num, _int, _tf_seconds, _naive_utc, backtest_pin, data_fingerprint
+from backend.engine.symbols import DEFAULT_MARGIN_MODE, base_of, cash_currency, is_derivative, leverage_for, market_type_for
 from backend.core.exchange_registry import get_exchange_timeframes
 from backend.core import bot_log_buffer as blb
 
@@ -130,10 +133,7 @@ def execute_sync_backfill(engine, bot_id: int):
         for symbol in symbols:
             _window = f"pinned {pin_from:%Y-%m-%d} → {pin_to:%Y-%m-%d}" if pinned else f"lookback={lookback_limit}"
             blb.push(bot.name, "INFO", f"Starting: {symbol} | {timeframe} | {live_mode} | {_window}")
-            tf_seconds = 60
-            if timeframe.endswith('m'): tf_seconds = int(timeframe[:-1]) * 60
-            elif timeframe.endswith('h'): tf_seconds = int(timeframe[:-1]) * 3600
-            elif timeframe.endswith('d'): tf_seconds = int(timeframe[:-1]) * 86400
+            tf_seconds = _tf_seconds(timeframe)
 
             # Use fresh sessions for all polling queries. The main `db` session starts an
             # implicit SQLite transaction on its first read (line above), so any subsequent
@@ -281,6 +281,11 @@ def execute_sync_backfill(engine, bot_id: int):
 
             entry_series = evaluator.resolve_node(bot.settings.get("entry_node")) if bot.settings.get("entry_node") else pd.Series(False, index=evaluator.df.index)
             exit_series = evaluator.resolve_node(exit_node) if exit_node else pd.Series(False, index=evaluator.df.index)
+            # Shorts (phase 3): only when the strategy has the nodes; None keeps
+            # the simulate loop on its long-only path
+            short_node, cover_node = bot.settings.get("short_node"), bot.settings.get("cover_node")
+            short_series = evaluator.resolve_node(short_node) if short_node else None
+            cover_series = evaluator.resolve_node(cover_node) if cover_node else None
 
             # Pre-extract numpy arrays once — avoids O(n) .iloc index lookups inside the loop
             _standard_cols = {'id', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'atr'}
@@ -289,6 +294,8 @@ def execute_sync_backfill(engine, bot_id: int):
                 "df": evaluator.df,
                 "entry_arr": entry_series.values,
                 "exit_arr": exit_series.values,
+                "short_arr": short_series.values if short_series is not None else None,
+                "cover_arr": cover_series.values if cover_series is not None else None,
                 "atr_arr": evaluator.df['atr'].values if 'atr' in evaluator.df.columns else None,
                 "indicator_cols": [c for c in evaluator.df.columns if c not in _standard_cols],
                 "existing_timestamps": existing_timestamps,
@@ -317,18 +324,48 @@ def execute_sync_backfill(engine, bot_id: int):
         if not still_active(engine, bot_id, _run_token):
             raise StoppedByUser()
 
+        # Perpetuals: the funding settlements of the backtest window and the
+        # exchange's maintenance-margin tiers, stored next to the candles.
+        # Best effort — the simulation reports what it could not get.
+        if any(is_derivative(c["symbol"]) for c in sym_contexts):
+            engine.set_runtime(bot.name, "fetching", "Funding rates and margin tiers")
+            for c in sym_contexts:
+                if not is_derivative(c["symbol"]) or len(c["df"]) == 0:
+                    continue
+                _ts = c["df"]["timestamp"]
+                try:
+                    _new = funding.ensure_history(db, exchange_name, c["symbol"], _ts.iloc[0], _ts.iloc[-1])
+                    if _new:
+                        blb.push(bot.name, "INFO", f"{c['symbol']}: stored {_new} new funding settlement(s) from {exchange_name.upper()}")
+                except Exception as _exc:
+                    logger.warning("Bot '%s': funding history for %s failed: %s", bot.name, c["symbol"], _exc)
+                    blb.push(bot.name, "WARN", f"{c['symbol']}: could not fetch funding history ({_exc}) — using what is stored")
+                try:
+                    tiers.ensure(db, exchange_name, c["symbol"])
+                except Exception as _exc:
+                    logger.warning("Bot '%s': leverage tiers for %s failed: %s", bot.name, c["symbol"], _exc)
+                    blb.push(bot.name, "WARN", f"{c['symbol']}: could not fetch the maintenance-margin tiers ({_exc}) — flat {100 * MAINTENANCE_MARGIN:g}% assumed")
+            if not still_active(engine, bot_id, _run_token):
+                raise StoppedByUser()
+
         res = backtest.simulate(
             db, bot, sym_contexts, exchange_name, run_backtest,
             check_exits=engine._check_exits, position_states=engine.position_states, states_lock=engine._position_states_lock,
             on_progress=lambda detail, progress=None: engine.set_runtime(bot.name, "backtesting", detail, progress),
             check_abort=_check_abort)
         bt_equity = res.equity
+        _ccy = res.cash_currency or (cash_currency(sym_contexts[0]["symbol"]) if sym_contexts else "USDT")
+        # Console lines the simulation buffered: pushed only now, after its
+        # commit — the log buffer writes on a second connection and would
+        # otherwise wait on the uncommitted backtest rows
+        for _lvl, _msg in res.console:
+            blb.push(bot.name, _lvl, _msg)
 
         for ctx in sym_contexts:
             trade_count = len(ctx["trade_entry_indices"]) if run_backtest else 0
-            logger.info("Backfill complete: '%s' on %s | mode=%s | %d candles | %d trades | equity=$%.2f", bot.name, ctx["symbol"], live_mode.upper(), len(ctx["df"]), trade_count, bt_equity)
+            logger.info("Backfill complete: '%s' on %s | mode=%s | %d candles | %d trades | equity=%.2f %s", bot.name, ctx["symbol"], live_mode.upper(), len(ctx["df"]), trade_count, bt_equity, _ccy)
             if run_backtest:
-                blb.push(bot.name, "INFO", f"Backtest complete: {ctx['symbol']} | {len(ctx['df'])} candles | {trade_count} trades | equity=${bt_equity:.2f}")
+                blb.push(bot.name, "INFO", f"Backtest complete: {ctx['symbol']} | {len(ctx['df'])} candles | {trade_count} trades | equity={bt_equity:.2f} {_ccy}")
             else:
                 blb.push(bot.name, "INFO", f"Ready: {ctx['symbol']} | {len(ctx['df'])} candles | mode={live_mode.upper()}")
 
@@ -366,9 +403,9 @@ def execute_sync_backfill(engine, bot_id: int):
         # as the base for live drawdown / capital-loss percentages.
         if live_mode in ("paper", "live"):
             try:
-                _ccxt = engine._get_ccxt_instance(api_key)
-                _bal = _ccxt.fetch_balance()
                 _pairs = [str(s).replace('-', '/').upper() for s in symbols]
+                _ccxt = engine._ccxt_for(api_key, _pairs[0] if _pairs else None)
+                _bal = _ccxt.fetch_balance()
                 # The backtest ran on public (production) candles; a demo
                 # account or another region can list fewer pairs, and an
                 # order on a missing one can only fail
@@ -377,14 +414,15 @@ def execute_sync_backfill(engine, bot_id: int):
                     blb.push(bot.name, "WARN", f"Not listed on {api_key.exchange.upper()}{' demo' if api_key.is_sandbox else ''} for key '{api_key.name}': {', '.join(_missing)} — {live_mode} entries on these pairs will be skipped")
                 _tokens = []
                 for _p in _pairs:
-                    for _t in _p.split('/'):
+                    # Derivatives hold no base coin: only the settle currency matters
+                    for _t in ([cash_currency(_p)] if is_derivative(_p) else [base_of(_p), cash_currency(_p)]):
                         if _t not in _tokens:
                             _tokens.append(_t)
                 def _free(t):
                     v = _bal.get(t)
                     return float((v or {}).get("free") or 0) if isinstance(v, dict) else float((_bal.get("free") or {}).get(t) or 0)
                 _parts = [f"{_free(t):,.4f}".rstrip('0').rstrip('.') + f" {t}" for t in _tokens]
-                _quote = _pairs[0].split('/')[-1] if _pairs else "USDT"
+                _quote = cash_currency(_pairs[0]) if _pairs else "USDT"
                 _pool, _wallet_total, _bot_total = engine._live_allocation(db, bot, _quote, _free(_quote))
                 _pct = _num(bot.settings.get("live_allocation_pct"), 100)
                 blb.push(bot.name, "INFO", f"Wallet '{api_key.name}' ({live_mode}): {', '.join(_parts)} free — this bot: {_pct:.0f}% = {_bot_total:,.2f} {_quote} ({_pool:,.2f} still deployable)")
@@ -404,19 +442,74 @@ def execute_sync_backfill(engine, bot_id: int):
 
             # Startup reconciliation: open DB positions must still be backed
             # by the exchange balance, otherwise exits would be sent for
-            # coins that are no longer there
-            if _bal is not None:
+            # coins that are no longer there. A reconciliation that cannot
+            # be performed (no balance, exchange error) is a WARN for a
+            # sandbox and a refusal to go live for real money: an
+            # unverified live bot must not manage positions blind.
+            _open_real = db.query(Position).filter(
+                Position.bot_name == bot.name, Position.status == "open", Position.mode == live_mode).count()
+            _recon_error = None
+            _problems = []
+            if _bal is None:
+                _recon_error = "wallet balance unavailable"
+            else:
                 try:
-                    _problems = engine._reconcile_positions_with_wallet(db, bot, _ccxt, _bal, live_mode)
+                    if market_type_for(bot.settings, api_key) != "spot":
+                        # A perp position is not a coin in the wallet: a
+                        # position the exchange no longer holds was
+                        # liquidated (or closed by hand) while the bot was
+                        # down — book it as such instead of managing a ghost
+                        for _pos in db.query(Position).options(selectinload(Position.orders)).filter(
+                                Position.bot_name == bot.name, Position.status == "open", Position.mode == live_mode).all():
+                            if broker.exchange_position_gone(_ccxt, _pos.symbol, _pos.side or "long"):
+                                _last = db.query(Candle.close).filter(
+                                    Candle.exchange == _pos.exchange, Candle.symbol == _pos.symbol, Candle.timeframe == timeframe
+                                ).order_by(Candle.timestamp.desc()).first()
+                                live_cycle._book_liquidation(engine, db, bot, _pos, float(_last[0]) if _last else _pos.entry_price,
+                                                             _naive_utc(datetime.now(timezone.utc)), risk.mode_group_for(live_mode),
+                                                             "exchange holds no such position at startup — booked as liquidation, check the exchange")
+                        db.commit()
+                        # Then compare what is left against the exchange's open positions
+                        _problems = engine._reconcile_positions_with_exchange(db, bot, _ccxt, live_mode)
+                    else:
+                        _problems = engine._reconcile_positions_with_wallet(db, bot, _ccxt, _bal, live_mode)
                 except Exception as _exc:
                     logger.warning("Bot '%s': position reconciliation failed: %s", bot.name, _exc)
-                    _problems = []
-                if _problems:
-                    for _p in _problems:
-                        blb.push(bot.name, "ERROR", f"{_p} — reconcile manually (close or delete the position in Analytics) before starting")
-                    engine._engine_stop(bot, db, f"{_problems[0]} — reconcile manually")
+                    _recon_error = str(_exc)
+            if _recon_error is not None:
+                if live_mode == "live":
+                    blb.push(bot.name, "ERROR", f"Could not reconcile positions with {api_key.exchange.upper()} ({_recon_error}) — refusing to go live unverified")
+                    engine._engine_stop(bot, db, f"Position reconciliation failed: {_recon_error} — fix the key/connection and restart")
                     db.commit()
                     return
+                blb.push(bot.name, "WARN", f"Could not reconcile positions with the exchange ({_recon_error}) — {_open_real} open {live_mode} position(s) unverified")
+            if _problems:
+                for _p in _problems:
+                    blb.push(bot.name, "ERROR", f"{_p} — reconcile manually (close or delete the position in Analytics) before starting")
+                engine._engine_stop(bot, db, f"{_problems[0]} — reconcile manually")
+                db.commit()
+                return
+
+            # Derivatives: confirm leverage and margin mode on the exchange
+            # for every pair before the first order — a bot that cannot set
+            # what it backtested with must not trade
+            _mt = market_type_for(bot.settings, api_key)
+            if _mt != "spot":
+                _lev = leverage_for(bot.settings, _mt)
+                _mm = bot.settings.get("margin_mode") or DEFAULT_MARGIN_MODE
+                try:
+                    for _p in [str(s).replace('-', '/').upper() for s in symbols]:
+                        _ccxt = engine._ccxt_for(api_key, _p)
+                        if _ccxt.markets and _p not in _ccxt.markets:
+                            continue
+                        engine._ensure_leverage(_ccxt, api_key, _p, _lev, _mm, bot.name)
+                except Exception as _exc:
+                    logger.error("Bot '%s': could not apply leverage: %s", bot.name, _exc)
+                    blb.push(bot.name, "ERROR", f"Could not set {_lev:g}x {_mm} on {api_key.exchange.upper()}: {_exc}")
+                    engine._engine_stop(bot, db, f"Could not set {_lev:g}x {_mm} leverage on the exchange: {_exc}")
+                    db.commit()
+                    return
+                blb.push(bot.name, "INFO", f"Perpetual swap ({live_mode}): {_lev:g}x {_mm} confirmed on {api_key.exchange.upper()} for {len(symbols)} pair(s) — funding and liquidation are settled by the exchange")
 
         # Make the backtest→live handover visible in the console: the next
         # tick only arrives when the current candle closes on the exchange

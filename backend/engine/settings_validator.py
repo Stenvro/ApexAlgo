@@ -2,11 +2,17 @@ import logging
 import re
 from datetime import datetime
 
-from backend.core.exchange_registry import get_exchange_timeframes
+from backend.core.exchange_registry import exchange_spec, get_exchange_timeframes, market_caps, supported_kinds
 from backend.engine.indicator_registry import get_spec
+from backend.engine.symbols import DEFAULT_MARGIN_MODE, DEFAULT_MARKET_TYPE, MARGIN_MODES, MARKET_TYPES, base_of, cash_currency, is_derivative, settle_of
+from backend.engine.pnl import MAINTENANCE_MARGIN
 
 logger = logging.getLogger("apexalgo.settings_validator")
-SYMBOL_PATTERN = re.compile(r'^[A-Z0-9]+/[A-Z0-9]+$')
+# BASE/QUOTE for spot, BASE/QUOTE:SETTLE for perpetual swaps
+SYMBOL_PATTERN = re.compile(r'^[A-Z0-9]+/[A-Z0-9]+(:[A-Z0-9]+)?$')
+# Above this the liquidation sits close enough to the entry that a normal
+# stop loss barely gets a chance — worth a warning, not a refusal
+LEVERAGE_WARN_ABOVE = 3
 MAX_PRICE_OFFSET = 500
 VALID_EXIT_TYPES = {'percentage', 'trailing', 'atr', 'fixed'}
 VALID_AMOUNT_TYPES = {'percentage', 'fixed'}
@@ -23,7 +29,7 @@ MAX_STREAK_LENGTH = 500
 LOOKBACK_MARGIN = 50
 
 
-def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dict:
+def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_market_type: str | None = None) -> dict:
     """Validate bot settings and return errors and warnings.
 
     Parameters
@@ -33,6 +39,9 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
     exchange_id : str, optional
         Resolved exchange ID for timeframe validation. Falls back to
         settings['data_exchange'] or 'okx' if not provided.
+    key_market_type : str, optional
+        Market type of the linked API key; a key is bound to one market,
+        so a bot on another market type is refused.
 
     Returns dict with 'errors' (list of blocking issues) and
     'warnings' (list of non-blocking issues).
@@ -40,32 +49,94 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
     errors = []
     warnings = []
     nodes = settings.get("nodes", {})
+    eid = exchange_id or settings.get("data_exchange", "okx")
+
+    # Market type (phase 2): spot or perpetual swap; absent = spot for every
+    # pre-existing bot. Symbol form, leverage and margin mode depend on it.
+    market_type = str(settings.get("market_type") or DEFAULT_MARKET_TYPE).strip().lower()
+    if market_type not in MARKET_TYPES:
+        errors.append(f"Invalid market_type '{settings.get('market_type')}'. Use one of: {', '.join(MARKET_TYPES)}.")
+        market_type = DEFAULT_MARKET_TYPE
+    elif "market_type" in settings:
+        settings["market_type"] = market_type
+    if key_market_type and str(key_market_type).lower() != market_type:
+        errors.append(f"API key '{settings.get('api_key_name')}' is a {key_market_type} key but the bot trades {market_type}. "
+                      f"Link a {market_type} key or change the bot's market type.")
+    if exchange_spec(eid) is not None and market_caps(eid, market_type) is None:
+        errors.append(f"{exchange_spec(eid).name} has no '{market_type}' market in ApexAlgo.")
+    derivative = market_type != "spot"
+
+    def _check_symbol(raw) -> str:
+        norm = str(raw).strip().upper().replace('-', '/')
+        if not SYMBOL_PATTERN.match(norm):
+            errors.append(f"Invalid symbol '{raw}'. Use BASE/QUOTE, e.g. BTC/USDC" + (" (BASE/QUOTE:SETTLE for swaps, e.g. BTC/USDT:USDT)." if derivative else "."))
+        elif derivative and not is_derivative(norm):
+            errors.append(f"Symbol '{raw}' is a spot pair; a swap bot needs the BASE/QUOTE:SETTLE form, e.g. {norm}:{norm.split('/')[-1]}.")
+        elif not derivative and is_derivative(norm):
+            errors.append(f"Symbol '{raw}' is a perpetual swap; a spot bot needs BASE/QUOTE, e.g. {norm.split(':')[0]} (or set market_type to 'swap').")
+        elif is_derivative(norm) and settle_of(norm) == base_of(norm) and exchange_spec(eid) is not None \
+                and "inverse" not in supported_kinds(eid, "swap"):
+            errors.append(f"Symbol '{raw}' is an inverse (coin-margined) contract, which {exchange_spec(eid).name} does not offer in ApexAlgo — "
+                          f"use the linear contract, e.g. {base_of(norm)}/USDT:USDT.")
+        return norm
 
     # Symbols — normalize and validate BASE/QUOTE format, write back normalized values
     symbols = settings.get("symbols", [])
     if symbols:
-        normalized_symbols = []
-        for sym in symbols:
-            norm = str(sym).strip().upper().replace('-', '/')
-            if not SYMBOL_PATTERN.match(norm):
-                errors.append(f"Invalid symbol '{sym}'. Use BASE/QUOTE, e.g. BTC/USDC.")
-            normalized_symbols.append(norm)
-        settings["symbols"] = normalized_symbols
+        settings["symbols"] = [_check_symbol(sym) for sym in symbols]
     else:
         if settings.get("symbol"):
             warnings.append("Using single 'symbol' field; consider using 'symbols' list.")
         else:
             errors.append("No trading symbols configured.")
     if settings.get("symbol"):
-        norm = str(settings["symbol"]).strip().upper().replace('-', '/')
-        if not SYMBOL_PATTERN.match(norm):
-            errors.append(f"Invalid symbol '{settings['symbol']}'. Use BASE/QUOTE, e.g. BTC/USDC.")
-        settings["symbol"] = norm
+        settings["symbol"] = _check_symbol(settings["symbol"])
+
+    # One cash currency per bot: the capital pool, PnL and drawdown are all
+    # summed in one unit — BTC/USDT and ETH/BTC in one whitelist would add
+    # USDT to BTC
+    _pairs = [s for s in ([*settings.get("symbols", [])] or ([settings["symbol"]] if settings.get("symbol") else []))
+              if SYMBOL_PATTERN.match(str(s))]
+    _cash = sorted({cash_currency(s) for s in _pairs})
+    if len(_cash) > 1:
+        errors.append(f"Whitelist mixes cash currencies ({', '.join(_cash)}): all pairs of a bot must be quoted/settled in the same currency.")
+
+    # Leverage and margin mode only mean something on a swap
+    lev_raw = settings.get("leverage")
+    if lev_raw not in (None, ""):
+        try:
+            lev = float(lev_raw)
+        except (ValueError, TypeError):
+            lev = None
+            errors.append(f"leverage '{lev_raw}' is not a valid number.")
+        if lev is not None:
+            if lev != int(lev) or lev < 1:
+                errors.append("leverage must be a whole number >= 1.")
+            elif derivative:
+                caps = market_caps(eid, market_type)
+                if caps is not None and lev > caps.max_leverage:
+                    errors.append(f"leverage {int(lev)}x exceeds the {caps.max_leverage}x ApexAlgo allows on {exchange_spec(eid).name} swaps.")
+                elif lev > LEVERAGE_WARN_ABOVE:
+                    warnings.append(f"leverage {int(lev)}x: the estimated liquidation sits about {100 * (1 - MAINTENANCE_MARGIN) / lev:.1f}% "
+                                    "from the entry — a stop loss that is not tighter than that never fires.")
+            elif lev > 1:
+                errors.append(f"leverage {int(lev)}x has no effect on a spot bot; set it to 1 or switch market_type to 'swap'.")
+    mm_raw = settings.get("margin_mode")
+    if mm_raw not in (None, ""):
+        mm = str(mm_raw).strip().lower()
+        if mm not in MARGIN_MODES:
+            errors.append(f"Invalid margin_mode '{mm_raw}'. Use one of: {', '.join(MARGIN_MODES)}.")
+        else:
+            settings["margin_mode"] = mm
+            if mm == "cross" and derivative:
+                warnings.append("margin_mode 'cross': a liquidation takes the whole margin wallet, not just the position's margin. "
+                                "The simulation treats backtest_capital as that wallet; on the exchange other balances in the account are at risk too.")
+    if derivative and not settings.get("margin_mode"):
+        settings["margin_mode"] = DEFAULT_MARGIN_MODE
 
     # Timeframe — validated against the exchange's supported timeframes
     tf = settings.get("timeframe")
     if tf:
-        eid = exchange_id or settings.get("data_exchange", "okx")
         supported = get_exchange_timeframes(eid)
         if supported and tf not in supported:
             errors.append(f"Exchange '{eid}' does not support timeframe '{tf}'. Supported: {', '.join(sorted(supported.keys()))}")
@@ -77,10 +148,29 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
         errors.append(f"entry_node '{entry_node}' not found in nodes.")
     if exit_node and exit_node not in nodes:
         errors.append(f"exit_node '{exit_node}' not found in nodes.")
-    if not entry_node and not exit_node:
+    if not entry_node and not exit_node and not settings.get("short_node"):
         warnings.append("No entry_node or exit_node configured. Bot will not generate signals.")
     if exit_node and not entry_node:
         warnings.append("exit_node is configured without an entry_node; bot will never buy.")
+
+    # Short/cover node references (phase 3): derivatives only — a spot
+    # account has nothing to sell short, so this is an error, not a no-op
+    short_node = settings.get("short_node")
+    cover_node = settings.get("cover_node")
+    if short_node and short_node not in nodes:
+        errors.append(f"short_node '{short_node}' not found in nodes.")
+    if cover_node and cover_node not in nodes:
+        errors.append(f"cover_node '{cover_node}' not found in nodes.")
+    if (short_node or cover_node) and not derivative:
+        errors.append("Shorts need a perpetual market: remove the 'Open short' / 'Close short' actions or set market_type to 'swap'.")
+    if short_node and not cover_node:
+        _short_cfg = (settings.get("trade_settings") or {}).get("short") or {}
+        if not (_short_cfg.get("stop_losses") or _short_cfg.get("take_profits")):
+            warnings.append("short_node is configured without a cover_node, stop loss or take profit; shorts would only close on liquidation or a forced stop.")
+    if cover_node and not short_node:
+        warnings.append("cover_node is configured without a short_node; bot will never open a short.")
+    if not entry_node and short_node:
+        warnings.append("Short-only strategy: the bot never goes long.")
 
     # Max positions
     max_pos = settings.get("max_positions", 1)
@@ -188,6 +278,24 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
     for cyc in _find_cycles(nodes):
         errors.append(f"Node graph has a cycle: {' -> '.join(cyc)}. A node cannot depend on itself.")
 
+    # Integer settings the engine reads with sizing._int: coerce here so a
+    # "150.0" from a form is stored as 150, and refuse anything non-numeric
+    for _key, _min in (("backtest_lookback", 20), ("cooldown_trades", 0), ("cooldown_candles", 0)):
+        _raw = settings.get(_key)
+        if _raw in (None, ""):
+            continue
+        try:
+            _val = float(_raw)
+        except (ValueError, TypeError):
+            errors.append(f"{_key} '{_raw}' is not a valid whole number.")
+            continue
+        if _val < _min:
+            errors.append(f"{_key} must be at least {_min}.")
+            continue
+        if _val != int(_val) or not isinstance(_raw, int) or isinstance(_raw, bool):
+            warnings.append(f"{_key} '{_raw}' stored as {int(_val)}.")
+            settings[_key] = int(_val)
+
     # Backtest lookback must cover the longest indicator warm-up
     longest = _longest_indicator_length(nodes)
     try:
@@ -214,47 +322,14 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
 
     # Trade settings
     trade_settings = settings.get("trade_settings", {})
+    # The `short` leg (phase 3) has the same shape as `entry` and is checked
+    # the same way, with a "Short " prefix so messages point at the right node
     entry_ts = trade_settings.get("entry", {})
-
-    # Entry amount
     amount_type = entry_ts.get("amount_type", "percentage")
-    if amount_type not in VALID_AMOUNT_TYPES:
-        errors.append(f"Invalid entry amount_type '{amount_type}'.")
     amount_value = entry_ts.get("amount_value")
-    if amount_value is not None:
-        try:
-            if float(amount_value) <= 0:
-                warnings.append("Entry amount_value is <= 0.")
-        except (ValueError, TypeError):
-            errors.append(f"Entry amount_value '{amount_value}' is not a valid number.")
-
-    # Stop losses
-    for i, sl in enumerate(entry_ts.get("stop_losses", [])):
-        sl_type = sl.get("type", "")
-        if sl_type not in VALID_EXIT_TYPES:
-            errors.append(f"Stop loss #{i}: invalid type '{sl_type}'.")
-        try:
-            if float(sl.get("value", 0)) <= 0:
-                warnings.append(f"Stop loss #{i}: value is <= 0.")
-        except (ValueError, TypeError):
-            errors.append(f"Stop loss #{i}: value is not a valid number.")
-        cat = sl.get("close_amount_type", "percentage")
-        if cat not in VALID_CLOSE_AMOUNT_TYPES:
-            errors.append(f"Stop loss #{i}: invalid close_amount_type '{cat}'.")
-
-    # Take profits
-    for i, tp in enumerate(entry_ts.get("take_profits", [])):
-        tp_type = tp.get("type", "")
-        if tp_type not in VALID_EXIT_TYPES:
-            errors.append(f"Take profit #{i}: invalid type '{tp_type}'.")
-        try:
-            if float(tp.get("value", 0)) <= 0:
-                warnings.append(f"Take profit #{i}: value is <= 0.")
-        except (ValueError, TypeError):
-            errors.append(f"Take profit #{i}: value is not a valid number.")
-        cat = tp.get("close_amount_type", "percentage")
-        if cat not in VALID_CLOSE_AMOUNT_TYPES:
-            errors.append(f"Take profit #{i}: invalid close_amount_type '{cat}'.")
+    _validate_entry_leg(entry_ts, "", errors, warnings)
+    if isinstance(trade_settings.get("short"), dict) and trade_settings["short"]:
+        _validate_entry_leg(trade_settings["short"], "Short ", errors, warnings)
 
     # Live allocation: share of the exchange wallet this bot may deploy
     if settings.get("live_allocation_pct") not in (None, ""):
@@ -275,7 +350,7 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
         except (ValueError, TypeError):
             max_order_value = 0
         if max_order_value <= 0:
-            errors.append("Live execution requires max_order_value > 0 as a safety cap.")
+            errors.append("Live execution requires max_order_value > 0 as a safety cap" + (" (on the notional, i.e. margin x leverage)." if derivative else "."))
         else:
             # The engine clamps every live entry to the cap, so a cap below
             # the configured size silently turns the strategy into a smaller
@@ -285,11 +360,14 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None) -> dic
                 planned = float(amount_value or 0)
                 if amount_type == "percentage":
                     planned = capital * planned / 100.0
+                if derivative:
+                    # The cap is on the notional; the entry is margin x leverage
+                    planned *= max(float(settings.get("leverage") or 1), 1.0)
                 if planned > max_order_value > 0:
                     warnings.append(
                         f"max_order_value ({max_order_value:,.0f}) is below the planned entry size "
-                        f"({planned:,.0f}): live entries will be capped to {max_order_value:,.0f}, "
-                        "so live sizing differs from the backtest. Raise the cap or lower the entry amount."
+                        f"({planned:,.0f}): entries are capped to {max_order_value:,.0f} in the backtest, "
+                        "forward test and live alike (the cap is part of the strategy). Raise the cap or lower the entry amount."
                     )
             except (ValueError, TypeError):
                 pass
@@ -374,3 +452,47 @@ def _longest_indicator_length(nodes: dict) -> int:
                 except (ValueError, TypeError):
                     pass
     return longest
+
+
+def _validate_entry_leg(entry_ts: dict, leg: str, errors: list, warnings: list) -> None:
+    """Amount + stop-loss/take-profit checks for one opening leg
+    (`trade_settings.entry` or `.short`); `leg` prefixes the messages."""
+    # Entry amount
+    amount_type = entry_ts.get("amount_type", "percentage")
+    if amount_type not in VALID_AMOUNT_TYPES:
+        errors.append(f"Invalid {leg.lower()}entry amount_type '{amount_type}'.")
+    amount_value = entry_ts.get("amount_value")
+    if amount_value is not None:
+        try:
+            if float(amount_value) <= 0:
+                warnings.append(f"{leg}Entry amount_value is <= 0." if leg else "Entry amount_value is <= 0.")
+        except (ValueError, TypeError):
+            errors.append(f"{leg}Entry amount_value '{amount_value}' is not a valid number." if leg else f"Entry amount_value '{amount_value}' is not a valid number.")
+
+    # Stop losses
+    for i, sl in enumerate(entry_ts.get("stop_losses", [])):
+        sl_type = sl.get("type", "")
+        if sl_type not in VALID_EXIT_TYPES:
+            errors.append(f"{leg}Stop loss #{i}: invalid type '{sl_type}'.")
+        try:
+            if float(sl.get("value", 0)) <= 0:
+                warnings.append(f"{leg}Stop loss #{i}: value is <= 0.")
+        except (ValueError, TypeError):
+            errors.append(f"{leg}Stop loss #{i}: value is not a valid number.")
+        cat = sl.get("close_amount_type", "percentage")
+        if cat not in VALID_CLOSE_AMOUNT_TYPES:
+            errors.append(f"{leg}Stop loss #{i}: invalid close_amount_type '{cat}'.")
+
+    # Take profits
+    for i, tp in enumerate(entry_ts.get("take_profits", [])):
+        tp_type = tp.get("type", "")
+        if tp_type not in VALID_EXIT_TYPES:
+            errors.append(f"{leg}Take profit #{i}: invalid type '{tp_type}'.")
+        try:
+            if float(tp.get("value", 0)) <= 0:
+                warnings.append(f"{leg}Take profit #{i}: value is <= 0.")
+        except (ValueError, TypeError):
+            errors.append(f"{leg}Take profit #{i}: value is not a valid number.")
+        cat = tp.get("close_amount_type", "percentage")
+        if cat not in VALID_CLOSE_AMOUNT_TYPES:
+            errors.append(f"{leg}Take profit #{i}: invalid close_amount_type '{cat}'.")

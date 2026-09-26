@@ -46,6 +46,18 @@ def clean_db():
     yield
 
 
+@pytest.fixture(autouse=True)
+def no_market_data_network(monkeypatch):
+    """The bot startup fetches funding rates and margin tiers for perpetual
+    symbols; tests never reach the exchange for those (they seed the tables
+    themselves when a test needs them)."""
+    from backend.engine import funding, tiers
+    monkeypatch.setattr(funding, "fetch_history", lambda *a, **k: [])
+    monkeypatch.setattr(tiers, "fetch", lambda *a, **k: [])
+    monkeypatch.setattr(funding, "_last_refresh", {})
+    yield
+
+
 @pytest.fixture
 def db():
     session = SessionLocal()

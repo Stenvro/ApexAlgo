@@ -10,6 +10,8 @@ import EmptyState from './ui/EmptyState';
 import { Skeleton } from './ui/Skeleton';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
+import { orderAction, positionSide } from '../utils/orders';
+import { fmtMoney, fmtMoneyTitle, rowCurrency, rowKind, botCurrency, currencyOf, symbolParts, currenciesOf, sumByCurrency, fmtByCurrency, positionMargin, positionPnl, isCryptoCash } from '../utils/money';
 
 // ─── Formatters ──────────────────────────────────────────────────────────────
 
@@ -72,6 +74,66 @@ const entryTimeOf = (p, exitTs, entryTsByPos) => {
 const pnlColor = (v) => (v >= 0 ? 'text-success' : 'text-danger');
 const pnlSign = (v) => (v >= 0 ? '+' : '');
 
+// Money helpers — every cash amount goes through fmtMoney with the currency
+// the row/bot is denominated in (never a bare "$"). `signed` mirrors pnlSign
+// (a "+" on zero) so PnL cells keep their look.
+const signed = (v, ccy, opts) => `${Number(v) >= 0 ? '+' : '-'}${fmtMoney(Math.abs(Number(v) || 0), ccy, opts)}`;
+// Fees: 4 decimals for fiat/stable, significant digits for coin-denominated fees
+const fmtFee = (v, ccy) => fmtMoney(v, ccy, isCryptoCash(ccy) ? {} : { digits: 4 });
+// Fee of an order in its position's cash currency (the server converts when
+// the fee was charged in another asset, e.g. a spot buy fee taken in the base)
+const feeCash = (o) => Number(o?.fee_cash ?? o?.fee) || 0;
+// Prices (entry/exit/fill) are quoted in the QUOTE currency of the pair —
+// on an inverse swap that differs from the cash currency
+const quoteOf = (symbol) => symbolParts(symbol).quote;
+// (mode, currency) group key: simulated and real trades are never added up,
+// and neither are two currencies
+const groupKeyOf = (p) => `${p.mode || '?'}|${rowCurrency(p) || '?'}`;
+const ccyOrNull = (c) => (c && c !== '?' ? c : null);
+
+// Live prices are keyed per (exchange, symbol): the same pair on two
+// exchanges is two markets. No exchange known → no price ("—"), never OKX.
+const priceKey = (exchange, symbol) => `${String(exchange || '').toLowerCase()}:${symbol}`;
+
+// RFC 4180: quote a field when it holds a comma, quote, CR or LF; double inner quotes.
+const csvCell = (v) => {
+    if (v === null || v === undefined) return '';
+    const str = String(v);
+    return /[",\r\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+};
+const csvLine = (cells) => cells.map(csvCell).join(',');
+
+const TRADE_RATIO_TIP = 'Mean trade PnL ÷ standard deviation of trade PnL, per trade. Not annualised and not time-weighted — this is not a Sharpe ratio.';
+
+// Per-trade statistics on a set of closed positions (one mode, or one view)
+const tradeStats = (closed, startCapital) => {
+    const wins = closed.filter(p => (p.profit_abs || 0) > 0);
+    const losses = closed.filter(p => (p.profit_abs || 0) <= 0);
+    const grossProfit = wins.reduce((a, p) => a + (p.profit_abs || 0), 0);
+    const grossLoss = Math.abs(losses.reduce((a, p) => a + (p.profit_abs || 0), 0));
+    const sorted = [...closed].sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at));
+    let equity = startCapital, peakEq = startCapital, maxDDpct = 0;
+    for (const p of sorted) {
+        equity += (p.profit_abs || 0);
+        if (equity > peakEq) peakEq = equity;
+        if (peakEq > 0) maxDDpct = Math.max(maxDDpct, ((peakEq - equity) / peakEq) * 100);
+    }
+    const returns = closed.map(p => p.profit_pct || 0);
+    const mean = returns.length ? returns.reduce((a, b) => a + b, 0) / returns.length : 0;
+    const stddev = returns.length > 1 ? Math.sqrt(returns.reduce((a, r) => a + (r - mean) ** 2, 0) / (returns.length - 1)) : 0;
+    return {
+        total: closed.length, wins: wins.length, losses: losses.length,
+        grossProfit, grossLoss, netPnl: grossProfit - grossLoss,
+        winRate: closed.length ? (wins.length / closed.length) * 100 : 0,
+        profitFactor: grossLoss > 0 ? grossProfit / grossLoss : (grossProfit > 0 ? 999 : 0),
+        maxDDpct,
+        sharpe: stddev > 0 ? mean / stddev : 0,
+        avgWin: wins.length ? grossProfit / wins.length : 0,
+        avgLoss: losses.length ? grossLoss / losses.length : 0,
+        avgTrade: closed.length ? (grossProfit - grossLoss) / closed.length : 0,
+    };
+};
+
 // Mode filter values → the label the collapsed (phone) filter summary shows.
 const MODE_LABELS = {
     real: 'Paper + Live',
@@ -84,7 +146,7 @@ const MODE_LABELS = {
 
 // ─── Equity Curve SVG ────────────────────────────────────────────────────────
 
-const EquityCurve = ({ data }) => {
+const EquityCurve = ({ data, ccy = null }) => {
     // Hovered point index (null = none). Hooks must run before the early return.
     const [hover, setHover] = useState(null);
     const wrapRef = useRef(null);
@@ -178,14 +240,14 @@ const EquityCurve = ({ data }) => {
                 style={{ left: `calc(${hoverPct}% ${flipTip ? '- 10px' : '+ 10px'})` }}>
                 <div className="text-muted mb-1">{hp.date.toLocaleString('en-US', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })} <span className="text-faint">· trade #{hp.index}</span></div>
                 <div className="grid grid-cols-[auto_auto] gap-x-4 gap-y-0.5">
-                    <span className="text-muted">Equity</span><span className="text-text font-bold text-right">${safeNum(hp.equity)}</span>
-                    <span className="text-muted">Cumulative PNL</span><span className={`font-bold text-right ${pnlColor(hp.value)}`}>{pnlSign(hp.value)}${safeNum(Math.abs(hp.value))} <span className="text-faint font-normal">({pnlSign(hp.value)}{safeNum(hp.capital > 0 ? (hp.value / hp.capital) * 100 : 0, 1)}%)</span></span>
-                    <span className="text-muted">Peak</span><span className="text-text text-right">${safeNum(hp.peak)}</span>
+                    <span className="text-muted">Equity</span><span className="text-text font-bold text-right" title={fmtMoneyTitle(ccy)}>{fmtMoney(hp.equity, ccy)}</span>
+                    <span className="text-muted">Cumulative PNL</span><span className={`font-bold text-right ${pnlColor(hp.value)}`} title={fmtMoneyTitle(ccy)}>{signed(hp.value, ccy)} <span className="text-faint font-normal">({pnlSign(hp.value)}{safeNum(hp.capital > 0 ? (hp.value / hp.capital) * 100 : 0, 1)}%)</span></span>
+                    <span className="text-muted">Peak</span><span className="text-text text-right" title={fmtMoneyTitle(ccy)}>{fmtMoney(hp.peak, ccy)}</span>
                     <span className="text-muted">Drawdown</span><span className={`text-right ${hp.drawdownPct > 0 ? 'text-danger' : 'text-faint'}`}>{hp.drawdownPct > 0 ? `-${safeNum(hp.drawdownPct, 1)}%` : '0%'}</span>
                 </div>
                 <div className="mt-1.5 pt-1.5 border-t border-border/60 text-muted">
                     <span className="text-text">{hp.trade.symbol}</span> · {hp.trade.bot}
-                    <span className={`ml-2 font-bold ${pnlColor(hp.trade.pnl)}`}>{pnlSign(hp.trade.pnl)}${safeNum(Math.abs(hp.trade.pnl))}</span>
+                    <span className={`ml-2 font-bold ${pnlColor(hp.trade.pnl)}`} title={fmtMoneyTitle(ccy)}>{signed(hp.trade.pnl, ccy)}</span>
                     <span className={`ml-1 ${pnlColor(hp.trade.pct)}`}>({pnlSign(hp.trade.pct)}{safeNum(hp.trade.pct, 2)}%)</span>
                 </div>
             </div>
@@ -378,29 +440,47 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         setCurrentPage(1);
     }, [request]);
     const [filterInterval, setFilterInterval] = useState('all');
+    // Cash currency filter ('all' = every currency; amounts are then shown per
+    // currency and never added up)
+    const [filterCcy, setFilterCcy] = useState('all');
     // Analysis window (ms epoch, null = unbounded). Applies to closed trades and orders.
     const [dateFrom, setDateFrom] = useState(null);
     const [dateTo, setDateTo] = useState(null);
 
     // ── Data fetching ─────────────────────────────────────────────────────────
 
+    // Exchange of a row: the row's own column, else the owning bot's data
+    // exchange. Unknown stays unknown (no OKX fallback anywhere in this view).
+    const botExchangeByName = useMemo(() => {
+        const map = {};
+        bots.forEach(b => { map[b.name] = b.exchange || b.settings?.data_exchange || null; });
+        return map;
+    }, [bots]);
+    const rowExchange = useCallback((row) => (row?.exchange || botExchangeByName[row?.bot_name] || null), [botExchangeByName]);
+
     const fetchLivePrices = useCallback(async (currentPositions) => {
-        const uniqueSymbols = [...new Set(currentPositions.map(p => p.symbol))];
-        if (uniqueSymbols.length === 0) return;
+        // One ticker per (exchange, symbol); rows without a known exchange are skipped
+        const markets = new Map();
+        currentPositions.forEach(p => {
+            const ex = rowExchange(p);
+            if (!ex || !p.symbol) return;
+            markets.set(priceKey(ex, p.symbol), { exchange: ex, symbol: p.symbol });
+        });
+        if (markets.size === 0) return;
         setPriceSyncing(true);
         const priceMap = {};
         const results = await Promise.allSettled(
-            uniqueSymbols.map(sym =>
-                apiClient.get(`/api/data/market-info/${sym.replace('/', '-')}`)
-                    .then(res => ({ sym, price: res.data?.last }))
+            [...markets.entries()].map(([key, m]) =>
+                apiClient.get(`/api/data/market-info/${m.symbol.replace('/', '-')}`, { params: { exchange: m.exchange } })
+                    .then(res => ({ key, price: res.data?.last }))
             )
         );
         results.forEach(r => {
-            if (r.status === 'fulfilled' && r.value.price) priceMap[r.value.sym] = r.value.price;
+            if (r.status === 'fulfilled' && r.value.price) priceMap[r.value.key] = r.value.price;
         });
         setLivePrices(prev => ({ ...prev, ...priceMap }));
         setPriceSyncing(false);
-    }, []);
+    }, [rowExchange]);
 
     const positionsRef = useRef(positions);
     const ordersRef = useRef(orders);
@@ -509,10 +589,11 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         arr
             .filter(x => filterBot === 'all' || x.bot_name === filterBot)
             .filter(x => filterSymbol === 'all' || x.symbol === filterSymbol)
-            .filter(x => filterExchange === 'all' || (x.exchange || 'okx') === filterExchange)
+            .filter(x => filterExchange === 'all' || rowExchange(x) === filterExchange)
             .filter(x => modeMatches(filterMode, x.mode))
-            .filter(x => filterInterval === 'all' || tfByBot[x.bot_name] === filterInterval),
-    [filterBot, filterSymbol, filterExchange, filterMode, filterInterval, tfByBot]);
+            .filter(x => filterInterval === 'all' || tfByBot[x.bot_name] === filterInterval)
+            .filter(x => filterCcy === 'all' || (rowCurrency(x) || '?') === filterCcy),
+    [filterBot, filterSymbol, filterExchange, filterMode, filterInterval, filterCcy, tfByBot, rowExchange]);
 
     const resetPage = () => setCurrentPage(1);
 
@@ -573,15 +654,20 @@ export default function TradeManager({ setError, bots = [], request = null }) {
     const forceClosePosition = async (pos) => {
         const id = pos.id;
         const real = REAL_MODES.has(pos.mode);
-        const exch = (pos.exchange || 'okx').toUpperCase();
-        const cur = livePrices[pos.symbol];
+        const exRaw = rowExchange(pos);
+        const exch = exRaw ? exRaw.toUpperCase() : 'the exchange';
+        const cur = livePrices[priceKey(exRaw, pos.symbol)];
+        // Side-aware: a long is sold, a short is bought back (reduce-only)
+        const isShort = positionSide(pos) === 'short';
+        const verb = isShort ? 'Buy to cover' : 'Sell at market';
+        const orderWord = isShort ? 'BUY (reduce-only)' : 'SELL';
         // The backend places a real market order for paper/live positions;
         // simulated modes are closed against the last local candle. Say which.
         const ok = await confirmDialog(real ? {
-            title: pos.mode === 'live' ? 'Sell at market — real order' : 'Sell at market — sandbox order',
-            message: `Place a market SELL of ${formatCrypto(pos.amount)} ${pos.symbol} on ${exch} now${cur ? ` (last ~$${safeNum(cur)})` : ''}? `
+            title: pos.mode === 'live' ? `${verb} — real order` : `${verb} — sandbox order`,
+            message: `Place a market ${orderWord} of ${formatCrypto(pos.amount)} ${pos.symbol} on ${exch} now${cur ? ` (last ~${fmtMoney(cur, quoteOf(pos.symbol))})` : ''}? `
                 + `Fills at whatever the book gives — even at a loss. This cannot be undone.`,
-            confirmText: 'Place market sell',
+            confirmText: isShort ? 'Place market buy' : 'Place market sell',
             type: 'danger',
         } : {
             title: 'Close Simulated Position',
@@ -628,24 +714,27 @@ export default function TradeManager({ setError, bots = [], request = null }) {
 
     const uniqueBots = useMemo(() => [...new Set(positions.map(p => p.bot_name).filter(Boolean))], [positions]);
     const uniqueSymbols = useMemo(() => [...new Set([...positions, ...orders].map(x => x.symbol).filter(Boolean))], [positions, orders]);
-    const uniqueExchanges = useMemo(() => [...new Set([...positions, ...orders].map(x => x.exchange || 'okx').filter(Boolean))], [positions, orders]);
+    const uniqueExchanges = useMemo(() => [...new Set([...positions, ...orders].map(rowExchange).filter(Boolean))], [positions, orders, rowExchange]);
     const uniqueIntervals = useMemo(() => [...new Set(positions.map(p => tfByBot[p.bot_name]).filter(Boolean))].sort(), [positions, tfByBot]);
+    const uniqueCurrencies = useMemo(() => currenciesOf([...positions, ...orders]), [positions, orders]);
 
     // When a single bot is selected, prefer the drawdown the engine measured
     // and enforces (mark-to-market over the backtest, incl. open-position dips)
+    // Only meaningful when the view IS the backtest: a live/forward/paper
+    // view must not borrow the backtest's number.
     const engineDrawdown = useMemo(() => {
-        if (filterBot === 'all') return null;
+        if (filterBot === 'all' || filterMode !== 'backtest') return null;
         const dd = bots.find(b => b.name === filterBot)?.settings?.last_backtest_max_drawdown;
         return (dd === null || dd === undefined) ? null : dd;
-    }, [filterBot, bots]);
+    }, [filterBot, filterMode, bots]);
 
     // ── Pre-computed lookups (shared by stats + ledger rows) ───────────────
 
     const feesByPosId = useMemo(() => {
         const map = {};
         for (const o of orders) {
-            if (o.position_id && o.fee) {
-                map[o.position_id] = (map[o.position_id] || 0) + o.fee;
+            if (o.position_id && (o.fee_cash ?? o.fee)) {
+                map[o.position_id] = (map[o.position_id] || 0) + feeCash(o);
             }
         }
         return map;
@@ -654,7 +743,9 @@ export default function TradeManager({ setError, bots = [], request = null }) {
     const entryTsByPos = useMemo(() => {
         const map = {};
         for (const o of orders) {
-            if (o.side === 'buy' && o.status === 'filled' && o.position_id && o.timestamp) {
+            // Opening fill: a buy, or the non-reduce-only sell that opens a short
+            const opens = o.side === 'buy' ? !o.reduce_only : orderAction(o) === 'SHORT';
+            if (opens && o.status === 'filled' && o.position_id && o.timestamp) {
                 const t = new Date(o.timestamp);
                 if (!map[o.position_id] || t < map[o.position_id]) map[o.position_id] = t;
             }
@@ -675,25 +766,47 @@ export default function TradeManager({ setError, bots = [], request = null }) {
 
         // Max drawdown — percentage of peak equity using the pools in view as starting equity
         const sorted = [...closedPositions].sort((a, b) => new Date(a.closed_at) - new Date(b.closed_at));
-        // Look up backtest_capital from bot config (default $1000)
+        // Look up backtest_capital from bot config (default 1000 in the bot's cash currency)
         const filteredBotNames = [...new Set(sorted.map(p => p.bot_name).filter(Boolean))];
         const viewModes = modesOf(sorted);
-        const capitalPerBot = filteredBotNames.map(name => botCapital(bots.find(b => b.name === name), viewModes));
+        const botsInView = filteredBotNames.map(name => bots.find(b => b.name === name)).filter(Boolean);
         // Per-bot capital is a separate pool, so the capital in view is the sum
         // across the bots in view — one base for both the return and the
         // drawdown below. No trades in view → no capital deployed; never fall
-        // back to a phantom $1000.
-        const totalCapital = capitalPerBot.reduce((a, b) => a + b, 0);
+        // back to a phantom 1000. Pools are summed per cash currency.
+        const capitalByCcy = sumByCurrency(botsInView, b => botCapital(b, viewModes), botCurrency);
+        const totalCapital = Object.values(capitalByCcy).reduce((a, b) => a + b, 0);
 
-        // Simulated and real trades never sum to one number: when the view
-        // mixes modes the tile shows one line per mode instead
-        const pnlByMode = {};
+        // Simulated and real trades never sum to one number, and neither do two
+        // currencies: the view is split into (mode, currency) groups and the
+        // tiles show one line per group whenever there is more than one
+        const pnlByGroup = {};
+        const groupMeta = {};
         for (const p of closedPositions) {
             if (!p.mode) continue;
-            pnlByMode[p.mode] = (pnlByMode[p.mode] || 0) + (p.profit_abs || 0);
+            const k = groupKeyOf(p);
+            pnlByGroup[k] = (pnlByGroup[k] || 0) + (p.profit_abs || 0);
+            groupMeta[k] = { key: k, mode: p.mode, ccy: ccyOrNull(rowCurrency(p)) };
         }
-        const modes = sortModes(Object.keys(pnlByMode));
-        const mixed = modes.length > 1;
+        const groups = Object.values(groupMeta).sort((a, b) =>
+            MODE_ORDER.indexOf(a.mode) - MODE_ORDER.indexOf(b.mode) || String(a.ccy).localeCompare(String(b.ccy)));
+        const modes = sortModes([...new Set(groups.map(g => g.mode))]);
+        const ccys = [...new Set(groups.map(g => g.ccy || '?'))];
+        const mixedModes = modes.length > 1;
+        const mixedCcy = ccys.length > 1;
+        const mixed = groups.length > 1;
+        // Single group: every amount is in this currency (null = unknown unit)
+        const ccy = groups.length === 1 ? groups[0].ccy : (ccys.length === 1 ? ccyOrNull(ccys[0]) : null);
+        // Mixed view: DD / win rate / PF / trade ratio per group, never pooled
+        const byGroup = {};
+        if (mixed) {
+            for (const g of groups) {
+                const inGroup = closedPositions.filter(p => groupKeyOf(p) === g.key);
+                const names = [...new Set(inGroup.map(p => p.bot_name).filter(Boolean))];
+                const cap = names.reduce((a, n) => a + botCapital(bots.find(b => b.name === n), new Set([g.mode])), 0);
+                byGroup[g.key] = { ...tradeStats(inGroup, cap), capital: cap };
+            }
+        }
 
         let equity = totalCapital, peakEq = totalCapital, maxDDpct = 0;
         for (const p of sorted) {
@@ -721,11 +834,18 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             : 0;
         const sharpe = stddev > 0 ? mean / stddev : 0;
 
-        // Total fees from orders linked to filtered positions
+        // Total fees from orders linked to filtered positions, per cash currency
         const filteredPosIds = new Set(closedPositions.map(p => p.id));
-        const totalFees = orders
-            .filter(o => o.position_id && filteredPosIds.has(o.position_id))
-            .reduce((s, o) => s + (o.fee || 0), 0);
+        const feeOrders = orders.filter(o => o.position_id && filteredPosIds.has(o.position_id));
+        const feesByCcy = sumByCurrency(feeOrders, feeCash);
+        const totalFees = Object.values(feesByCcy).reduce((a, b) => a + b, 0);
+
+        // Long/short split (phase 3): only shown when a short is in view
+        const shorts = closedPositions.filter(p => p.side === 'short');
+        const bySide = shorts.length ? {
+            long: { total: closedPositions.length - shorts.length, netPnl: netPnl - shorts.reduce((a, p) => a + (p.profit_abs || 0), 0) },
+            short: { total: shorts.length, netPnl: shorts.reduce((a, p) => a + (p.profit_abs || 0), 0) },
+        } : null;
 
         return {
             netPnl,
@@ -734,31 +854,43 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             losses: losses.length,
             total: closedPositions.length,
             openCount: activePositions.length,
+            bySide,
             profitFactor,
             maxDDpct,
             avgHoldMs,
             avgTrade: closedPositions.length > 0 ? netPnl / closedPositions.length : 0,
             sharpe,
             totalFees,
+            feesByCcy,
             avgWin: wins.length > 0 ? grossProfit / wins.length : 0,
             avgLoss: losses.length > 0 ? grossLoss / losses.length : 0,
             totalCapital,
+            capitalByCcy,
             botCount: filteredBotNames.length,
             returnPct: totalCapital > 0 ? (netPnl / totalCapital) * 100 : 0,
             modes,
+            ccys,
+            ccy,
+            groups,
             mixed,
-            pnlByMode,
+            mixedModes,
+            mixedCcy,
+            pnlByGroup,
+            byGroup,
         };
     }, [closedPositions, activePositions, orders, entryTsByPos, bots]);
 
     // ── Breakdown tables (by algorithm / by pair) ─────────────────────────────
 
     const breakdownRows = useMemo(() => {
-        const build = (keyFn, labelFn) => {
+        const build = (keyFn, labelFn, byBotView) => {
             const groups = new Map();
             for (const p of closedPositions) {
-                const key = keyFn(p);
-                if (!groups.has(key)) groups.set(key, { key, label: labelFn(p), trades: 0, wins: 0, gross: 0, loss: 0, net: 0, modes: new Set(), fees: 0, holdMs: 0, holdN: 0, best: -Infinity, worst: Infinity, spans: [], botNames: new Set(), returns: [] });
+                // One row per (thing, cash currency): a bot or pair that traded
+                // in two currencies gets two rows rather than one summed number
+                const ccy = ccyOrNull(rowCurrency(p));
+                const key = `${keyFn(p)}|${ccy || '?'}`;
+                if (!groups.has(key)) groups.set(key, { key, ccy, botName: p.bot_name, label: labelFn(p), trades: 0, wins: 0, gross: 0, loss: 0, net: 0, modes: new Set(), fees: 0, holdMs: 0, holdN: 0, best: -Infinity, worst: Infinity, spans: [], botNames: new Set(), returns: [] });
                 const g = groups.get(key);
                 const pnl = p.profit_abs || 0;
                 g.trades += 1;
@@ -782,13 +914,13 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             }
             // Open positions are "in the market" indefinitely for the flat-gap calc
             for (const p of activePositions) {
-                const g = groups.get(keyFn(p));
+                const g = groups.get(`${keyFn(p)}|${ccyOrNull(rowCurrency(p)) || '?'}`);
                 if (!g) continue;
                 const entryTs = entryTimeOf(p, new Date(8.64e15), entryTsByPos);
                 if (entryTs) g.spans.push({ start: entryTs.getTime(), end: Infinity });
             }
             return [...groups.values()].map(g => {
-                const bot = bots.find(b => b.name === g.key);
+                const bot = byBotView ? bots.find(b => b.name === g.botName) : null;
                 const capital = bot ? botCapital(bot, g.modes) : null;
                 // Flat-gap window: the date filter, else the data range the engine
                 // walked in the last backtest of the bots behind this row
@@ -821,16 +953,16 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                     capital,
                     returnPct: capital ? (g.net / capital) * 100 : null,
                     engineDD: bot?.settings?.last_backtest_max_drawdown ?? null,
-                    timeframe: bot?.settings?.timeframe || tfByBot[g.key] || null,
+                    timeframe: bot?.settings?.timeframe || tfByBot[g.botName] || null,
                     isActive: !!bot?.is_active,
                 };
             }).sort((a, b) => b.net - a.net);
         };
         return {
-            byBot: build(p => p.bot_name, p => p.bot_name),
-            bySymbol: build(p => `${p.exchange || 'okx'}:${p.symbol}`, p => p.symbol),
+            byBot: build(p => p.bot_name, p => p.bot_name, true),
+            bySymbol: build(p => `${rowExchange(p) || '?'}:${p.symbol}`, p => p.symbol, false),
         };
-    }, [closedPositions, activePositions, entryTsByPos, feesByPosId, bots, tfByBot, dateFrom, dateTo]);
+    }, [closedPositions, activePositions, entryTsByPos, feesByPosId, bots, tfByBot, dateFrom, dateTo, rowExchange]);
 
     const [breakdownView, setBreakdownView] = useState('bot');
 
@@ -842,7 +974,9 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         const deployedByPair = new Map();
         for (const p of positions) {
             if (p.status !== 'open') continue;
-            const v = (p.amount || 0) * (p.entry_price || 0);
+            // Capital actually locked = margin (notional / leverage), not the
+            // notional — in the position's cash currency (base coin on inverse)
+            const v = positionMargin(p);
             const b = deployedByBot.get(p.bot_name) || { value: 0, count: 0 };
             b.value += v; b.count += 1; deployedByBot.set(p.bot_name, b);
             const s = deployedByPair.get(p.symbol) || { value: 0, count: 0, bots: new Set() };
@@ -851,7 +985,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
 
         const byBot = bots
             .filter(b => filterBot === 'all' || b.name === filterBot)
-            .filter(b => filterExchange === 'all' || (b.settings?.data_exchange || 'okx') === filterExchange)
+            .filter(b => filterExchange === 'all' || botExchangeByName[b.name] === filterExchange)
             .filter(b => filterInterval === 'all' || b.settings?.timeframe === filterInterval)
             .map(b => {
                 const s = b.settings || {};
@@ -866,12 +1000,17 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                 const entryUsd = isFixed ? (rawVal > 0 ? rawVal : pool) : pool * (entryPct / 100);
                 const maxPositions = Math.max(1, Number(s.max_positions) || 1);
                 const cap = Number(s.max_order_value) || 0;
-                const exposurePct = Math.min(100, entryPct * maxPositions);
+                // % sizing takes a share of the *remaining* cash each time, so N
+                // layers commit 1-(1-p)^N of the pool, not N·p; fixed sizing is linear
+                const exposurePct = isFixed
+                    ? Math.min(100, entryPct * maxPositions)
+                    : Math.min(100, (1 - Math.pow(1 - entryPct / 100, maxPositions)) * 100);
                 const dep = deployedByBot.get(b.name) || { value: 0, count: 0 };
                 return {
                     key: b.name, label: b.name, isActive: !!b.is_active, timeframe: s.timeframe,
+                    ccy: botCurrency(b),
                     mode: b.execution_mode || (s.api_execution ? 'live' : 'forward_test'),
-                    exchange: s.data_exchange || 'okx',
+                    exchange: botExchangeByName[b.name],
                     pool, entryPct, entryUsd, isFixed, maxPositions, cap,
                     exposurePct, exposureUsd: pool * (exposurePct / 100),
                     symbols, deployed: dep.value, openCount: dep.count,
@@ -887,7 +1026,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         for (const r of byBot) {
             for (const sym of r.symbols) {
                 if (filterSymbol !== 'all' && sym !== filterSymbol) continue;
-                const g = pairMap.get(sym) || { key: sym, label: sym, bots: [], maxEntry: 0, poolAccess: 0 };
+                const g = pairMap.get(sym) || { key: sym, label: sym, ccy: currencyOf(sym), bots: [], maxEntry: 0, poolAccess: 0 };
                 g.bots.push(r.label);
                 g.maxEntry += r.entryUsd;
                 g.poolAccess += r.pool;
@@ -899,11 +1038,15 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             return { ...g, deployed: dep.value, openCount: dep.count };
         }).sort((a, b) => b.deployed - a.deployed || b.maxEntry - a.maxEntry);
 
-        const totalPool = byBot.reduce((a, r) => a + r.pool, 0);
-        const totalDeployed = byBot.reduce((a, r) => a + r.deployed, 0);
-        const totalExposure = byBot.reduce((a, r) => a + r.exposureUsd, 0);
-        return { byBot, byPair, totalPool, totalDeployed, totalExposure };
-    }, [bots, positions, filterBot, filterSymbol, filterExchange, filterInterval]);
+        // Totals per cash currency — pools in USDT and pools in BTC never add up
+        const byCcy = (pick) => sumByCurrency(byBot, pick, r => r.ccy);
+        const totalPool = byCcy(r => r.pool);
+        const totalDeployed = byCcy(r => r.deployed);
+        const totalExposure = byCcy(r => r.exposureUsd);
+        const anyDeployed = byBot.some(r => r.deployed > 0);
+        const mixedCcy = Object.keys(totalPool).length > 1;
+        return { byBot, byPair, totalPool, totalDeployed, totalExposure, anyDeployed, mixedCcy };
+    }, [bots, positions, filterBot, filterSymbol, filterExchange, filterInterval, botExchangeByName]);
 
     const [allocationView, setAllocationView] = useState('bot');
 
@@ -914,15 +1057,28 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         for (const p of closedPositions) {
             if (!p.closed_at) continue;
             const d = new Date(p.closed_at);
-            const key = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
-            const m = months.get(key) || { key, net: 0, trades: 0 };
+            const month = `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+            // One bar per (month, cash currency) — never one sum across currencies
+            const ccy = ccyOrNull(rowCurrency(p));
+            const key = `${month}|${ccy || '?'}`;
+            const m = months.get(key) || { key, month, ccy, net: 0, trades: 0 };
             m.net += p.profit_abs || 0;
             m.trades += 1;
             months.set(key, m);
         }
-        const rows = [...months.values()].sort((a, b) => a.key.localeCompare(b.key)).slice(-12);
-        const maxAbs = rows.reduce((m, r) => Math.max(m, Math.abs(r.net)), 0) || 1;
-        return rows.map(r => ({ ...r, share: Math.abs(r.net) / maxAbs, label: new Date(`${r.key}-01T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', year: '2-digit', timeZone: 'UTC' }) }));
+        const all = [...months.values()].sort((a, b) => a.key.localeCompare(b.key));
+        const lastMonths = [...new Set(all.map(r => r.month))].slice(-12);
+        const rows = all.filter(r => lastMonths.includes(r.month));
+        // Bar length is relative within the currency (a BTC bar is not on a USDT scale)
+        const maxAbsByCcy = {};
+        for (const r of rows) maxAbsByCcy[r.ccy || '?'] = Math.max(maxAbsByCcy[r.ccy || '?'] || 0, Math.abs(r.net));
+        const mixedCcy = Object.keys(maxAbsByCcy).length > 1;
+        return rows.map(r => ({
+            ...r,
+            share: Math.abs(r.net) / (maxAbsByCcy[r.ccy || '?'] || 1),
+            mixedCcy,
+            label: new Date(`${r.month}-01T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', year: '2-digit', timeZone: 'UTC' }),
+        }));
     }, [closedPositions]);
 
     // ── Equity curve data ─────────────────────────────────────────────────────
@@ -969,9 +1125,10 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         for (const p of [...activePositions, ...closedPositions]) {
             if (!p.symbol || !p.created_at || !p.entry_price) continue;
             if (!bySymbol[p.symbol]) {
-                bySymbol[p.symbol] = { firstDate: new Date(p.created_at), firstPrice: p.entry_price, positions: [], botNames: new Set() };
+                bySymbol[p.symbol] = { firstDate: new Date(p.created_at), firstPrice: p.entry_price, positions: [], botNames: new Set(), exchange: rowExchange(p) };
             }
             const s = bySymbol[p.symbol];
+            if (!s.exchange) s.exchange = rowExchange(p);
             if (p.bot_name) s.botNames.add(p.bot_name);
             if (new Date(p.created_at) < s.firstDate) {
                 s.firstDate = new Date(p.created_at);
@@ -1013,7 +1170,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                 }
                 if (bhPct === null && basis !== 'mixed') {
                     // With a bounded window, B&H ends at the last exit inside it instead of today's price
-                    let curPrice = livePrices[symbol];
+                    let curPrice = d.exchange ? livePrices[priceKey(d.exchange, symbol)] : undefined;
                     if (dateTo !== null) {
                         const last = d.positions.reduce((acc, p) => (!acc || new Date(p.closed_at) > new Date(acc.closed_at)) ? p : acc, null);
                         if (last?.entry_price > 0 && typeof last.profit_pct === 'number') curPrice = last.entry_price * (1 + last.profit_pct / 100);
@@ -1021,14 +1178,16 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                     if (curPrice && d.firstPrice > 0) bhPct = ((curPrice - d.firstPrice) / d.firstPrice) * 100;
                 }
                 const edge = bhPct !== null ? strategyPct - bhPct : null;
-                return { symbol, strategyPct, bhPct, edge, strategyPnl, capital, range };
+                return { symbol, ccy: ccyOrNull(rowCurrency(d.positions[0])), strategyPct, bhPct, edge, strategyPnl, capital, range };
             });
 
         // Equal-weight portfolio: the strategy's total return on the capital in
         // view against holding an equal slice of every symbol it traded
         const withBh = rows.filter(r => r.bhPct !== null);
+        // Symbols settled in different currencies cannot share one PnL total
+        const mixedCcy = new Set(rows.map(r => r.ccy || '?')).size > 1;
         let portfolio = null;
-        if (rows.length > 1 && withBh.length === rows.length) {
+        if (rows.length > 1 && withBh.length === rows.length && !mixedCcy) {
             const capital = stats.totalCapital || rows.reduce((a, r) => a + r.capital, 0);
             const strategyPct = capital > 0 ? (rows.reduce((a, r) => a + r.strategyPnl, 0) / capital) * 100 : 0;
             const bhPct = rows.reduce((a, r) => a + r.bhPct, 0) / rows.length;
@@ -1040,25 +1199,71 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             if (!Number.isNaN(r.range.from) && (from === null || r.range.from < from)) from = r.range.from;
             if (!Number.isNaN(r.range.to) && (to === null || r.range.to > to)) to = r.range.to;
         }
-        return { rows, portfolio, basis, range: from !== null ? { from, to } : null };
-    }, [closedPositions, activePositions, livePrices, bots, dateFrom, dateTo, stats.totalCapital]);
+        return { rows, portfolio, basis, mixedCcy, range: from !== null ? { from, to } : null };
+    }, [closedPositions, activePositions, livePrices, bots, dateFrom, dateTo, stats.totalCapital, rowExchange]);
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    const livePriceOf = (pos) => livePrices[priceKey(rowExchange(pos), pos.symbol)];
+
+    // Mixed tiles: one line per (mode, currency) group, never a pooled number.
+    // The currency code is spelled out whenever more than one is in view.
+    const groupTag = (g) => (
+        <span className="flex items-center gap-1">
+            <ModeBadge mode={g.mode} short className="text-3xs!" />
+            {stats.mixedCcy && <span className="text-3xs font-num text-muted" title={g.ccy ? undefined : 'unit unknown'}>{g.ccy || '?'}</span>}
+        </span>
+    );
+    const perGroupValue = (fmt) => (
+        <span className="flex flex-col gap-0.5 text-sm">
+            {stats.groups.map(g => (
+                <span key={g.key} className="flex items-center justify-between gap-2">
+                    {groupTag(g)}
+                    <span className="font-num text-text">{stats.byGroup[g.key] ? fmt(stats.byGroup[g.key], g) : '—'}</span>
+                </span>
+            ))}
+        </span>
+    );
+    // Tile value for a per-currency sum: a single line when one currency, else
+    // one line per currency
+    const perCcyValue = (sums, fmt) => {
+        const entries = Object.entries(sums);
+        if (entries.length === 0) return '—';
+        if (entries.length === 1) return fmt(entries[0][1], ccyOrNull(entries[0][0]));
+        return (
+            <span className="flex flex-col gap-0.5 text-sm">
+                {entries.map(([c, v]) => (
+                    <span key={c} className="flex items-center justify-between gap-2">
+                        <span className="text-3xs font-num text-muted">{c}</span>
+                        <span className="font-num text-text">{fmt(v, ccyOrNull(c))}</span>
+                    </span>
+                ))}
+            </span>
+        );
+    };
+    const mixedLabel = stats.mixedModes && stats.mixedCcy ? 'mixed modes & currencies' : stats.mixedCcy ? 'mixed currencies' : 'mixed';
+    const selectOneHint = stats.mixedModes && stats.mixedCcy ? 'select one mode and one currency' : stats.mixedCcy ? 'select one currency' : 'select one mode';
     const getLivePnl = (pos) => {
-        const cur = livePrices[pos.symbol];
+        const cur = livePriceOf(pos);
         if (!cur) return { abs: 0, pct: 0 };
+        // In the position's cash currency (base coin on an inverse swap)
+        const abs = positionPnl(pos, cur);
         const isLong = pos.side !== 'short';
-        const abs = isLong ? (cur - pos.entry_price) * pos.amount : (pos.entry_price - cur) * pos.amount;
         const pct = isLong ? ((cur - pos.entry_price) / pos.entry_price) * 100 : ((pos.entry_price - cur) / pos.entry_price) * 100;
         return { abs, pct };
     };
 
+    // Exit price implied by the realised PnL. Spot/linear: pnl = ±(exit − entry) × size.
+    // Inverse (PnL in the base coin): pnl = ±size × (exit − entry) / exit
+    // → exit = entry / (1 ∓ pnl/size).
     const getExitPrice = (pos) => {
         if (!pos.profit_abs || !pos.entry_price || !pos.amount) return null;
-        return pos.side === 'short'
-            ? pos.entry_price - pos.profit_abs / pos.amount
-            : pos.entry_price + pos.profit_abs / pos.amount;
+        const dir = pos.side === 'short' ? -1 : 1;
+        if (rowKind(pos) === 'inverse') {
+            const k = 1 - dir * pos.profit_abs / pos.amount;
+            return k > 0 ? pos.entry_price / k : null;
+        }
+        return pos.entry_price + dir * pos.profit_abs / pos.amount;
     };
 
     // ── CSV Export ────────────────────────────────────────────────────────────
@@ -1066,29 +1271,29 @@ export default function TradeManager({ setError, bots = [], request = null }) {
     const exportToCSV = () => {
         if (activeTab === 'positions') {
             if (closedPositions.length === 0) { toast.info('No trades to export for the current filters.'); return; }
-            const headers = ['Date Closed', 'Bot', 'Exchange', 'Mode', 'Symbol', 'Side', 'Entry', 'Exit', 'Amount', 'Hold Time', 'Return %', 'Net PNL', 'Fees'];
+            const headers = ['Date Closed', 'Bot', 'Exchange', 'Mode', 'Symbol', 'Side', 'Entry', 'Exit', 'Amount', 'Hold Time', 'Return %', 'Net PNL', 'Fees', 'Currency'];
             const rows = closedPositions.map(p => {
                 const fees = feesByPosId[p.id] || 0;
                 const holdMs = p.closed_at && p.created_at ? new Date(p.closed_at) - new Date(p.created_at) : 0;
                 const exit = getExitPrice(p);
-                return [
+                return csvLine([
                     new Date(p.closed_at).toISOString(),
-                    p.bot_name, p.exchange || 'okx', p.mode, p.symbol, p.side,
+                    p.bot_name, rowExchange(p) || '', p.mode, p.symbol, positionSide(p),
                     p.entry_price, exit?.toFixed(6) ?? '', p.amount,
-                    formatHoldTime(holdMs), p.profit_pct, p.profit_abs, fees.toFixed(4),
-                ].join(',');
+                    formatHoldTime(holdMs), p.profit_pct, p.profit_abs, fees.toFixed(4), rowCurrency(p) || '',
+                ]);
             });
-            triggerDownload([headers.join(','), ...rows].join('\n'), 'apex_positions_ledger');
+            triggerDownload([csvLine(headers), ...rows].join('\r\n'), 'apex_positions_ledger');
             toast.success(`Exported ${closedPositions.length} trades to CSV.`);
         } else {
             if (filteredOrders.length === 0) { toast.info('No orders to export for the current filters.'); return; }
-            const headers = ['Timestamp', 'Bot', 'Exchange', 'Mode', 'Symbol', 'Side', 'Type', 'Price', 'Amount', 'Fee', 'Status'];
-            const rows = filteredOrders.map(o => [
+            const headers = ['Timestamp', 'Bot', 'Exchange', 'Mode', 'Symbol', 'Side', 'Action', 'Type', 'Price', 'Amount', 'Fee', 'Fee Currency', 'Status'];
+            const rows = filteredOrders.map(o => csvLine([
                 new Date(o.timestamp).toISOString(),
-                o.bot_name, o.exchange || 'okx', o.mode, o.symbol,
-                o.side, o.order_type, o.price, o.amount, o.fee ?? '', o.status,
-            ].join(','));
-            triggerDownload([headers.join(','), ...rows].join('\n'), 'apex_raw_orders');
+                o.bot_name, rowExchange(o) || '', o.mode, o.symbol,
+                o.side, orderAction(o), o.order_type, o.price, o.amount, o.fee ?? '', o.fee_currency || rowCurrency(o) || '', o.status,
+            ]));
+            triggerDownload([csvLine(headers), ...rows].join('\r\n'), 'apex_raw_orders');
             toast.success(`Exported ${filteredOrders.length} orders to CSV.`);
         }
     };
@@ -1140,6 +1345,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                 filterSymbol === 'all' ? null : filterSymbol,
                                 filterInterval === 'all' ? null : filterInterval,
                                 filterExchange === 'all' ? null : filterExchange.toUpperCase(),
+                                filterCcy === 'all' ? null : filterCcy,
                             ].filter(Boolean).join(' · ')}
                         </span>
                         <svg className={`w-3.5 h-3.5 shrink-0 transition-transform ${filtersOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
@@ -1148,7 +1354,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                 </div>
                 <div className={`${filtersOpen ? 'block pt-3 mt-2 border-t border-border' : 'hidden'} md:block md:pt-0 md:mt-0 md:border-0`}>
                 <div className="flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
-                    <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 flex-1 min-w-[280px] max-w-[880px]">
+                    <div className={`grid grid-cols-2 ${uniqueCurrencies.length > 1 ? 'sm:grid-cols-3 lg:grid-cols-6 max-w-[1040px]' : 'sm:grid-cols-5 max-w-[880px]'} gap-3 flex-1 min-w-[280px]`}>
                         <Select label="Algorithm" value={filterBot} onChange={e => { setFilterBot(e.target.value); resetPage(); }} className="py-1.5! text-xs!">
                             <option value="all">All Bots</option>
                             {uniqueBots.map(b => <option key={b} value={b}>{b}</option>)}
@@ -1173,6 +1379,13 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             <option value="backtest">Backtest</option>
                             <option value="all">All Modes (mixed)</option>
                         </Select>
+                        {uniqueCurrencies.length > 1 && (
+                            <Select label="Currency" value={filterCcy} onChange={e => { setFilterCcy(e.target.value); resetPage(); }} className="py-1.5! text-xs! font-num"
+                                title="Cash currency the trades settle in — amounts in different currencies are never added up">
+                                <option value="all">All currencies (mixed)</option>
+                                {uniqueCurrencies.map(c => <option key={c} value={c}>{c === '?' ? 'unknown unit' : c}</option>)}
+                            </Select>
+                        )}
                     </div>
                     <div className="flex items-center gap-2 pb-0.5">
                         <Button variant="ghost" size="sm" onClick={exportToCSV}
@@ -1211,110 +1424,165 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                 <>
                 {stats.mixed && (
                     <div role="status" className="flex flex-wrap items-center gap-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-2xs text-text">
-                        <span className="font-bold uppercase tracking-wider text-warn">Mixed modes</span>
-                        <span className="text-muted">Net PnL is shown per mode — simulated and real trades are never added up.</span>
+                        <span className="font-bold uppercase tracking-wider text-warn">{mixedLabel}</span>
+                        <span className="text-muted">
+                            {stats.mixedModes && stats.mixedCcy
+                                ? 'Net PnL is shown per mode and currency — simulated and real trades are never added up, and neither are different currencies.'
+                                : stats.mixedCcy
+                                    ? 'Net PnL is shown per cash currency — amounts in different currencies are never added up.'
+                                    : 'Net PnL is shown per mode — simulated and real trades are never added up.'}
+                        </span>
                         <span className="flex items-center gap-1 ml-auto">
                             {stats.modes.map(m => <ModeBadge key={m} mode={m} short className="text-3xs!" />)}
+                            {stats.mixedCcy && stats.ccys.map(c => <Badge key={c} variant="warn" className="text-3xs! normal-case tracking-normal font-num">{c === '?' ? 'unit unknown' : c}</Badge>)}
                         </span>
                     </div>
                 )}
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     {stats.mixed ? (
                         <StatCard
-                            label="Net PNL · mixed"
+                            label={`Net PNL · ${mixedLabel}`}
                             value={
                                 <span className="flex flex-col gap-0.5 text-sm">
-                                    {stats.modes.map(m => (
-                                        <span key={m} className="flex items-center justify-between gap-2">
-                                            <ModeBadge mode={m} short className="text-3xs!" />
-                                            <span className={`font-num ${pnlColor(stats.pnlByMode[m])}`}>{pnlSign(stats.pnlByMode[m])}${safeNum(Math.abs(stats.pnlByMode[m]))}</span>
+                                    {stats.groups.map(g => (
+                                        <span key={g.key} className="flex items-center justify-between gap-2">
+                                            {groupTag(g)}
+                                            <span className={`font-num ${pnlColor(stats.pnlByGroup[g.key])}`} title={fmtMoneyTitle(g.ccy)}>{signed(stats.pnlByGroup[g.key], g.ccy)}</span>
                                         </span>
                                     ))}
                                 </span>
                             }
-                            sub="pick one mode for a return %"
+                            sub={`${selectOneHint} for a return %`}
                             color="neutral"
                         />
                     ) : (
                         <StatCard
                             label={`Net PNL${stats.modes.length === 1 ? ` · ${stats.modes[0] === 'forward_test' ? 'forward test' : stats.modes[0]}` : ''}`}
-                            value={`${stats.netPnl >= 0 ? '+' : '-'}$${safeNum(Math.abs(stats.netPnl))}`}
-                            sub={stats.total > 0 ? `${stats.returnPct >= 0 ? '+' : ''}${safeNum(stats.returnPct, 1)}% on $${safeNum(stats.totalCapital, 0)}` : 'no closed trades'}
+                            value={signed(stats.netPnl, stats.ccy)}
+                            sub={stats.total > 0 ? `${stats.returnPct >= 0 ? '+' : ''}${safeNum(stats.returnPct, 1)}% on ${fmtMoney(stats.totalCapital, stats.ccy, { digits: 0 })}` : 'no closed trades'}
                             color={stats.netPnl >= 0 ? 'success' : 'danger'}
+                            title={fmtMoneyTitle(stats.ccy)}
                         />
                     )}
                     <StatCard
-                        label="Starting Capital"
-                        value={stats.botCount > 0 ? `$${safeNum(stats.totalCapital, 0)}` : '—'}
-                        sub={stats.botCount > 1 ? `total across ${stats.botCount} bots` : (stats.botCount === 1 ? 'allocated to this bot' : 'no bots in view')}
+                        label={`Starting Capital${Object.keys(stats.capitalByCcy).length > 1 ? ' · per currency' : ''}`}
+                        value={stats.botCount > 0 ? perCcyValue(stats.capitalByCcy, (v, c) => fmtMoney(v, c, { digits: 0 })) : '—'}
+                        sub={stats.botCount > 1 ? `total across ${stats.botCount} bots${Object.keys(stats.capitalByCcy).length > 1 ? ' · never summed across currencies' : ''}` : (stats.botCount === 1 ? 'allocated to this bot' : 'no bots in view')}
                         color="accent"
+                        title={stats.botCount > 0 && Object.keys(stats.capitalByCcy).length === 1 ? fmtMoneyTitle(ccyOrNull(Object.keys(stats.capitalByCcy)[0])) : undefined}
                     />
-                    <StatCard
-                        label="Max Drawdown"
-                        value={engineDrawdown !== null
-                            ? `-${safeNum(engineDrawdown, 1)}%`
-                            : (stats.total > 0 ? `-${safeNum(stats.maxDDpct, 1)}%` : '—')}
-                        sub={engineDrawdown !== null
-                            ? 'engine: mark-to-market (backtest)'
-                            : 'closed trades only — intra-trade dips not included'}
-                        color="danger"
-                    />
-                    <StatCard
-                        label="Return / Risk"
-                        value={stats.total > 1 ? safeNum(stats.sharpe) : '—'}
-                        sub="mean return ÷ std dev"
-                        color={stats.sharpe > 1 ? 'success' : stats.sharpe > 0 ? 'accent' : 'danger'}
-                    />
+                    {stats.mixed ? (
+                        <StatCard label={`Max Drawdown · ${mixedLabel}`} value={perGroupValue(st => `-${safeNum(st.maxDDpct, 1)}%`)}
+                            sub={`closed trades only · ${selectOneHint}`} color="danger" />
+                    ) : (
+                        <StatCard
+                            label="Max Drawdown"
+                            value={engineDrawdown !== null
+                                ? `-${safeNum(engineDrawdown, 1)}%`
+                                : (stats.total > 0 ? `-${safeNum(stats.maxDDpct, 1)}%` : '—')}
+                            sub={engineDrawdown !== null
+                                ? 'engine: mark-to-market (backtest)'
+                                : (filterBot !== 'all' && filterMode !== 'backtest'
+                                    ? 'closed trades only · engine MTM n/a for this mode'
+                                    : 'closed trades only — intra-trade dips not included')}
+                            color="danger"
+                        />
+                    )}
+                    {stats.mixed ? (
+                        <StatCard label={`Trade ratio · ${mixedLabel}`} value={perGroupValue(st => (st.total > 1 ? safeNum(st.sharpe) : '—'))}
+                            sub={`mean/σ per trade · ${selectOneHint}`} color="neutral" title={TRADE_RATIO_TIP} />
+                    ) : (
+                        <StatCard
+                            label="Trade ratio (mean/σ per trade)"
+                            value={stats.total > 1 ? safeNum(stats.sharpe) : '—'}
+                            sub="not annualised — not a Sharpe ratio"
+                            color={stats.sharpe > 1 ? 'success' : stats.sharpe > 0 ? 'accent' : 'danger'}
+                            title={TRADE_RATIO_TIP}
+                        />
+                    )}
 
                     <StatCard
                         label="Trades"
                         value={stats.total > 0 ? stats.total : '—'}
-                        sub={stats.openCount > 0 ? `closed · ${stats.openCount} open now` : 'closed'}
+                        sub={`${stats.openCount > 0 ? `closed · ${stats.openCount} open now` : 'closed'}${stats.bySide
+                            ? (stats.mixedCcy
+                                ? ` · ${stats.bySide.long.total} long / ${stats.bySide.short.total} short`
+                                : ` · ${stats.bySide.long.total} long (${signed(stats.bySide.long.netPnl, stats.ccy, { digits: 0 })}) / ${stats.bySide.short.total} short (${signed(stats.bySide.short.netPnl, stats.ccy, { digits: 0 })})`)
+                            : ''}`}
                         color="neutral"
                     />
+                    {stats.mixed ? (
+                        <StatCard label={`Win Rate · ${mixedLabel}`} value={perGroupValue(st => `${safeNum(st.winRate, 1)}%`)}
+                            sub={selectOneHint} color="info" />
+                    ) : (
+                        <StatCard
+                            label="Win Rate"
+                            value={stats.total > 0 ? `${safeNum(stats.winRate, 1)}%` : '—'}
+                            sub={`${stats.wins} wins / ${stats.losses} losses`}
+                            color="info"
+                        />
+                    )}
+                    {stats.mixed ? (
+                        <StatCard label={`Profit Factor · ${mixedLabel}`} value={perGroupValue(st => (st.profitFactor >= 999 ? '∞' : safeNum(st.profitFactor)))}
+                            sub={selectOneHint} color="accent" />
+                    ) : (
+                        <StatCard
+                            label="Profit Factor"
+                            value={stats.total > 0 ? (stats.profitFactor >= 999 ? '∞' : safeNum(stats.profitFactor)) : '—'}
+                            sub="gross profit / gross loss"
+                            color="accent"
+                        />
+                    )}
                     <StatCard
-                        label="Win Rate"
-                        value={stats.total > 0 ? `${safeNum(stats.winRate, 1)}%` : '—'}
-                        sub={`${stats.wins} wins / ${stats.losses} losses`}
-                        color="info"
-                    />
-                    <StatCard
-                        label="Profit Factor"
-                        value={stats.total > 0 ? (stats.profitFactor >= 999 ? '∞' : safeNum(stats.profitFactor)) : '—'}
-                        sub="gross profit / gross loss"
-                        color="accent"
-                    />
-                    <StatCard
-                        label="Total Fees Paid"
-                        value={stats.total > 0 ? `-$${safeNum(stats.totalFees)}` : '—'}
+                        label={`Total Fees Paid${Object.keys(stats.feesByCcy).length > 1 ? ' · per currency' : ''}`}
+                        value={stats.total > 0 ? perCcyValue(stats.feesByCcy, (v, c) => `-${fmtMoney(v, c)}`) : '—'}
                         sub="all linked orders"
                         color={stats.totalFees > 0 ? 'danger' : 'neutral'}
+                        title={stats.total > 0 && Object.keys(stats.feesByCcy).length === 1 ? fmtMoneyTitle(ccyOrNull(Object.keys(stats.feesByCcy)[0])) : undefined}
                     />
 
-                    <StatCard
-                        label="Avg Win"
-                        value={stats.wins > 0 ? `+$${safeNum(stats.avgWin)}` : '—'}
-                        sub="per winning trade"
-                        color="success"
-                    />
-                    <StatCard
-                        label="Avg Loss"
-                        value={stats.losses > 0 ? `-$${safeNum(stats.avgLoss)}` : '—'}
-                        sub="per losing trade"
-                        color="danger"
-                    />
+                    {stats.mixed ? (
+                        <StatCard label={`Avg Win · ${mixedLabel}`} value={perGroupValue((st, g) => (st.wins > 0 ? `+${fmtMoney(st.avgWin, g.ccy)}` : '—'))}
+                            sub="per winning trade" color="success" />
+                    ) : (
+                        <StatCard
+                            label="Avg Win"
+                            value={stats.wins > 0 ? `+${fmtMoney(stats.avgWin, stats.ccy)}` : '—'}
+                            sub="per winning trade"
+                            color="success"
+                            title={fmtMoneyTitle(stats.ccy)}
+                        />
+                    )}
+                    {stats.mixed ? (
+                        <StatCard label={`Avg Loss · ${mixedLabel}`} value={perGroupValue((st, g) => (st.losses > 0 ? `-${fmtMoney(st.avgLoss, g.ccy)}` : '—'))}
+                            sub="per losing trade" color="danger" />
+                    ) : (
+                        <StatCard
+                            label="Avg Loss"
+                            value={stats.losses > 0 ? `-${fmtMoney(stats.avgLoss, stats.ccy)}` : '—'}
+                            sub="per losing trade"
+                            color="danger"
+                            title={fmtMoneyTitle(stats.ccy)}
+                        />
+                    )}
                     <StatCard
                         label="Avg Hold Time"
                         value={stats.total > 0 ? formatHoldTime(stats.avgHoldMs) : '—'}
                         sub="per closed position"
                         color="neutral"
                     />
-                    <StatCard
-                        label="Avg Trade"
-                        value={stats.total > 0 ? `${stats.avgTrade >= 0 ? '+' : '-'}$${safeNum(Math.abs(stats.avgTrade))}` : '—'}
-                        sub="expectancy · net PnL per closed trade"
-                        color={stats.total > 0 ? (stats.avgTrade >= 0 ? 'success' : 'danger') : 'neutral'}
-                    />
+                    {stats.mixed ? (
+                        <StatCard label={`Avg Trade · ${mixedLabel}`} value={perGroupValue((st, g) => (st.total > 0 ? signed(st.avgTrade, g.ccy) : '—'))}
+                            sub="expectancy · net PnL per closed trade" color="neutral" />
+                    ) : (
+                        <StatCard
+                            label="Avg Trade"
+                            value={stats.total > 0 ? signed(stats.avgTrade, stats.ccy) : '—'}
+                            sub="expectancy · net PnL per closed trade"
+                            color={stats.total > 0 ? (stats.avgTrade >= 0 ? 'success' : 'danger') : 'neutral'}
+                            title={fmtMoneyTitle(stats.ccy)}
+                        />
+                    )}
                 </div>
                 </>
             )}
@@ -1341,15 +1609,15 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                     Break-even
                                 </span>
                             </div>
-                            {equityCurveData.length >= 2 && (() => {
+                            {!stats.mixed && equityCurveData.length >= 2 && (() => {
                                 const last = equityCurveData[equityCurveData.length - 1];
                                 return (
-                                    <span className="text-right leading-tight">
+                                    <span className="text-right leading-tight" title={fmtMoneyTitle(stats.ccy)}>
                                         <span className={`block text-sm font-num font-bold ${pnlColor(last.value)}`}>
-                                            {pnlSign(last.value)}${safeNum(Math.abs(last.value))}
+                                            {signed(last.value, stats.ccy)}
                                         </span>
                                         <span className="block text-3xs font-num text-muted">
-                                            ${safeNum(last.capital, 0)} → <span className="text-text">${safeNum(last.equity, 0)}</span>
+                                            {fmtMoney(last.capital, stats.ccy, { digits: 0 })} → <span className="text-text">{fmtMoney(last.equity, stats.ccy, { digits: 0 })}</span>
                                         </span>
                                     </span>
                                 );
@@ -1357,7 +1625,14 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                         </div>
                     </div>
                     <div className="h-[160px] w-full">
-                        {initialLoading ? <Skeleton className="w-full h-full rounded-md" /> : <EquityCurve data={equityCurveData} />}
+                        {initialLoading ? <Skeleton className="w-full h-full rounded-md" />
+                            : stats.mixed ? (
+                                <div className="h-full flex items-center justify-center text-center text-2xs text-muted px-4">
+                                    {stats.mixedCcy
+                                        ? <>Mixed currencies — amounts in different currencies are never drawn on one curve.<br />Select one currency{stats.mixedModes ? ' and one mode' : ''} to see the equity curve.</>
+                                        : <>Mixed modes — simulated and real fills are never drawn on one curve.<br />Select one mode to see the equity curve.</>}
+                                </div>
+                            ) : <EquityCurve data={equityCurveData} ccy={stats.ccy} />}
                     </div>
                 </div>
 
@@ -1373,6 +1648,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                     : buyAndHoldData.basis === 'mixed'
                                         ? 'Mixed modes — pick one mode to compare'
                                         : `Per symbol — first entry to ${dateTo !== null ? 'last exit' : 'now'}`}
+                            {buyAndHoldData.mixedCcy && ' · mixed currencies: per symbol only, no portfolio line'}
                         </p>
                     </div>
 
@@ -1407,7 +1683,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             {buyAndHoldData.rows.map(d => (
                                 <div key={d.symbol} className="bg-bg/50 border border-border rounded-lg p-3">
                                     <div className="flex items-center justify-between mb-2">
-                                        <span className="text-2xs font-bold text-text font-num">{d.symbol}</span>
+                                        <span className="text-2xs font-bold text-text font-num">{d.symbol}{buyAndHoldData.mixedCcy && <span className="ml-1.5 text-3xs text-muted font-normal">{d.ccy || '?'}</span>}</span>
                                         {d.edge !== null && (
                                             <span className={`text-3xs font-bold font-num px-1.5 py-0.5 rounded ${d.edge >= 0 ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
                                                 {d.edge >= 0 ? '↑' : '↓'} Edge: {pnlSign(d.edge)}{safeNum(d.edge, 1)}%
@@ -1501,15 +1777,16 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                     <span className="truncate max-w-[220px]" title={r.label}>{r.label}</span>
                                                     {breakdownView === 'bot' && r.timeframe && <span className="text-3xs font-num text-accent">{r.timeframe}</span>}
                                                     {r.modes.map(m => <ModeBadge key={m} mode={m} short className="text-3xs!" />)}
+                                                    {stats.mixedCcy && <span className="text-3xs font-num text-muted" title="cash currency of these trades">{r.ccy || '?'}</span>}
                                                 </div>
                                             </td>
                                             <td className="px-3 py-1.5 text-right font-num text-muted">{r.trades} <span className="text-faint">({r.wins}W)</span></td>
                                             <td className="px-3 py-1.5 text-right font-num text-info">{safeNum(r.winRate, 1)}%</td>
-                                            <td className={`px-3 py-1.5 text-right font-num font-bold ${pnlColor(r.net)}`}>{pnlSign(r.net)}${safeNum(Math.abs(r.net))}</td>
+                                            <td className={`px-3 py-1.5 text-right font-num font-bold ${pnlColor(r.net)}`} title={fmtMoneyTitle(r.ccy)}>{signed(r.net, r.ccy)}</td>
                                             {breakdownView === 'bot' && (
                                                 <td className={`px-3 py-1.5 text-right font-num ${r.returnPct === null ? 'text-faint' : pnlColor(r.returnPct)}`}>
                                                     {r.returnPct === null ? '—' : `${pnlSign(r.returnPct)}${safeNum(r.returnPct, 1)}%`}
-                                                    {r.capital && <span className="text-faint ml-1">on ${safeNum(r.capital, 0)}</span>}
+                                                    {r.capital && <span className="text-faint ml-1">on {fmtMoney(r.capital, r.ccy, { digits: 0 })}</span>}
                                                 </td>
                                             )}
                                             <td className="px-3 py-1.5 text-right font-num text-muted">{r.profitFactor === Infinity ? '∞' : safeNum(r.profitFactor)}</td>
@@ -1520,13 +1797,13 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                             {breakdownView === 'bot' && (
                                                 <td className="px-3 py-1.5 text-right font-num text-danger">{r.engineDD !== null ? `-${safeNum(r.engineDD, 1)}%` : '—'}</td>
                                             )}
-                                            <td className="px-3 py-1.5 text-right font-num"><span className="text-success">+${safeNum(Math.max(0, r.best))}</span> <span className="text-faint">/</span> <span className="text-danger">-${safeNum(Math.abs(Math.min(0, r.worst)))}</span></td>
+                                            <td className="px-3 py-1.5 text-right font-num" title={fmtMoneyTitle(r.ccy)}><span className="text-success">+{fmtMoney(Math.max(0, r.best), r.ccy)}</span> <span className="text-faint">/</span> <span className="text-danger">-{fmtMoney(Math.abs(Math.min(0, r.worst)), r.ccy)}</span></td>
                                             <td className="px-3 py-1.5 text-right font-num text-muted">{r.avgHoldMs ? formatHoldTime(r.avgHoldMs) : '—'}</td>
                                             <td className="px-3 py-1.5 text-right font-num text-muted"
                                                 title={r.longestFlat ? `${fmtShortDate(r.longestFlat.from)} – ${fmtShortDate(r.longestFlat.to)}` : 'never flat in this range'}>
                                                 {r.longestFlat ? formatHoldTime(r.longestFlat.ms) : '—'}
                                             </td>
-                                            <td className="px-3 py-1.5 text-right font-num text-muted">${safeNum(r.fees)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted" title={fmtMoneyTitle(r.ccy)}>{fmtMoney(r.fees, r.ccy)}</td>
                                         </tr>
                                     ))}
                                 </tbody>
@@ -1537,16 +1814,16 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                     <div className="terminal-card p-4 lg:w-[340px] shrink-0">
                         <div className="mb-4">
                             <h2 className="text-xs font-bold uppercase tracking-wider text-text">Monthly Net PNL</h2>
-                            <p className="text-3xs text-muted mt-0.5 uppercase tracking-wider">By close date (UTC) · last {monthlyReturns.length} months</p>
+                            <p className="text-3xs text-muted mt-0.5 uppercase tracking-wider">By close date (UTC) · last {new Set(monthlyReturns.map(m => m.month)).size} months{monthlyReturns[0]?.mixedCcy ? ' · per currency' : ''}</p>
                         </div>
                         <div className="space-y-2 max-h-[280px] overflow-y-auto custom-scrollbar pr-1">
                             {monthlyReturns.map(m => (
                                 <div key={m.key} className="flex items-center gap-3">
-                                    <span className="text-3xs font-num text-muted w-14 shrink-0">{m.label}</span>
+                                    <span className="text-3xs font-num text-muted w-14 shrink-0">{m.label}{m.mixedCcy && <span className="block text-faint">{m.ccy || '?'}</span>}</span>
                                     <div className="flex-1 h-2 bg-border/60 rounded-full overflow-hidden flex">
                                         <div className={`h-full rounded-full ${m.net >= 0 ? 'bg-success' : 'bg-danger'}`} style={{ width: `${Math.max(2, m.share * 100)}%` }} />
                                     </div>
-                                    <span className={`text-2xs font-num font-bold w-20 text-right shrink-0 ${pnlColor(m.net)}`} title={`${m.trades} trades`}>{pnlSign(m.net)}${safeNum(Math.abs(m.net), 0)}</span>
+                                    <span className={`text-2xs font-num font-bold w-24 text-right shrink-0 ${pnlColor(m.net)}`} title={`${m.trades} trades${m.ccy ? '' : ' · unit unknown'}`}>{signed(m.net, m.ccy, { digits: 0 })}</span>
                                 </div>
                             ))}
                         </div>
@@ -1565,10 +1842,11 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             </p>
                         </div>
                         <div className="flex items-center gap-4 flex-wrap">
-                            <div className="flex items-center gap-4 text-2xs font-num">
-                                <span className="text-muted">Pools <span className="text-text font-bold">${safeNum(allocation.totalPool, 0)}</span></span>
-                                <span className="text-muted">Deployed <span className={`font-bold ${allocation.totalDeployed > 0 ? 'text-accent' : 'text-text'}`}>${safeNum(allocation.totalDeployed, 0)}</span></span>
-                                <span className="text-muted">Max exposure <span className="text-text font-bold">${safeNum(allocation.totalExposure, 0)}</span></span>
+                            <div className="flex items-center gap-4 text-2xs font-num flex-wrap">
+                                {allocation.mixedCcy && <Badge variant="warn" className="text-3xs! normal-case tracking-normal" title="Pools in different cash currencies are listed side by side, never added up">mixed currencies</Badge>}
+                                <span className="text-muted">Pools <span className="text-text font-bold">{fmtByCurrency(allocation.totalPool, { digits: 0 }) || '0'}</span></span>
+                                <span className="text-muted">Deployed <span className={`font-bold ${allocation.anyDeployed ? 'text-accent' : 'text-text'}`}>{fmtByCurrency(allocation.totalDeployed, { digits: 0 }) || '0'}</span></span>
+                                <span className="text-muted">Max exposure <span className="text-text font-bold">{fmtByCurrency(allocation.totalExposure, { digits: 0 }) || '0'}</span></span>
                             </div>
                             <div className="flex bg-inset rounded-md border border-border overflow-hidden">
                                 {[['bot', 'By algorithm'], ['pair', 'By pair']].map(([v, l]) => (
@@ -1589,9 +1867,9 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                         <th className={`${thClass} text-right`}>Pool</th>
                                         <th className={`${thClass} text-right`}>Per entry</th>
                                         <th className={`${thClass} text-right`}>Max positions</th>
-                                        <th className={`${thClass} text-right`}>Max exposure</th>
+                                        <th className={`${thClass} text-right`} title="% sizing takes a share of the remaining cash per layer: 1 − (1 − p)^max positions of the pool; fixed sizing is size × max positions">Max exposure</th>
                                         <th className={`${thClass} text-right`}>Order cap</th>
-                                        <th className={`${thClass} text-right`}>Deployed now</th>
+                                        <th className={`${thClass} text-right`} title="Capital locked in open positions: margin = size × entry ÷ leverage">Deployed now</th>
                                         <th className={thClass}>Pairs</th>
                                     </tr>
                                 </thead>
@@ -1606,19 +1884,19 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                     <ModeBadge mode={r.mode} short className="text-3xs!" />
                                                 </div>
                                             </td>
-                                            <td className="px-3 py-1.5 text-right font-num font-bold text-text">${safeNum(r.pool, 0)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num font-bold text-text" title={fmtMoneyTitle(r.ccy)}>{fmtMoney(r.pool, r.ccy, { digits: 0 })}</td>
                                             <td className="px-3 py-1.5 text-right font-num text-muted">
-                                                ${safeNum(r.entryUsd, 0)} <span className="text-faint">({r.isFixed ? 'fixed' : `${safeNum(r.entryPct, 0)}%`})</span>
+                                                {fmtMoney(r.entryUsd, r.ccy, { digits: 0 })} <span className="text-faint">({r.isFixed ? 'fixed' : `${safeNum(r.entryPct, 0)}%`})</span>
                                             </td>
                                             <td className="px-3 py-1.5 text-right font-num text-muted">{r.maxPositions}</td>
                                             <td className="px-3 py-1.5 text-right font-num text-muted">
-                                                ${safeNum(r.exposureUsd, 0)} <span className="text-faint">({safeNum(r.exposurePct, 0)}%)</span>
+                                                {fmtMoney(r.exposureUsd, r.ccy, { digits: 0 })} <span className="text-faint">({safeNum(r.exposurePct, 0)}%)</span>
                                             </td>
-                                            <td className={`px-3 py-1.5 text-right font-num ${r.cap > 0 ? 'text-muted' : 'text-faint'}`}>{r.cap > 0 ? `$${safeNum(r.cap, 0)}` : (r.mode === 'live' ? 'none!' : '—')}</td>
+                                            <td className={`px-3 py-1.5 text-right font-num ${r.cap > 0 ? 'text-muted' : 'text-faint'}`} title="Max order value — quote notional per order">{r.cap > 0 ? fmtMoney(r.cap, quoteOf(r.symbols[0]) || r.ccy, { digits: 0 }) : (r.mode === 'live' ? 'none!' : '—')}</td>
                                             <td className="px-3 py-1.5 text-right font-num">
                                                 {r.openCount > 0 ? (
-                                                    <span className="text-accent font-bold">${safeNum(r.deployed, 0)} <span className="text-faint font-normal">· {r.openCount} open · ${safeNum(r.free, 0)} free</span></span>
-                                                ) : <span className="text-faint">idle · ${safeNum(r.pool, 0)} free</span>}
+                                                    <span className="text-accent font-bold">{fmtMoney(r.deployed, r.ccy, { digits: 0 })} <span className="text-faint font-normal">· {r.openCount} open · {fmtMoney(r.free, r.ccy, { digits: 0 })} free</span></span>
+                                                ) : <span className="text-faint">idle · {fmtMoney(r.pool, r.ccy, { digits: 0 })} free</span>}
                                             </td>
                                             <td className="px-3 py-1.5 font-num text-muted">
                                                 <span className="text-text font-bold">{r.symbols.length}</span>
@@ -1643,13 +1921,13 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                 <tbody className="text-xs">
                                     {allocation.byPair.map(r => (
                                         <tr key={r.key} className="border-b border-border/40 hover:bg-overlay/50 transition-colors">
-                                            <td className="px-3 py-1.5 font-bold text-text">{r.label}</td>
+                                            <td className="px-3 py-1.5 font-bold text-text">{r.label}{allocation.mixedCcy && <span className="ml-1.5 text-3xs font-num text-muted font-normal">{r.ccy || '?'}</span>}</td>
                                             <td className="px-3 py-1.5 text-right font-num text-muted">{r.bots.length}</td>
-                                            <td className="px-3 py-1.5 text-right font-num text-muted" title="Sum of the pools this pair competes for — shared with the other pairs of each algorithm">${safeNum(r.poolAccess, 0)}</td>
-                                            <td className="px-3 py-1.5 text-right font-num text-muted" title="What one entry signal on this pair may commit, summed over all algorithms">${safeNum(r.maxEntry, 0)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted" title="Sum of the pools this pair competes for — shared with the other pairs of each algorithm">{fmtMoney(r.poolAccess, r.ccy, { digits: 0 })}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted" title="What one entry signal on this pair may commit, summed over all algorithms">{fmtMoney(r.maxEntry, r.ccy, { digits: 0 })}</td>
                                             <td className="px-3 py-1.5 text-right font-num">
                                                 {r.openCount > 0
-                                                    ? <span className="text-accent font-bold">${safeNum(r.deployed, 0)} <span className="text-faint font-normal">· {r.openCount} open</span></span>
+                                                    ? <span className="text-accent font-bold">{fmtMoney(r.deployed, r.ccy, { digits: 0 })} <span className="text-faint font-normal">· {r.openCount} open</span></span>
                                                     : <span className="text-faint">idle</span>}
                                             </td>
                                             <td className="px-3 py-1.5 font-num text-faint"><span className="truncate inline-block max-w-[320px] align-bottom" title={r.bots.join(', ')}>{r.bots.join(', ')}</span></td>
@@ -1692,22 +1970,34 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             <tbody className="text-xs">
                                 {activePositions.map(pos => {
                                     const pnl = getLivePnl(pos);
-                                    const hasPrice = !!livePrices[pos.symbol];
+                                    const hasPrice = !!livePriceOf(pos);
+                                    const side = positionSide(pos);
+                                    const lev = Math.max(1, Number(pos.leverage) || 1);
+                                    const ccy = ccyOrNull(rowCurrency(pos));
+                                    const quote = quoteOf(pos.symbol);
+                                    const real = REAL_MODES.has(pos.mode);
+                                    const closeLabel = real ? (side === 'short' ? 'Buy to cover' : 'Sell at market') : 'Close';
+                                    const closeTitle = real
+                                        ? (side === 'short' ? 'Places a reduce-only market buy on the exchange' : 'Places a market sell on the exchange')
+                                        : 'Closes the simulated position at the last local price';
                                     return (
                                         <tr key={pos.id} className="border-b border-border/40 hover:bg-overlay/50 transition-colors">
                                             <td className="px-3 py-2 font-bold text-text">
                                                 <span className="align-middle">{pos.bot_name}</span>
                                                 <ModeBadge mode={pos.mode} short className="ml-2 text-3xs!" />
                                             </td>
-                                            <td className="px-3 py-2 text-accent font-bold uppercase text-2xs">{pos.exchange || 'okx'}</td>
+                                            <td className="px-3 py-2 text-accent font-bold uppercase text-2xs">{rowExchange(pos) || '—'}</td>
                                             <td className="px-3 py-2 font-bold text-text font-num">{pos.symbol}</td>
-                                            <td className="px-4 py-3">
-                                                <Badge variant={pos.side === 'long' ? 'success' : 'danger'} className="text-3xs!">{pos.side}</Badge>
+                                            <td className="px-3 py-2">
+                                                <Badge variant={side === 'long' ? 'success' : 'danger'} className="text-3xs!">{side.toUpperCase()}</Badge>
+                                                {lev > 1 && (
+                                                    <Badge variant="warn" className="ml-1 text-3xs!" title={`Perpetual swap at ${lev}× — margin ≈ ${fmtMoney(positionMargin(pos), ccy)}${ccy && ccy === symbolParts(pos.symbol).base ? ` (inverse: margin and PnL in ${ccy})` : ''}`}>{lev}×</Badge>
+                                                )}
                                             </td>
-                                            <td className="px-3 py-2 text-right font-num text-muted">${safeNum(pos.entry_price)}</td>
+                                            <td className="px-3 py-2 text-right font-num text-muted" title={fmtMoneyTitle(quote)}>{fmtMoney(pos.entry_price, quote)}</td>
                                             <td className="px-3 py-2 text-right font-num text-muted">{formatCrypto(pos.amount)}</td>
-                                            <td className={`px-3 py-2 text-right font-num font-bold ${hasPrice ? pnlColor(pnl.abs) : 'text-muted'}`}>
-                                                {hasPrice ? `${pnl.abs >= 0 ? '+' : '-'}$${safeNum(Math.abs(pnl.abs))}` : '—'}
+                                            <td className={`px-3 py-2 text-right font-num font-bold ${hasPrice ? pnlColor(pnl.abs) : 'text-muted'}`} title={fmtMoneyTitle(ccy)}>
+                                                {hasPrice ? signed(pnl.abs, ccy) : '—'}
                                             </td>
                                             <td className={`px-3 py-2 text-right font-num font-bold ${hasPrice ? pnlColor(pnl.pct) : 'text-muted'}`}>
                                                 {hasPrice ? `${pnlSign(pnl.pct)}${safeNum(pnl.pct, 2)}%` : '—'}
@@ -1716,9 +2006,9 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                 {/* No "Drop" on an open row: deleting the record of a live
                                                     position would orphan the coins on the exchange. Close it
                                                     first; the closed row keeps the delete action. */}
-                                                <Button variant={REAL_MODES.has(pos.mode) ? 'danger' : 'secondary'} size="sm" loading={closingId === pos.id} disabled={busyAction && closingId !== pos.id} onClick={() => forceClosePosition(pos)}
-                                                    title={REAL_MODES.has(pos.mode) ? 'Places a market sell on the exchange' : 'Closes the simulated position at the last local price'}>
-                                                    {REAL_MODES.has(pos.mode) ? 'Sell at market' : 'Close'}
+                                                <Button variant={real ? 'danger' : 'secondary'} size="sm" loading={closingId === pos.id} disabled={busyAction && closingId !== pos.id} onClick={() => forceClosePosition(pos)}
+                                                    title={closeTitle}>
+                                                    {closeLabel}
                                                 </Button>
                                             </td>
                                         </tr>
@@ -1770,13 +2060,14 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                 description="No closed trades match your current filters. Adjust the filters above or wait for a bot to close a position."
                             />
                         ) : (
-                            <table className="w-full text-left whitespace-nowrap min-w-[860px] relative">
+                            <table className="w-full text-left whitespace-nowrap min-w-[920px] relative">
                                 <thead className="bg-surface text-muted sticky top-0 z-10 border-b border-border">
                                     <tr>
                                         <th className={thClass}>Date Closed</th>
                                         <th className={thClass}>Algorithm</th>
                                         <th className={thClass}>Exchange</th>
                                         <th className={thClass}>Pair</th>
+                                        <th className={thClass}>Side</th>
                                         <th className={`${thClass} text-right`}>Entry → Exit</th>
                                         <th className={`${thClass} text-right`}>Size</th>
                                         <th className={`${thClass} text-right`}>Hold</th>
@@ -1801,6 +2092,8 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                             return (entryTs && closedTs > entryTs) ? closedTs - entryTs : 0;
                                         })();
                                         const posFees = feesByPosId[pos.id] || 0;
+                                        const ccy = ccyOrNull(rowCurrency(pos));
+                                        const quote = quoteOf(pos.symbol);
                                         return (
                                             <tr key={pos.id} className="border-b border-border/40 hover:bg-overlay/50 transition-colors group">
                                                 <td className="px-3 py-1.5 font-num text-muted text-2xs">
@@ -1810,13 +2103,14 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                     <span className="align-middle">{pos.bot_name}</span>
                                                     <ModeBadge mode={pos.mode} short className="ml-1.5 text-3xs!" />
                                                 </td>
-                                                <td className="px-3 py-1.5 text-accent font-bold uppercase text-2xs">{pos.exchange || 'okx'}</td>
-                                                <td className="px-3 py-1.5 font-bold font-num text-text">{pos.symbol}</td>
-                                                <td className="px-3 py-1.5 text-right font-num text-2xs">
-                                                    <span className="text-muted">${safeNum(pos.entry_price)}</span>
+                                                <td className="px-3 py-1.5 text-accent font-bold uppercase text-2xs">{rowExchange(pos) || '—'}</td>
+                                                <td className="px-3 py-1.5 font-bold font-num text-text">{pos.symbol}{(Number(pos.leverage) || 1) > 1 && <span className="ml-1 text-3xs text-warn" title={`Perpetual swap at ${pos.leverage}× — margin ≈ ${fmtMoney(positionMargin(pos), ccy)}`}>{Number(pos.leverage)}×</span>}</td>
+                                                <td className="px-3 py-1.5"><Badge variant={positionSide(pos) === 'long' ? 'success' : 'danger'} className="text-3xs!">{positionSide(pos).toUpperCase()}</Badge></td>
+                                                <td className="px-3 py-1.5 text-right font-num text-2xs" title={fmtMoneyTitle(quote)}>
+                                                    <span className="text-muted">{fmtMoney(pos.entry_price, quote)}</span>
                                                     <span className="text-faint mx-1">→</span>
                                                     <span className={exitPrice ? pnlColor(pos.profit_abs) : 'text-muted'}>
-                                                        {exitPrice ? `$${safeNum(exitPrice)}` : '—'}
+                                                        {exitPrice ? fmtMoney(exitPrice, quote) : '—'}
                                                     </span>
                                                 </td>
                                                 <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">{formatCrypto(pos.amount)}</td>
@@ -1826,11 +2120,11 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                         {pnlSign(pos.profit_pct)}{safeNum(pos.profit_pct)}%
                                                     </span>
                                                 </td>
-                                                <td className={`px-3 py-1.5 text-right font-num font-bold ${pnlColor(pos.profit_abs)}`}>
-                                                    {(pos.profit_abs || 0) >= 0 ? '+' : '-'}${safeNum(Math.abs(pos.profit_abs || 0))}
+                                                <td className={`px-3 py-1.5 text-right font-num font-bold ${pnlColor(pos.profit_abs)}`} title={fmtMoneyTitle(ccy)}>
+                                                    {signed(pos.profit_abs || 0, ccy)}
                                                 </td>
-                                                <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">
-                                                    {posFees > 0 ? `-$${safeNum(posFees, 4)}` : '—'}
+                                                <td className="px-3 py-1.5 text-right font-num text-muted text-2xs" title={fmtMoneyTitle(ccy)}>
+                                                    {posFees > 0 ? `-${fmtFee(posFees, ccy)}` : '—'}
                                                 </td>
                                                 <td className="px-3 py-1.5 text-center opacity-60 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
                                                     <button onClick={() => deleteHistoricalTrade(pos.id)} className="text-muted hover:text-danger transition-colors font-bold text-xs" aria-label="Delete trade">✕</button>
@@ -1895,18 +2189,25 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                 <span className="align-middle">{order.bot_name}</span>
                                                 <ModeBadge mode={order.mode} short className="ml-1.5 text-3xs!" />
                                             </td>
-                                            <td className="px-3 py-1.5 text-accent font-bold uppercase text-2xs">{order.exchange || 'okx'}</td>
+                                            <td className="px-3 py-1.5 text-accent font-bold uppercase text-2xs">{rowExchange(order) || '—'}</td>
                                             <td className="px-3 py-1.5 font-bold font-num text-text">{order.symbol}</td>
                                             <td className="px-3 py-1.5">
-                                                <span className={`font-bold uppercase text-2xs ${order.side === 'buy' ? 'text-success' : 'text-danger'}`}>
-                                                    {order.side}
-                                                </span>
+                                                {(() => {
+                                                    const action = orderAction(order);
+                                                    const tip = { BUY: 'Buy — opens/adds to a long', SELL: 'Sell — closes a long', SHORT: 'Sell, not reduce-only on a perpetual — opens a short', COVER: 'Reduce-only buy — closes a short' }[action];
+                                                    return (
+                                                        <span className={`font-bold uppercase text-2xs ${action === 'BUY' || action === 'COVER' ? 'text-success' : 'text-danger'}`} title={tip}>
+                                                            {action}
+                                                        </span>
+                                                    );
+                                                })()}
                                                 <span className="ml-1.5 text-muted text-3xs uppercase">{order.order_type}</span>
+                                                {!!order.reduce_only && <span className="ml-1.5 text-faint text-3xs uppercase" title="reduce-only">RO</span>}
                                             </td>
-                                            <td className="px-3 py-1.5 text-right font-num text-text">${safeNum(order.price)}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-text" title={fmtMoneyTitle(quoteOf(order.symbol))}>{fmtMoney(order.price, quoteOf(order.symbol))}</td>
                                             <td className="px-3 py-1.5 text-right font-num text-muted">{formatCrypto(order.amount)}</td>
-                                            <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">
-                                                {order.fee > 0 ? `-$${safeNum(order.fee, 4)}` : '—'}
+                                            <td className="px-3 py-1.5 text-right font-num text-muted text-2xs" title={fmtMoneyTitle(order.fee_currency || rowCurrency(order))}>
+                                                {order.fee > 0 ? `-${fmtFee(order.fee, order.fee_currency || rowCurrency(order))}` : '—'}
                                             </td>
                                             <td className="px-3 py-1.5 text-right">
                                                 <Badge

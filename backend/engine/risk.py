@@ -3,8 +3,26 @@ tracker keeps one realized-equity state per (bot, mode group), lazily rebuilt
 from closed positions; `unrealized_pnl` marks the open positions to the
 latest stored close so the gates measure the same curve as the backtest."""
 import threading
+from sqlalchemy import func
+from backend.engine import pnl
+from backend.engine.sizing import position_spec
 from backend.models.candles import Candle
 from backend.models.positions import Position
+
+
+MODES_BY_GROUP = {
+    "backtest": ("backtest",),
+    "forward": ("forward_test",),
+    "live": ("paper", "live"),
+}
+
+
+def mode_group_for(mode):
+    """Drawdown group a position/bot mode belongs to."""
+    for group, modes in MODES_BY_GROUP.items():
+        if mode in modes:
+            return group
+    return "live"
 
 
 class DrawdownTracker:
@@ -16,7 +34,9 @@ class DrawdownTracker:
 
     def get(self, bot_name, db, mode_group="live", starting_capital=1000.0, peak_reset_at=None):
         """Return cached drawdown state, lazy-initializing from DB on first access.
-        mode_group: "backtest" for backtest-only, "live" for forward_test/paper/live.
+        mode_group: "backtest" for backtest-only, "forward" for forward_test,
+        "live" for paper/live (see `mode_group_for`) — a simulated forward
+        loss never counts against the real-money curve.
         starting_capital: wallet size used as equity base for percentage calculation.
         peak_reset_at: naive-UTC datetime; closes before it only move the equity
         base (block_entries cooldown started a new drawdown campaign there)."""
@@ -27,11 +47,14 @@ class DrawdownTracker:
         query = db.query(Position.profit_abs, Position.closed_at).filter(
             Position.bot_name == bot_name, Position.status == "closed"
         )
-        if mode_group == "backtest":
-            query = query.filter(Position.mode == "backtest")
-        else:
-            query = query.filter(Position.mode.in_(["forward_test", "paper", "live"]))
+        query = query.filter(Position.mode.in_(MODES_BY_GROUP.get(mode_group, MODES_BY_GROUP["live"])))
         closed = query.order_by(Position.closed_at).all()
+        # Partial exits book their PnL on the still-open position as they
+        # fill (and `update` the state per leg), so the realized curve
+        # includes them before the last leg closes
+        open_realized = db.query(func.coalesce(func.sum(Position.profit_abs), 0.0)).filter(
+            Position.bot_name == bot_name, Position.status == "open",
+            Position.mode.in_(MODES_BY_GROUP.get(mode_group, MODES_BY_GROUP["live"]))).scalar() or 0.0
         running = 0.0
         peak_equity = starting_capital
         dd = 0.0
@@ -44,12 +67,15 @@ class DrawdownTracker:
             peak_equity = max(peak_equity, equity)
             if peak_equity > 0:
                 dd = max(dd, ((peak_equity - equity) / peak_equity) * 100)
+        running += float(open_realized)
+        peak_equity = max(peak_equity, starting_capital + running)
         with self.lock:
             self.cache.setdefault(cache_key, {"starting_capital": starting_capital, "peak_equity": peak_equity, "running_pnl": running, "max_dd": dd})
             return self.cache[cache_key]
 
     def update(self, bot_name, mode_group, profit_abs):
-        """Incrementally update drawdown cache when a position closes."""
+        """Incrementally update the drawdown state with the realized PnL of
+        one closed leg (partial or final)."""
         cache_key = (bot_name, mode_group)
         with self.lock:
             s = self.cache.get(cache_key)
@@ -80,19 +106,25 @@ class DrawdownTracker:
         return max(dd, 0.0), max(loss, 0.0)
 
 
-def unrealized_pnl(db, positions, exchange, timeframe, close_cache):
-    """Open PnL of `positions` at each symbol's latest stored close (one
-    Candle query per symbol per tick, memoized in `close_cache`)."""
+def unrealized_pnl(db, positions, exchange, timeframe, close_cache, candle_ts=None):
+    """Open PnL of `positions` at each symbol's stored close at or before
+    `candle_ts` (the latest close when None) — one Candle query per symbol
+    per tick, memoized in `close_cache`. Windowing at `candle_ts` keeps a
+    backlog replay from marking old positions to today's price."""
     total = 0.0
     for p in positions:
         key = (p.exchange or exchange, p.symbol)
         if key not in close_cache:
-            row = db.query(Candle.close).filter(
+            q = db.query(Candle.close).filter(
                 Candle.exchange == key[0], Candle.symbol == p.symbol, Candle.timeframe == timeframe
-            ).order_by(Candle.timestamp.desc()).first()
+            )
+            if candle_ts is not None:
+                q = q.filter(Candle.timestamp <= candle_ts)
+            row = q.order_by(Candle.timestamp.desc()).first()
             close_cache[key] = float(row[0]) if row and row[0] is not None else None
         last = close_cache[key]
         if last is None:
             continue
-        total += (last - (p.entry_price or 0.0)) * (p.amount or 0.0)
+        spec = position_spec(p.symbol, p.contract_kind, p.contract_size, p.exchange or exchange)
+        total += pnl.price_pnl(p.side, p.entry_price or 0.0, last, p.amount or 0.0, spec=spec)
     return total

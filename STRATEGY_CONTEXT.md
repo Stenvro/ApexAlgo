@@ -2,17 +2,17 @@
 
 > Paste this file into any AI assistant (or point it at the raw GitHub URL) and ask for a strategy. Everything it produces will then be **directly importable** into ApexAlgo (Bot Manager → Import) and, more importantly, will be designed around how the engine actually trades — not around indicator folklore.
 
-**If you are the AI reading this:** you are designing a real trading system that will run on real money. Sections 1–3 tell you how the engine executes; section 4 is the design playbook you must follow; section 5 is the exact file format; section 6 has three vetted templates to start from. Work through the checklist at the end of section 4 before you output anything.
+**If you are the AI reading this:** you are designing a real trading system that will run on real money. Sections 1–3 tell you how the engine executes; section 4 is the design playbook you must follow; section 5 is the exact file format; section 6 has four vetted templates to start from (three long-only spot, one long/short perpetual). Work through the checklist at the end of section 4 before you output anything.
 
 ---
 
 ## 1. What ApexAlgo is — and how it executes
 
-ApexAlgo is a no-code, **long-only spot** trading bot. A strategy is a graph of nodes:
+ApexAlgo is a no-code trading bot for **spot** markets and **perpetual swaps** (leverage 1–10×) — linear contracts settled in a stablecoin (`BTC/USDT:USDT`) or inverse, coin-margined contracts settled in the base coin (`BTC/USD:BTC`). Every bot keeps its books in one **cash currency**: the quote of its spot pairs (USDT, USDC, EUR, …) or the settle currency of its perpetuals; all pairs of a bot must share it, and `backtest_capital`, `fixed` sizes, PnL and the guards are all in that currency. The default and the vetted templates are long-only spot; on a perpetual the graph may also short. A strategy is a graph of nodes:
 
 ```
-Indicator / Price Data ──> Condition ──> Logic Gate (optional) ──> Action (BUY / SELL)
-                                                                      └──> Take Profit / Stop Loss nodes (attached to the BUY action)
+Indicator / Price Data ──> Condition ──> Logic Gate (optional) ──> Action (BUY / SELL, and on perps SHORT / COVER)
+                                                                      └──> Take Profit / Stop Loss nodes (attached to the BUY or SHORT action)
 ```
 
 The engine evaluates the whole graph once per **closed candle**, per pair. Knowing exactly what happens on that tick is what separates strategies that look good from strategies that make money:
@@ -21,15 +21,17 @@ The engine evaluates the whole graph once per **closed candle**, per pair. Knowi
 |---|---|
 | **Evaluation moment** | On the close of each candle. `offset: 0` on a price node means *the candle that just closed*, not a still-forming candle. |
 | **Entry fill** | At the close price of the signal candle, plus `slippage` %. Fee is charged on the notional. |
-| **Direction** | Long only. `BUY` opens, `SELL` closes. There is no shorting and no leverage. |
+| **Direction** | `BUY` opens a long, `SELL` closes it. On a perpetual market (`market_type: swap`) `SHORT` opens a short and `COVER` closes it; long and short never coexist on a pair (the conflicting signal is ignored, BUY wins when both fire). Spot bots cannot short (validator error). Leverage only on swaps (`leverage`, default 1). |
 | **Positions per pair** | **Pyramiding up to `max_positions`.** A BUY signal while a position is already open on that pair opens another layer until the limit is reached (`per_pair` = per symbol, `global` = across all pairs of the bot). Each layer has its own SL/TP levels (anchored to its own entry) and is exited independently; a strategy **SELL signal flattens every open layer on that pair**. A layer opened on a candle is not exit-checked until the next candle. `max_positions: 1` gives the classic one-position-per-pair behaviour. Backtest and live apply the same rule. |
 | **Re-entry** | The moment a position closes, the next candle whose entry condition is true opens a new one. A *state* condition (e.g. `RSI < 30`) that stays true for 10 candles will therefore re-enter immediately after every exit — see §4.2. |
-| **Exit checks** | Every candle while a position is open, in this order: **stop-losses** (against the candle low) → **take-profits** (against high/low) → **strategy SELL signal** (at close). Only one group fires per candle; a hit stop-loss suppresses take-profits on the same candle. |
-| **Trailing anchor** | Trailing levels use the highest high reached **before** the current candle, so one candle cannot both raise the trail and trigger it against its own low. |
+| **Exit checks** | Every candle while a position is open, in this order: **stop-losses** (against the candle low) → **take-profits** (against high/low) → **strategy SELL signal** (at close). Only one group fires per candle; a hit stop-loss suppresses take-profits on the same candle. For a short every level is mirrored: the stop sits above the entry and is hit by the high, the target below and is hit by the low, the strategy exit is the COVER signal. |
+| **Trailing anchor** | Trailing levels use the highest high (lowest low for a short) reached **before** the current candle, so one candle cannot both raise the trail and trigger it against its own low. |
+| **Leverage (swaps)** | An entry locks `notional / leverage` plus the entry fee on the notional; PnL is on the full notional. `profit_pct` is the return on that locked capital (margin + entry fee) — at 5× a 2% price move is a ~10% `profit_pct`. Linear contracts: PnL = `±(exit − entry) × amount`. Inverse contracts (`BTC/USD:BTC`): `amount` is contracts of `contract_size` USD, PnL = `±contracts × contract_size × (1/entry − 1/exit)` in the base coin. Funding settlements stored for the pair are charged on open positions (a long pays a positive rate, a short receives it; `funding_paid` per position, `funding` status in the summary). |
+| **Liquidation (swaps)** | Linear: a long is liquidated when the candle low reaches `entry × (1 − (1 − 0.5%) / leverage)`, a short when the high reaches `entry × (1 + (1 − 0.5%) / leverage)`; a 1× long never liquidates, a 1× short liquidates at +99.5%. Inverse: `entry × lev / (lev + 1 − 0.5%)` (long) and `entry × lev / (lev − 1 + 0.5%)` (short). Order on a candle that reaches the level: SL/TP are evaluated **first**; a stop that fills before the level (e.g. at the open) is a normal exit. Only when no exit fills, or the fill would be at or beyond the liquidation price, is the layer liquidated — the margin and the entry fee are lost, no exit fee. Same rule in backtest, forward test and live. The 0.5% is replaced by the pair's exchange tier rate when tiers are stored (`mmr_source`). With `margin_mode: cross` the whole bot pool backs every position: nothing liquidates per position, but when the account's equity falls to its total maintenance margin every open position is liquidated and the pool is gone. |
 | **Gaps** | If a candle opens beyond the trigger, the fill is at the open (worse for stops, better for targets). |
 | **Partial exits** | `close_amount_value` is a % of the *original* position. Each TP/SL tier fires once. A 100% tier closes whatever is left. |
-| **Sizing** | `amount_type: percentage` = % of the **currently available cash** in the shared pool (all pairs of the bot share one pool). Capital is locked while a position is open, so 50% sizing on two pairs = fully invested. `fixed` = fixed USD. |
-| **Cooldown** | `cooldown_trades` new entries per `cooldown_candles` candles, per bot (all pairs). |
+| **Sizing** | `amount_type: percentage` = % of the **free cash remaining** in the shared pool (all pairs of the bot share one pool; free = not locked in open positions, *not* mark-to-market equity). Sizes compound: with 50% on two pairs the first entry takes 50% of the pool, the second 50% of what is left (25%), so the bot is never fully invested by percentage sizing alone. Entries are clamped so margin + entry fee fit the pool and to `max_order_value` (quote notional). `fixed` = a fixed amount in the bot's cash currency. |
+| **Cooldown** | `cooldown_trades` new entries per `cooldown_candles` candles, counted **per symbol** and in candles (the window is the last N stored candles of that pair, in the backtest and live alike). |
 | **Warm-up** | Any indicator that is still NaN makes its condition *false*, never true. A 200-EMA eats the first 200 candles of the lookback. |
 | **Backtest ≙ live** | Paper/live trading runs the same node graph and the same exit rules on the same closed candles. What differs is fills (real order book) and sizing (see `live_allocation_pct`). |
 | **Guards** | `max_drawdown` (peak-to-trough on mark-to-market equity) and `max_capital_loss` (loss of starting capital) stop or wind down the bot — in the backtest *and* live. A backtest that breaches the guard prevents the bot from going live. |
@@ -41,7 +43,7 @@ The engine evaluates the whole graph once per **closed candle**, per pair. Knowi
 ### 2.1 Configuration nodes (one of each)
 
 **Main Configuration** — name, timeframe (must be supported by the exchange, §5.3), `max_positions` + scope, cooldown, `max_drawdown`, `max_capital_loss`, `drawdown_action`, `drawdown_cooldown_days`, `max_order_value`, `live_allocation_pct`, execution mode.
-**Asset Whitelist** — pairs as `BASE/QUOTE`, e.g. `BTC/USDC, ETH/USDC`. All pairs share one capital pool.
+**Asset Whitelist** — pairs as `BASE/QUOTE`, e.g. `BTC/USDC, ETH/USDC` (perpetuals as `BASE/QUOTE:SETTLE`). All pairs share one capital pool and must settle in the same cash currency (`BTC/USDT` + `ETH/BTC` is rejected).
 **Backtest Engine** — run on start, start capital, lookback (candles).
 **Exchange Routing** — with an API key: exchange + sandbox/live derived from the key. Without: pick a *data exchange*; the bot forward-tests locally (no orders). Supported: OKX, Binance, Bitvavo, Coinbase, Crypto.com, Kraken, KuCoin.
 
@@ -123,7 +125,7 @@ The backend enforces this allowlist — never invent a method name.
 
 ### 2.6 Action node and risk nodes
 
-BUY action: order type, sizing, fee, slippage, and the attached TP/SL tiers. SELL action: closes the position (partially with `amount_value < 100`).
+BUY action: order type, sizing, fee, slippage, and the attached TP/SL tiers. SELL action: closes the position (partially with `amount_value < 100`). On a perpetual market the action's direction can also be SHORT (opens a short; same fields and TP/SL ports as BUY, stored as `trade_settings.short`) or COVER (closes the short, `trade_settings.cover`). The table below is written for a long; for a short every level is mirrored (stop above entry hit by the high, target below hit by the low, trailing anchored to the lowest low).
 
 | TP/SL `type` | Stop-loss meaning | Take-profit meaning |
 |---|---|---|
@@ -208,7 +210,7 @@ Aim for **reward:risk ≥ 1.5** on fixed targets, and let trailing stops handle 
 ### 4.6 Position sizing and portfolio guards
 
 - **`amount_value` 25–50%** per trade for 2–4 pairs, so the pool can hold several positions; 100% on a single pair is acceptable for a pure trend follower with a trailing stop.
-- Always set **`max_drawdown`** with **`drawdown_action: "block_entries"`** and **`max_capital_loss` 30–40**. Size the drawdown limit to the strategy: fully-invested daily trend following on BTC/ETH runs 25–32% drawdowns in normal bear phases (buy & hold ran 59% in the same window), so set **30–35** there; 15–20 is right only for low-exposure or short-holding strategies. A limit below the strategy's natural drawdown makes the backtest pause entries for weeks (`entries_blocked_days` in the summary shows this) and the live bot will do the same.
+- Always set **`max_drawdown`** with **`drawdown_action: "block_entries"`** and **`max_capital_loss` 30–40**. Size the drawdown limit to the strategy: daily trend following on BTC/ETH at 50% sizing (≈ 75% invested when both are open — the second entry is 50% of the remaining cash) runs 25–32% drawdowns in normal bear phases (buy & hold ran 59% in the same window), so set **30–35** there; 15–20 is right only for low-exposure or short-holding strategies. A limit below the strategy's natural drawdown makes the backtest pause entries for weeks (`entries_blocked_days` in the summary shows this) and the live bot will do the same.
 - `close_all` is right only for strategies whose exits are *not* trend-following.
 - Add a light **cooldown** (e.g. `cooldown_trades: 1, cooldown_candles: 3–6`) to trend systems to stop whipsaw re-entries around a flat moving average.
 - Multi-pair: 2–3 liquid majors (`BTC`, `ETH`, optionally `SOL`). Correlation is high, so treat them as one bet when choosing `amount_value`. Adding SOL to the daily templates lowered the return in our tests; more pairs ≠ more diversification here.
@@ -235,7 +237,7 @@ Aim for **reward:risk ≥ 1.5** on fixed targets, and let trailing stops handle 
 | `==` on a float line (`rsi == 30`) | never exactly equal | `cross_above` / `>=` |
 | `increasing_for` without a number in `right` | defaults to 2, probably not what you meant | put N (e.g. `3`) in `right` |
 | `ichimoku` output 4 (chikou) | look-ahead — disabled, always false | use 0–3 |
-| Mixing `symbol` quotes (`BTC/USDT` + `ETH/USDC`) | separate balances live | one quote currency per bot |
+| Mixing cash currencies (`BTC/USDT` + `ETH/BTC`) | one pool cannot hold two currencies — the validator rejects it | one quote (spot) / settle (swap) currency per bot |
 | `4h` on Coinbase, `3m` on Kraken | unsupported timeframe → import error | see §5.3 |
 | `max_drawdown: 0` | nothing stops a broken bot | 15–30 + `block_entries` + `max_capital_loss` |
 
@@ -250,6 +252,24 @@ Windows: 1d = 1 000 candles (Dec 2023 → Sep 2026, includes the 2024–25 bull 
 | `Supertrend_Trend_1d` (BTC+ETH, 50%, `max_positions` 2 global) | 1d | 26 | 42 | +26.0% | 32.0% | BTC +73%, ETH +4% |
 | `Donchian_Breakout_1d` (BTC+ETH, 50%, `max_positions` 2 global) | 1d | 20 | 60 | +19.9% | 26.3% | BTC +73%, ETH +4% |
 | `EMA_Cross_4h` (BTC+ETH+SOL, 33%, `max_positions` 3 global) | 4h | 153 | 37 | +14.2% | 26.3% | BTC +75%, ETH +7%, SOL −5% |
+| `Supertrend_LongShort_Perp_1d` (BTC+ETH USDT perps, 30%, 1×, `max_positions` 2 global) — measured 25 Sep 2026, window 30 Dec 2023 → 24 Sep 2026, fee 0.05% | 1d | 49 (26 long / 23 short) | 37 | +50.8% | 29.1% | BTC +100%, ETH +17% |
+
+**Long/short on perpetuals (measured 25 Sep 2026, Binance USDT-settled perps, taker fee 0.05%, window 30 Dec 2023 → 24 Sep 2026):** the same Supertrend(10, 3) flip, but *short while the direction is down* instead of flat. Entries are the trend **state** (`st_dir > 0` / `< 0`), exits the flip: a long and a short never coexist on a pair, so on the flip candle the old side is closed and the new side opens on the next candle from the state signal; with the flip as the only exit the state re-enters exactly once per trend. A 20% disaster stop replaces the 15% trail — a trailing stop on the state entry re-enters after every stop-out and turned the 1× result into −0.3% at 89 trades.
+
+| Variant (BTC+ETH, `max_positions` 2 global) | Lev | Trades | Win % | Return | Max DD |
+|---|---|---|---|---|---|
+| Supertrend(10, 3) state long/short, SL 20%, 30% size | 1× | 49 | 37 | **+50.8%** | 29.1% |
+| same, 40% size | 1× | 49 | 35 | +52.7% | 31.2% |
+| same, 50% size | 1× | 48 | 35 | +59.2% | 35.7% |
+| same, BTC+ETH+SOL at 33% | 1× | 78 | 33 | +38.5% | 32.5% |
+| Neighbours (10, 3.5) / (12, 3) / (14, 3) / (7, 3) / (10, 2.5), 40% | 1× | 42–75 | 30–38 | +33 / +22 / +46 / +14 / +12% | 31–34% |
+| Supertrend(14, 4) state long/short | 1× | 34 | 41 | +11.5% | 36.2% |
+| Supertrend(10, 3) state long/short, 40% | **2×** | 46 | 37 | +180% | 35.7% |
+| every neighbour above at 2× — (10, 2.5), (10, 3.5), (12, 3), (14, 4) | 2× | 10–18 | 14–22 | **−30 to −39%** (stopped by `max_capital_loss`) | 33–46% |
+| EMA 21/55 state long/short, ATR 3× stop, 4h and 1d | 1–2× | 16–182 | 10–34 | −33 to −41% (1d 21/55 at 1× the only positive: +8.9%) | 32–38% |
+| Supertrend(10, 3) state long/short on 4h, SL 15% | 2× | 43 | 23 | −35% | 31.8% |
+
+Read the 2× rows correctly: the shipped parameters happen to survive 2× leverage and every neighbour blows through the capital-loss stop — that is path luck, not an edge, which is why the template ships at **1×**. Leverage doubles the trade-level swings, and a 35% max-drawdown guard sized for 1× stops the bot before the good trend arrives. The shorts do not add return in this window (the 1d bull run rewards the long side; a long-only Supertrend gives +26% at 50% size) — they cut the time flat and the 2026 drawdown, which is what makes the smaller 30% size hold up. Funding is simulated where the exchange still serves the history (§1) — on OKX only the last ~3 months of a multi-year backtest carry it; at 1× and multi-week holds it is a few percent a year against whichever side is crowded.
 
 Original measurements (engine v1, one position per pair):
 
@@ -288,7 +308,7 @@ Take-aways: (1) simple trend following with an opposite-signal exit works across
 4. SL/TP sized for the timeframe (§4.4); reward:risk ≥ 1.5 if both are fixed.
 5. `backtest_lookback` covers several regimes and the exchange has that history; longest indicator length ≤ lookback / 10.
 6. `is_sandbox: true`, `api_execution: false`, `api_key_name: null`, `max_order_value` present.
-7. After the JSON, tell the user in 3–5 lines: what regime it targets, what the failure mode is, what to look for in the backtest (trade count, PF, DD vs. B&H), and that it must forward-test first. If the request cannot be expressed (shorting, multi-timeframe in one graph, time-of-day rules), say so instead of approximating.
+7. After the JSON, tell the user in 3–5 lines: what regime it targets, what the failure mode is, what to look for in the backtest (trade count, PF, DD vs. B&H), and that it must forward-test first. If the request cannot be expressed (shorting on a spot market, multi-timeframe in one graph, time-of-day rules), say so instead of approximating.
 
 ---
 
@@ -341,21 +361,25 @@ Output exactly **one** valid JSON document in a fenced code block. Use only meth
 | Field | Type | Description |
 |---|---|---|
 | `symbol` | string | Primary symbol (first in whitelist) |
-| `symbols` | string[] | All pairs; one quote currency per bot |
+| `symbols` | string[] | All pairs; one cash currency per bot (same quote on spot, same settle on swaps — validator error otherwise) |
 | `timeframe` | string | Must be supported by `data_exchange` (§5.3) |
 | `max_positions` | int ≥ 1 | Open positions (layers) allowed; > 1 enables pyramiding on repeated BUY signals (§2) |
 | `max_positions_scope` | `per_pair` / `global` | `per_pair` = limit per symbol, `global` = limit across all pairs of the bot |
-| `cooldown_trades` / `cooldown_candles` | int | Max new entries per window (0 = off) |
+| `cooldown_trades` / `cooldown_candles` | int | Max new entries per window of N candles, per symbol (0 = off). Whole numbers; `"5.0"` is coerced with a warning |
 | `max_drawdown` | % | Peak-to-trough on mark-to-market equity, checked after the backtest and after every closed live position. 0 = off |
 | `drawdown_action` | `close_all` / `block_entries` | `close_all`: close everything and stop (a backtest breach prevents go-live). `block_entries`: skip new entries until drawdown < half the limit, or — once flat — until `drawdown_cooldown_days` passed; then the peak resets. Exits keep working. Simulated in the backtest too |
 | `drawdown_cooldown_days` | 0–365 | Flat time before entries resume under `block_entries` (default 7) |
 | `max_capital_loss` | % | Hard stop on loss of starting capital, independent of drawdown. With `block_entries` the bot winds down (no entries, exits finish, then stops). Required > 0 for live bots using `block_entries` |
-| `max_order_value` | USD | Cap per live order (0 = off; required > 0 for live) |
-| `live_allocation_pct` | 1–100 | Paper/live: share of the exchange wallet (free quote + deployed by all bots on the key) this bot may deploy; split it between bots sharing a key. Snapshot at go-live becomes `live_starting_capital`, the base for live guards |
+| `max_order_value` | quote notional | Cap on the notional of one entry in the pair's **quote** currency (USDC on `BTC/USDC`, USD on `BTC/USD:BTC`; on swaps notional = margin × leverage). Applied in the backtest, forward test and live alike, so it is part of the strategy (changing it counts as a new variant). 0 = off; required > 0 for live |
+| `live_allocation_pct` | 1–100 | Paper/live: share of the exchange wallet (free cash currency + deployed by all bots on the key) this bot may deploy; split it between bots sharing a key. Snapshot at go-live becomes `live_starting_capital`, the base for live guards |
 | `api_execution` | bool | `true` = orders via API key |
-| `backtest_on_start` / `backtest_capital` / `backtest_lookback` | bool / USD / candles | Backtest settings |
+| `backtest_on_start` / `backtest_capital` / `backtest_lookback` | bool / cash amount / candles | Backtest settings; `backtest_capital` is in the bot's cash currency (USDC for `BTC/USDC`, BTC for `BTC/USD:BTC`) |
 | `api_key_name` | string/null | Saved key name (null = forward test) |
-| `data_exchange` | string | `okx` `binance` `bitvavo` `coinbase` `cryptocom` `kraken` `kucoin` |
+| `data_exchange` | string | `okx` `binance` `bitvavo` `coinbase` `cryptocom` `kraken` `kucoin` `bybit` `gateio` `bitget` `mexc` `htx` `bingx` |
+| `market_type` | `spot` / `swap` | Default `spot`. `swap` = perpetuals; symbols then use the `BASE/QUOTE:SETTLE` form — linear `BTC/USDT:USDT` (settled in the quote stablecoin) or inverse `BTC/USD:BTC` (coin-margined, settled in the base; BingX has no inverse contracts) — and the key must be a swap key. The kind is decided per symbol. A spot bot rejects `:SETTLE` symbols, a swap bot requires them. Not every exchange offers swaps (§5.3) |
+| `leverage` | 1–10 (int) | Swaps only (spot must be 1; Kraken max 5). Position notional = margin × leverage; `max_order_value` caps the notional. Warning above 3× (liquidation ≈ `(1 − 0.5%) / leverage` from entry — a wider stop never fires) |
+| `margin_mode` | `isolated` / `cross` | Swaps only, default `isolated`. Sent to the exchange before the first order. `isolated`: each position has its own liquidation level; `cross`: the whole bot pool backs every position and one account-level breach liquidates all of them (see §1) |
+| `short_node` / `cover_node` | string/null | Node ids for the SHORT and COVER signals (like `entry_node`/`exit_node`). Only on `swap` (validator error on spot); omit for long-only bots. A short without `cover_node`, SL or TP only warns |
 
 ### 5.3 Exchange timeframes and history
 
@@ -368,6 +392,8 @@ Output exactly **one** valid JSON document in a fenced code block. Use only meth
 | Bitvavo | `1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d` | full |
 | KuCoin | `1m 3m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 1w` | full |
 | Crypto.com | `1m 5m 15m 30m 1h 2h 4h 6h 12h 1d 1w` | full since listing |
+
+Bybit, Gate, Bitget, MEXC, HTX and BingX were added later; their timeframes come from `GET /api/data/timeframes/{exchange}` (the builder filters the dropdown). Perpetual swaps (`market_type: swap`) are available on OKX, Binance, Kraken, KuCoin, Bybit, Gate, Bitget, HTX and BingX — not on Bitvavo, Coinbase, Crypto.com or MEXC. All of them serve linear contracts; inverse (coin-margined) contracts on all but BingX.
 
 For long daily backtests prefer Binance or Coinbase data; for Kraken use ≤ 720 candles.
 
@@ -392,7 +418,9 @@ For long daily backtests prefer Binance or Coinbase data; for Kraken use ≤ 720
 }
 ```
 
-`fee`/`slippage` are percentages (`0.1` = 0.1%). `amount_type` `percentage` (% of available cash) or `fixed` (USD). TP/SL semantics in §2.6.
+`fee`/`slippage` are percentages (`0.1` = 0.1%). `amount_type` `percentage` (% of the free cash left in the pool, see §1 Sizing) or `fixed` (an amount in the bot's cash currency). On swaps the amount is the margin; the notional is `leverage` times bigger. TP/SL semantics in §2.6.
+
+Shorts (swap only): add `"short"` (same shape as `entry`, its TP/SL are the short's levels) and `"cover"` (same shape as `exit`) next to them and set `short_node`/`cover_node`. When `short` is omitted the short leg reuses `entry`; when `cover` is omitted it reuses `exit`.
 
 ### 5.5 Node definitions
 
@@ -413,7 +441,7 @@ For long daily backtests prefer Binance or Coinbase data; for Kraken use ≤ 720
 
 ## 6. Vetted templates
 
-Three complete files, identical to `examples/*.apex.json` in the repository, all imported and backtested in the real engine (results in §4.9, re-verified on v2.0.0 with `scripts/verify_examples.py`; `tests/golden/` pins their order stream on synthetic data so an engine change can never silently alter them). Adapt pairs, fee and sizes; keep the structure. Each is deliberately minimal — every addition we tried made them worse.
+Four complete files, identical to `examples/*.apex.json` in the repository, all imported and backtested in the real engine (results in §4.9, re-verified with `scripts/verify_examples.py`; `tests/golden/` pins their order stream on synthetic data so an engine change can never silently alter them). Three are long-only spot, the fourth is the long/short perpetual version of the first. Adapt pairs, fee and sizes; keep the structure. Each is deliberately minimal — every addition we tried made them worse.
 
 ### 6.1 Supertrend trend follower — 1d, flip in / flip out, 15% disaster trail
 
@@ -590,6 +618,142 @@ Backtest Dec 2023 → Sep 2026, BTC+ETH+SOL at 33%: **+15.3%, max DD 26.3%, 153 
 ```
 
 Roughly one trade per pair per week. The ATR 3× trailing stop (≈ 4–7% on 4h) closes most trades — 134 of 153 exits were the trail, at +0.9% average — while the death cross only catches slow rolls. Lower return than the daily systems but shallower single-trade losses and faster feedback for a forward test. Run at least 6 000 candles; a 2 000-candle window covers one regime only.
+
+### 6.4 Supertrend long/short on perpetuals — 1d, 1×, long in uptrend, short in downtrend
+
+Backtest 30 Dec 2023 → 24 Sep 2026, BTC+ETH USDT-settled perps at 30%: **+50.8%, max DD 29.1%, 49 trades (26 long / 23 short), 37% win rate**, 0 liquidations, entries never blocked (buy & hold: BTC +100%, ETH +17%). Neighbours at 1× all positive (+12 to +46%); at 2× only these exact parameters survive, so it ships at 1× (§4.9).
+
+```json
+{
+  "apex_version": "1.0",
+  "exported_at": "2026-09-25T12:00:00Z",
+  "bot": {
+    "name": "Supertrend Long/Short Perp 1d",
+    "is_sandbox": true,
+    "strategy": "node_evaluator",
+    "settings": {
+      "symbol": "BTC/USDT:USDT",
+      "symbols": [
+        "BTC/USDT:USDT",
+        "ETH/USDT:USDT"
+      ],
+      "timeframe": "1d",
+      "market_type": "swap",
+      "leverage": 1,
+      "margin_mode": "isolated",
+      "max_positions": 2,
+      "max_positions_scope": "global",
+      "cooldown_trades": 1,
+      "cooldown_candles": 5,
+      "max_drawdown": 35,
+      "drawdown_action": "block_entries",
+      "drawdown_cooldown_days": 14,
+      "max_capital_loss": 40,
+      "max_order_value": 1000,
+      "live_allocation_pct": 100,
+      "api_execution": false,
+      "backtest_on_start": true,
+      "backtest_capital": 1000,
+      "backtest_lookback": 1000,
+      "api_key_name": null,
+      "data_exchange": "binance",
+      "trade_settings": {
+        "entry": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 30,
+          "fee": 0.05,
+          "slippage": 0.05,
+          "take_profits": [],
+          "stop_losses": [
+            {
+              "type": "percentage",
+              "value": 20.0,
+              "close_amount_type": "percentage",
+              "close_amount_value": 100
+            }
+          ]
+        },
+        "exit": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 100,
+          "fee": 0.05,
+          "slippage": 0.05
+        },
+        "short": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 30,
+          "fee": 0.05,
+          "slippage": 0.05,
+          "take_profits": [],
+          "stop_losses": [
+            {
+              "type": "percentage",
+              "value": 20.0,
+              "close_amount_type": "percentage",
+              "close_amount_value": 100
+            }
+          ]
+        },
+        "cover": {
+          "order_type": "market",
+          "amount_type": "percentage",
+          "amount_value": 100,
+          "fee": 0.05,
+          "slippage": 0.05
+        }
+      },
+      "nodes": {
+        "st_dir": {
+          "class": "indicator",
+          "method": "supertrend",
+          "params": {
+            "length": 10,
+            "multiplier": 3.0
+          },
+          "output_idx": 1
+        },
+        "trend_up": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": ">",
+          "right": 0
+        },
+        "trend_down": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": "<",
+          "right": 0
+        },
+        "flip_up": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": "cross_above",
+          "right": 0
+        },
+        "flip_down": {
+          "class": "condition",
+          "left": "st_dir",
+          "operator": "cross_below",
+          "right": 0
+        }
+      },
+      "ui_layout": {
+        "nodes": [],
+        "edges": []
+      },
+      "entry_node": "trend_up",
+      "exit_node": "flip_down",
+      "short_node": "trend_down",
+      "cover_node": "flip_up"
+    }
+  }
+}
+```
+
+The same flip as §6.1, made two-sided: `trend_up` (`st_dir > 0`) is the BUY, `flip_down` the SELL, `trend_down` the SHORT and `flip_up` the COVER. The entries are states rather than crosses on purpose — a long and a short never coexist on a pair, so on the flip candle the old side is closed and the new side opens one candle later from the state; with the flip as the only strategy exit the state fires once per trend, and the 20% stop is a disaster stop only (a trailing stop here would re-enter after every stop-out — tested, −0.3%). `market_type: swap` with `:USDT` symbols, `leverage: 1`, `margin_mode: isolated`, taker fee 0.05% on both legs. Runs as a forward test without a key; live needs a key bound to the swap market (§5). Do not raise the leverage without re-running the backtest: the 2× rows in §4.9 show why.
 
 ---
 

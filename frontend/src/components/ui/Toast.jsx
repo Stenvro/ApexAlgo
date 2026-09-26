@@ -119,7 +119,7 @@ export const Toaster = () => {
   if (items.length === 0) return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-[200] flex flex-col gap-2 items-end pointer-events-none">
+    <div className="fixed bottom-4 right-4 z-[400] flex flex-col gap-2 items-end pointer-events-none">
       {items.map((item) => (
         <ToastItem key={item.id} item={item} onDismiss={dismiss} />
       ))}

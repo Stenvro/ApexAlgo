@@ -12,4 +12,7 @@ class ExchangeKey(Base):
     api_secret = Column(String, nullable=False)
     passphrase = Column(String, nullable=False)
     is_sandbox = Column(Boolean, default=True)
+    # One key = one market type ("spot" | "swap"): spot and perpetual
+    # accounts are separate ccxt instances (and on some exchanges separate keys)
+    market_type = Column(String, default="spot")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

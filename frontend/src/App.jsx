@@ -6,8 +6,9 @@ import BotManagerUI from './components/BotManagerUI';
 import TradeManager from './components/TradeManager';
 import Home from './components/Home';
 import ApiKeyGate from './components/ApiKeyGate';
-import Toaster from './components/ui/Toast';
+import Toaster, { toast } from './components/ui/Toast';
 import ConfirmDialogHost from './components/ui/ConfirmDialog';
+import { humanizeApiError } from './api/errors';
 import { Skeleton } from './components/ui/Skeleton';
 import { apiClient, checkSession, logout, migrateLegacyKey } from './api/client';
 
@@ -159,8 +160,11 @@ export default function App() {
             try {
                 const res = await apiClient.get(`/api/bots/by-id/${botSummary.id}`);
                 setEditingBot(res.data);
-            } catch {
-                setEditingBot(botSummary);
+            } catch (err) {
+                // The summary has no nodes/edges — opening it would show an
+                // empty canvas that "Save" could persist over the real strategy.
+                toast.error(`Could not load "${botSummary.name || 'bot'}": ${humanizeApiError(err)}`);
+                return;
             }
         } else {
             setEditingBot(null);

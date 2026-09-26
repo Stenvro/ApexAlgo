@@ -27,6 +27,23 @@ class Position(Base):
     closed_at = Column(DateTime, nullable=True)
 
     highest_price = Column(Float, nullable=True)
+    # Derivatives: "swap" positions carry leverage (margin = entry x amount /
+    # leverage) and the ccxt contract count behind `amount` (base units)
+    market_type = Column(String, default="spot")
+    leverage = Column(Float, default=1.0)
+    contracts = Column(Float, nullable=True)
+    # Currency-aware books (sprint D): the currency `profit_abs` and the
+    # margin are in, and how to read `amount` back (base units on
+    # spot/linear, contracts of `contract_size` quote units on inverse)
+    cash_currency = Column(String, nullable=True)
+    contract_kind = Column(String, nullable=True)   # "spot" | "linear" | "inverse"
+    contract_size = Column(Float, nullable=True)
+    # Funding (v2.3): sum of the simulated funding payments booked on this
+    # position (cash currency, negative = paid; already inside profit_abs)
+    # and the timestamp of the last settlement applied, so every funding
+    # event is charged exactly once (backtest and forward test only)
+    funding_paid = Column(Float, nullable=True)
+    funding_until = Column(DateTime, nullable=True)
     triggered_exits = Column(JSON, nullable=True, default=list)
 
     orders = relationship("Order", back_populates="position", cascade="all, delete-orphan")

@@ -7,6 +7,10 @@ from datetime import datetime, timezone
 from sqlalchemy import text, func
 from backend.models.bots import BotConfig
 from backend.models.positions import Position
+from backend.models.orders import Order
+from backend.engine import pnl
+from backend.engine.contracts import ContractSpec, spec_for, spec_from_symbol
+from backend.engine.symbols import cash_currency
 
 logger = logging.getLogger("apexalgo.bot_manager")
 
@@ -61,19 +65,43 @@ def _naive_utc(ts):
 # Settings that do not change what the strategy does on the data: layout,
 # order routing, live sizing, the pinned backtest window (which data, not
 # what the strategy does on it) and the engine's own runtime bookkeeping.
+# `max_order_value` is *not* here: it caps the backtest/forward sizing too,
+# so it changes the trades and counts as a variant.
 _NON_STRATEGY_KEYS = frozenset({
-    "ui_layout", "api_execution", "api_key_name", "live_allocation_pct", "max_order_value",
+    "ui_layout", "api_execution", "api_key_name", "live_allocation_pct",
     "backtest_on_start", "backtest_from", "backtest_to",
     "last_backtest_summary", "last_backtest_max_drawdown",
     "last_stop_reason", "drawdown_peak_reset_at", "live_starting_capital",
 })
 
 
+# Phase-2 (derivatives) settings at their default are dropped from the
+# fingerprint: a spot bot saved by a newer UI must hash exactly like the
+# same bot saved before these keys existed, or every variant counter bumps.
+_DEFAULT_MARKET_KEYS = {"market_type": "spot", "leverage": 1, "margin_mode": "isolated",
+                        # phase 3: absent short/cover nodes hash like a pre-shorts bot
+                        "short_node": None, "cover_node": None}
+
+
 def _config_fingerprint(settings: dict) -> str:
     """Stable hash of the strategy-relevant part of a bot's settings, used to
     count how many distinct variants have been backtested."""
     relevant = {k: v for k, v in (settings or {}).items() if k not in _NON_STRATEGY_KEYS}
+    for k, default in _DEFAULT_MARKET_KEYS.items():
+        if k in relevant and _is_default_market_setting(relevant[k], default):
+            del relevant[k]
     return md5(json.dumps(relevant, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _is_default_market_setting(value, default) -> bool:
+    if value in (None, ""):
+        return True
+    if isinstance(default, (int, float)):
+        try:
+            return float(value) == float(default)
+        except (TypeError, ValueError):
+            return False
+    return str(value).lower() == default
 
 
 def data_fingerprint(df) -> str:
@@ -144,28 +172,50 @@ def _record_config_run(db, bot_name: str, settings: dict, slice_hash: str = "", 
     return total, on_slice
 
 
-def sim_frictions(settings):
+def sim_frictions(settings, side="long"):
     """(entry_fee, exit_fee, entry_slippage, exit_slippage) as fractions
     from trade_settings — the frictions the backtest applies to every
-    simulated fill. Exit fee falls back to the entry fee when unset."""
+    simulated fill. Exit fee falls back to the entry fee when unset. For a
+    short the `short`/`cover` legs are read (falling back to entry/exit)."""
     ts = settings.get("trade_settings", {}) or {}
-    entry_fee = _num(ts.get("entry", {}).get("fee"), 0) / 100
-    raw_exit_fee = ts.get("exit", {}).get("fee")
+    open_cfg = pnl.entry_cfg(ts, side)
+    close_cfg = pnl.exit_cfg(ts, side)
+    entry_fee = _num(open_cfg.get("fee"), 0) / 100
+    raw_exit_fee = close_cfg.get("fee")
     exit_fee = _num(raw_exit_fee, entry_fee * 100) / 100 if raw_exit_fee not in (None, "") else entry_fee
-    entry_slip = _num(ts.get("entry", {}).get("slippage"), 0) / 100
-    exit_slip = _num(ts.get("exit", {}).get("slippage"), 0) / 100
+    entry_slip = _num(open_cfg.get("slippage"), 0) / 100
+    exit_slip = _num(close_cfg.get("slippage"), 0) / 100
     return entry_fee, exit_fee, entry_slip, exit_slip
 
 
+def position_spec(symbol, contract_kind=None, contract_size=None, exchange=None):
+    """`ContractSpec` for a stored position: the kind/size it was booked
+    with (so a later contract-size change on the exchange never rewrites
+    history), else the registry's cached market, else the symbol's shape."""
+    if contract_kind:
+        shape = spec_from_symbol(symbol, contract_size)
+        return ContractSpec(symbol=shape.symbol, kind=str(contract_kind), base=shape.base, quote=shape.quote,
+                            settle=shape.settle, contract_size=shape.contract_size)
+    return spec_for(exchange, symbol)
+
+
 def deployed_capital(db, bot_names, quote, modes=("paper", "live")):
-    """Quote-currency cost (entry price x amount) of the open positions of
-    the given bots in the given modes, in pairs quoted in `quote`."""
+    """Cash locked by the open positions of the given bots in the given
+    modes, in pairs funded in `quote` (the cash currency): entry price x
+    amount on spot, the margin (notional / leverage) on derivatives."""
     if not bot_names:
         return 0.0
-    rows = db.query(Position.entry_price, Position.amount, Position.symbol).filter(
+    rows = db.query(Position.entry_price, Position.amount, Position.symbol, Position.leverage,
+                    Position.contract_kind, Position.contract_size, Position.exchange).filter(
         Position.bot_name.in_(list(bot_names)), Position.status == "open",
         Position.mode.in_(list(modes))).all()
-    return sum((r[0] or 0.0) * (r[1] or 0.0) for r in rows if (r[2] or "").replace('-', '/').upper().endswith('/' + quote))
+    total = 0.0
+    for entry, amount, sym, lev, kind, size, exchange in rows:
+        spec = position_spec(sym, kind, size, exchange)
+        if spec.cash_currency != quote:
+            continue
+        total += spec.margin(amount, entry, lev if (lev and lev > 1) else 1)
+    return total
 
 
 def forward_pool(db, bot, quote):
@@ -178,7 +228,21 @@ def forward_pool(db, bot, quote):
         Position.bot_name == bot.name, Position.status == "closed",
         Position.mode == "forward_test").scalar() or 0.0
     deployed = deployed_capital(db, [bot.name], quote, modes=("forward_test",))
-    return _num(bot.settings.get("backtest_capital"), 1000) + float(realized) - deployed
+    # The entry fee left the pool on open as well (bt_equity -= cost + fee)
+    open_ids = [pid for (pid, sym) in db.query(Position.id, Position.symbol).filter(
+        Position.bot_name == bot.name, Position.status == "open",
+        Position.mode == "forward_test").all() if cash_currency(sym) == quote]
+    entry_fees = 0.0
+    open_funding = 0.0
+    if open_ids:
+        entry_fees = db.query(func.coalesce(func.sum(Order.fee), 0.0)).filter(
+            Order.position_id.in_(open_ids), Order.mode == "forward_test",
+            func.coalesce(Order.reduce_only, 0) == 0).scalar() or 0.0
+        # Funding already charged on the open positions moved the pool's
+        # cash too (closed positions carry it inside profit_abs)
+        open_funding = db.query(func.coalesce(func.sum(Position.funding_paid), 0.0)).filter(
+            Position.id.in_(open_ids)).scalar() or 0.0
+    return _num(bot.settings.get("backtest_capital"), 1000) + float(realized) - deployed - float(entry_fees) + float(open_funding)
 
 
 def live_allocation(db, bot, quote, free_balance):
@@ -198,12 +262,55 @@ def live_allocation(db, bot, quote, free_balance):
     return max(bot_total - deployed_bot, 0.0), wallet_total, bot_total
 
 
-def calculate_trade_amount(current_price, bot_settings, current_equity=None):
+def max_affordable_amount(equity, entry_price, leverage=1, fee=0.0, spec=None):
+    """Largest size whose locked capital (margin plus entry fee on the
+    notional) fits in `equity` at `entry_price`. Used to clamp percentage
+    sizing so slippage + fee never push an entry past the pool; reduces to
+    `equity / (price * (1 + fee))` on spot. Contracts on an inverse `spec`."""
+    if spec is not None and spec.is_inverse:
+        return spec.max_affordable_qty(equity, entry_price, leverage, fee)
+    lev = max(float(leverage or 1), 1.0)
+    return equity / (entry_price * (1 / lev + float(fee or 0.0)))
+
+
+def cap_by_max_order_value(trade_amount, price, settings, spec=None):
+    """Backtest/forward/live mirror of the `max_order_value` clamp: the
+    *quote* notional of one entry (USD on ``BTC/USD:BTC``, EUR on
+    ``BTC/EUR``) never exceeds the cap. `max_order_value` is defined in the
+    pair's quote currency on every market kind."""
+    cap = _num(settings.get("max_order_value"), 0)
+    if trade_amount is None or cap <= 0 or not price or price <= 0:
+        return trade_amount
+    if spec is not None and spec.is_inverse:
+        if spec.notional_quote(trade_amount, price) > cap:
+            return spec.qty_for_quote_notional(cap, price)
+        return trade_amount
+    if trade_amount * price > cap:
+        return cap / price
+    return trade_amount
+
+
+def calculate_trade_amount(current_price, bot_settings, current_equity=None, leverage=1, side="long", spec=None):
+    """Position size to buy (or sell short): base amount on spot/linear,
+    contracts on an inverse `spec`. `amount_value` is what the bot puts up
+    (in its cash currency): a `percentage` of the *free cash* in its pool
+    (`current_equity` = cash not locked in open positions, not the
+    mark-to-market equity — so a second layer at 50% is 50% of what is left,
+    not of the account), or a `fixed` cash amount; on derivatives that is the
+    margin, so the notional — and the returned size — is `leverage` times
+    bigger. Spot callers never pass leverage and get the pre-existing sizing;
+    a short reads `trade_settings.short` (fallback `entry`)."""
     if not current_price or current_price <= 0:
         logger.warning("Invalid current_price (%s), cannot calculate trade amount", current_price)
         return None
+    try:
+        leverage = float(leverage or 1)
+    except (TypeError, ValueError):
+        leverage = 1.0
+    if leverage < 1:
+        leverage = 1.0
 
-    entry_settings = bot_settings.get("trade_settings", {}).get("entry", {})
+    entry_settings = pnl.entry_cfg(bot_settings.get("trade_settings", {}), side)
     amount_type = entry_settings.get("amount_type", "percentage")
     raw_val = entry_settings.get("amount_value")
 
@@ -213,12 +320,16 @@ def calculate_trade_amount(current_price, bot_settings, current_equity=None):
         amount_value = 100.0
 
     if amount_type == "fixed":
-        trade_amount = amount_value / current_price
-        return max(trade_amount, 0.0001)
+        investment = amount_value
     else:
         capital = current_equity if current_equity is not None else _num(bot_settings.get("backtest_capital"), 1000)
         if capital <= 0:
             return None
         investment = capital * (amount_value / 100)
+    if spec is not None and spec.is_inverse:
+        trade_amount = spec.qty_for_cash(investment, current_price, leverage)
+    else:
         trade_amount = investment / current_price
-        return max(trade_amount, 0.0001)
+        if leverage != 1.0:
+            trade_amount *= leverage
+    return max(trade_amount, 0.0001)

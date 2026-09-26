@@ -14,7 +14,12 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.models.bots import BotConfig
 from backend.core.security import verify_api_key
 from backend.core.encryption import encrypt_data
-from backend.core.exchange_registry import build_exchange, get_authenticated_exchange, invalidate_authenticated_exchange, SUPPORTED_EXCHANGES
+from backend.core.exchange_registry import (
+    build_exchange, get_authenticated_exchange, invalidate_authenticated_exchange,
+    exchange_has_sandbox, EXCHANGES, SUPPORTED_EXCHANGES, market_caps, key_market_type,
+)
+from backend.engine.symbols import DEFAULT_MARKET_TYPE, MARKET_TYPES
+from backend.engine.broker import invalidate_leverage_cache
 
 logger = logging.getLogger("apexalgo.keys")
 
@@ -31,39 +36,34 @@ class ExchangeKeyCreate(BaseModel):
     api_secret: str
     passphrase: str = ""
     is_sandbox: bool = True
-
-
-# Where to create API keys + what the user must switch off. Shown in the UI
-# next to the form so nobody has to leave the app to figure this out.
-_EXCHANGE_GUIDE = {
-    "okx":       {"keys_url": "https://www.okx.com/account/my-api",            "sandbox_note": "Demo trading keys are created under Trade → Demo trading → API."},
-    "binance":   {"keys_url": "https://www.binance.com/en/my/settings/api-management", "sandbox_note": "Spot testnet keys come from testnet.binance.vision (separate account)."},
-    "bitvavo":   {"keys_url": "https://account.bitvavo.com/user/api",           "sandbox_note": None},
-    "coinbase":  {"keys_url": "https://www.coinbase.com/settings/api",          "sandbox_note": None},
-    "cryptocom": {"keys_url": "https://crypto.com/exchange/user/settings/api-management", "sandbox_note": "UAT sandbox keys are issued via the Crypto.com Exchange UAT environment."},
-    "kraken":    {"keys_url": "https://www.kraken.com/u/security/api",          "sandbox_note": None},
-    "kucoin":    {"keys_url": "https://www.kucoin.com/account/api",             "sandbox_note": None},
-}
+    # A key is bound to one market: spot keys and swap keys are separate records
+    market_type: str = DEFAULT_MARKET_TYPE
 
 
 @router.get("/exchanges")
 def list_exchanges():
-    """Static capabilities per supported exchange for the connection form."""
+    """Capabilities per supported exchange (from the registry spec) for the
+    connection form, the data manager and the builder. `has_sandbox` is
+    probed from ccxt so it tracks the installed version. `markets` lists the
+    market types ApexAlgo can trade on the exchange with their limits."""
     out = []
-    for ex_id, name in SUPPORTED_EXCHANGES.items():
-        has_sandbox = False
-        try:
-            has_sandbox = bool(getattr(ccxt, ex_id)().urls.get("test"))
-        except Exception:
-            pass
-        guide = _EXCHANGE_GUIDE.get(ex_id, {})
+    for ex_id, spec in EXCHANGES.items():
         out.append({
             "id": ex_id,
-            "name": name,
-            "needs_passphrase": ex_id in ("okx", "kucoin"),
-            "has_sandbox": has_sandbox,
-            "keys_url": guide.get("keys_url"),
-            "sandbox_note": guide.get("sandbox_note"),
+            "name": spec.name,
+            "needs_passphrase": spec.needs_passphrase,
+            "has_sandbox": exchange_has_sandbox(ex_id),
+            "keys_url": spec.keys_url,
+            "sandbox_note": spec.sandbox_note,
+            "markets": {
+                mt: {
+                    "has_sandbox": exchange_has_sandbox(ex_id, mt),
+                    "max_leverage": caps.max_leverage,
+                    "leverage_in_order": caps.leverage_in_order,
+                    "note": caps.note,
+                }
+                for mt, caps in spec.markets.items()
+            },
         })
     return out
 
@@ -73,6 +73,19 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
     exchange_id = req.exchange.lower()
     if exchange_id not in SUPPORTED_EXCHANGES:
         raise HTTPException(status_code=400, detail=f"Unsupported exchange '{exchange_id}'.")
+    market_type = (req.market_type or DEFAULT_MARKET_TYPE).strip().lower()
+    if market_type not in MARKET_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid market_type '{req.market_type}'. Use one of: {', '.join(MARKET_TYPES)}.")
+    if market_caps(exchange_id, market_type) is None:
+        raise HTTPException(status_code=400, detail=f"{SUPPORTED_EXCHANGES[exchange_id]} has no '{market_type}' market in ApexAlgo.")
+    # Bots keep trading the market their key was verified on: re-saving a
+    # key under another market type is refused while bots still reference it
+    existing = db.query(ExchangeKey).filter(ExchangeKey.name == req.name).first()
+    if existing and (getattr(existing, "market_type", None) or DEFAULT_MARKET_TYPE) != market_type:
+        linked = [b_name for b_name, b_settings in db.query(BotConfig.name, BotConfig.settings).all()
+                  if (b_settings or {}).get("api_key_name") == req.name]
+        if linked:
+            raise HTTPException(status_code=409, detail=f"Key '{req.name}' is a {existing.market_type or DEFAULT_MARKET_TYPE} key linked to {', '.join(linked)}; save the {market_type} key under a new name.")
     try:
         test_exchange = build_exchange(
             exchange_id,
@@ -80,6 +93,7 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
             api_secret=req.api_secret,
             passphrase=req.passphrase or None,
             sandbox=req.is_sandbox,
+            market_type=market_type,
         )
         test_exchange.fetch_balance()
     except Exception as e:
@@ -91,14 +105,13 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
         enc_secret = encrypt_data(req.api_secret)
         enc_passphrase = encrypt_data(req.passphrase)
 
-        existing = db.query(ExchangeKey).filter(ExchangeKey.name == req.name).first()
-
         if existing:
             existing.api_key = enc_key
             existing.api_secret = enc_secret
             existing.passphrase = enc_passphrase
             existing.is_sandbox = req.is_sandbox
             existing.exchange = req.exchange
+            existing.market_type = market_type
         else:
             new_key = ExchangeKey(
                 name=req.name,
@@ -106,12 +119,14 @@ def save_exchange_keys(req: ExchangeKeyCreate, db: Session = Depends(get_db)):
                 api_key=enc_key,
                 api_secret=enc_secret,
                 passphrase=enc_passphrase,
-                is_sandbox=req.is_sandbox
+                is_sandbox=req.is_sandbox,
+                market_type=market_type,
             )
             db.add(new_key)
 
         db.commit()
         invalidate_authenticated_exchange(req.name)  # replaced credentials must not linger in the registry
+        invalidate_leverage_cache(req.name)  # leverage/margin mode must be confirmed again on the new key
         return {"message": f"Exchange key '{req.name}' verified and saved securely."}
     except Exception as e:
         logger.error("Database error saving key '%s': %s", req.name, e)
@@ -163,6 +178,7 @@ def get_exchange_keys_status(db: Session = Depends(get_db)):
             "name": k.name,
             "exchange": k.exchange,
             "is_sandbox": k.is_sandbox,
+            "market_type": getattr(k, "market_type", None) or DEFAULT_MARKET_TYPE,
             "is_active": is_active,
             "error_msg": error_msg,
             "latency_ms": latency_ms,
@@ -193,12 +209,17 @@ def get_key_balance(key_name: str, db: Session = Depends(get_db)):
                     }
 
         # Best-effort USD valuation so the wallet shows one total. Stables
-        # count as 1; everything else is priced via a direct USD-quoted market.
+        # count as 1; everything else is priced via a direct USD-quoted spot
+        # market. A swap key's futures class lists no spot pairs, so the
+        # prices come from a public spot instance of the same exchange.
         total_usd = 0.0
         unpriced = []
         try:
             stables = {"USDT", "USDC", "USD", "DAI", "TUSD", "FDUSD", "BUSD", "PYUSD"}
-            exchange.load_markets()
+            pricer = exchange
+            if key_market_type(key_record) != "spot":
+                pricer = build_exchange(key_record.exchange, sandbox=False, market_type="spot")
+            pricer.load_markets()
             wanted = {}
             for coin, data in active_balances.items():
                 if coin in stables:
@@ -206,19 +227,19 @@ def get_key_balance(key_name: str, db: Session = Depends(get_db)):
                     continue
                 for quote in ("USDT", "USD", "USDC"):
                     sym = f"{coin}/{quote}"
-                    if sym in exchange.markets:
+                    if sym in pricer.markets:
                         wanted[sym] = coin
                         break
                 else:
                     unpriced.append(coin)
             if wanted:
                 try:
-                    tickers = exchange.fetch_tickers(list(wanted.keys()))
+                    tickers = pricer.fetch_tickers(list(wanted.keys()))
                 except Exception:
                     tickers = {}
                     for sym in wanted:
                         try:
-                            tickers[sym] = exchange.fetch_ticker(sym)
+                            tickers[sym] = pricer.fetch_ticker(sym)
                         except Exception:
                             pass
                 for sym, coin in wanted.items():
@@ -231,7 +252,8 @@ def get_key_balance(key_name: str, db: Session = Depends(get_db)):
         except Exception as exc:
             logger.debug("USD valuation skipped for '%s': %s", key_name, type(exc).__name__)
 
-        return {"name": key_name, "balances": active_balances, "total_usd": round(total_usd, 2), "unpriced": sorted(set(unpriced))}
+        return {"name": key_name, "balances": active_balances, "total_usd": round(total_usd, 2),
+                "valuation_currency": "USD", "unpriced": sorted(set(unpriced))}
     except Exception as e:
         logger.warning("Failed to fetch balance for '%s': %s", key_name, type(e).__name__)
         raise HTTPException(status_code=400, detail="Failed to fetch balance from exchange.")
@@ -260,6 +282,7 @@ def delete_exchange_keys(key_name: str, db: Session = Depends(get_db)):
     db.delete(key_record)
     db.commit()
     invalidate_authenticated_exchange(key_name)
+    invalidate_leverage_cache(key_name)
     return {"message": f"Key '{key_name}' deleted successfully."}
 
 SWAP_MAX_NOTIONAL = float(os.environ.get("SWAP_MAX_NOTIONAL", "5000"))  # in the market's quote currency
@@ -304,6 +327,8 @@ def execute_quick_swap(name: str, payload: SwapRequest, db: Session = Depends(ge
             return JSONResponse(status_code=404, content={"detail": f"API Wallet '{name}' not found"})
 
         exchange = get_authenticated_exchange(key_record)
+        ex_id = str(key_record.exchange or "").lower()
+        ex_name = SUPPORTED_EXCHANGES.get(ex_id, ex_id)
 
         from_asset = payload.from_asset
         to_asset = payload.to_asset
@@ -349,7 +374,7 @@ def execute_quick_swap(name: str, payload: SwapRequest, db: Session = Depends(ge
         fetched_order = exchange.fetch_order(order['id'], order['symbol'])
 
         if fetched_order['status'] == 'canceled':
-            return JSONResponse(status_code=400, content={"detail": f"OKX canceled the order. Reason: Zero liquidity for {order['symbol']} on the Testnet."})
+            return JSONResponse(status_code=400, content={"detail": f"{ex_name} canceled the order. Reason: Zero liquidity for {order['symbol']} on the testnet."})
         if fetched_order['status'] == 'open':
             exchange.cancel_order(order['id'], order['symbol'])
             return JSONResponse(status_code=400, content={"detail": f"Order stuck. No volume for {order['symbol']} on the Sandbox. Order auto-canceled to prevent stuck balance."})
@@ -358,7 +383,7 @@ def execute_quick_swap(name: str, payload: SwapRequest, db: Session = Depends(ge
 
     except ccxt.ExchangeError as e:
         error_msg = str(e)
-        if "51155" in error_msg or "compliance" in error_msg.lower():
+        if ex_id == "okx" and ("51155" in error_msg or "compliance" in error_msg.lower()):
             return JSONResponse(status_code=400, content={"detail": "European Compliance Error (MiCA): You cannot trade USDT on OKX in Europe. Please swap to USDC or EUR instead."})
         return JSONResponse(status_code=400, content={"detail": "Exchange rejected the order. Please check your assets and try again."})
     except ccxt.InsufficientFunds:

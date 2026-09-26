@@ -6,6 +6,8 @@ import { useIndicators, getIndicatorPane } from './Builder/indicatorConfig';
 import { getToken } from '../theme';
 import Button from './ui/Button';
 import Badge from './ui/Badge';
+import { isShortOpen, isOpeningOrder, modeTag } from '../utils/orders';
+import { fmtMoney, fmtMoneyTitle, rowCurrency, rowKind, symbolParts, positionPnl } from '../utils/money';
 
 const safeParseTime = (ts) => { 
   if (!ts) return null; 
@@ -84,6 +86,16 @@ function ChartEngine({ dataset, openDataVault }) {
   const [themeTick, setThemeTick] = useState(0); // bumps on apex-theme-changed -> chart re-init with new tokens
   const [showMenu, setShowMenu] = useState(false);
   const [expandedMenuBot, setExpandedMenuBot] = useState(null);  
+  const menuRef = useRef(null);
+  // Overlay menu closes on outside click and Esc
+  useEffect(() => {
+    if (!showMenu) return undefined;
+    const onDown = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setShowMenu(false); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); setShowMenu(false); } };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => { document.removeEventListener('mousedown', onDown); document.removeEventListener('keydown', onKey); };
+  }, [showMenu]);
   // Bots on this pair + interval whose candles come from another exchange —
   // listed in the menu so "why isn't my bot here?" answers itself
   const [otherExchangeBots, setOtherExchangeBots] = useState([]);
@@ -243,8 +255,12 @@ function ChartEngine({ dataset, openDataVault }) {
           incoming.forEach(r => byId.set(r.id, r));
           return [...byId.values()];
       };
-      const ordNew = ordRes.data || [];
-      const posNew = posRes.data || [];
+      // /api/trades has no exchange filter: keep only rows from this
+      // chart's exchange (the same pair on another exchange is a different dataset)
+      const chartEx = (dataset.exchange || 'okx').toLowerCase();
+      const sameExchange = (r) => !r.exchange || String(r.exchange).toLowerCase() === chartEx;
+      const ordNew = (ordRes.data || []).filter(sameExchange);
+      const posNew = (posRes.data || []).filter(sameExchange);
       let maxOrd = cur.ordId, maxPos = cur.posId;
       ordNew.forEach(o => { if (o.id > maxOrd) maxOrd = o.id; });
       posNew.forEach(p => { if (p.id > maxPos) maxPos = p.id; });
@@ -419,7 +435,7 @@ function ChartEngine({ dataset, openDataVault }) {
       markersPluginRef.current = null;
       priceLinesRef.current = [];
     };
-  }, [dataset.symbol, dataset.timeframe, retryTick, themeTick]); // eslint-disable-line react-hooks/exhaustive-deps -- chart init must only re-run on symbol/timeframe change, theme switch, or manual retry
+  }, [dataset.exchange, dataset.symbol, dataset.timeframe, retryTick, themeTick]); // eslint-disable-line react-hooks/exhaustive-deps -- chart init must only re-run on exchange/symbol/timeframe change, theme switch, or manual retry
 
   // Rebuild the chart with the new token values when the theme flips
   useEffect(() => {
@@ -498,7 +514,7 @@ function ChartEngine({ dataset, openDataVault }) {
      
     const markersByTime = {}; 
     signals.forEach(sig => { 
-      if (botConfigs[sig.bot_name]?.showSignals && (sig.action === 'buy' || sig.action === 'sell')) { 
+      if (botConfigs[sig.bot_name]?.showSignals && (sig.action === 'buy' || sig.action === 'sell' || sig.action === 'short' || sig.action === 'cover')) { 
         const rawTime = safeParseTime(sig.timestamp); 
         if (!rawTime) return;  
         const snappedTime = getSnappedTime(rawTime); 
@@ -521,15 +537,25 @@ function ChartEngine({ dataset, openDataVault }) {
          
         const buySigs = itemsAtTime.filter(i => i.type === 'signal' && i.data.action === 'buy'); 
         const sellSigs = itemsAtTime.filter(i => i.type === 'signal' && i.data.action === 'sell'); 
-        const buyTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'buy'); 
-        const sellTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'sell'); 
+        const shortSigs = itemsAtTime.filter(i => i.type === 'signal' && i.data.action === 'short'); 
+        const coverSigs = itemsAtTime.filter(i => i.type === 'signal' && i.data.action === 'cover'); 
+        // Opening vs closing fill, side-aware: a non-reduce-only sell on a
+        // perp opens a short, a reduce-only buy covers one
+        const buyTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'buy' && !i.data.reduce_only); 
+        const sellTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'sell' && !isShortOpen(i.data)); 
+        const shortTrades = itemsAtTime.filter(i => i.type === 'trade' && isShortOpen(i.data)); 
+        const coverTrades = itemsAtTime.filter(i => i.type === 'trade' && i.data.side === 'buy' && i.data.reduce_only); 
          
         // Marker colors resolved from the live CSS tokens (raw values required)
         if (buySigs.length > 0) finalMarkers.push({ time: time, position: 'belowBar', color: getToken('success'), shape: 'arrowUp', text: 'S-B' });
         if (sellSigs.length > 0) finalMarkers.push({ time: time, position: 'aboveBar', color: getToken('danger'), shape: 'arrowDown', text: 'S-S' });
+        if (shortSigs.length > 0) finalMarkers.push({ time: time, position: 'aboveBar', color: getToken('danger'), shape: 'arrowDown', text: 'S-SH' });
+        if (coverSigs.length > 0) finalMarkers.push({ time: time, position: 'belowBar', color: getToken('success'), shape: 'arrowUp', text: 'S-CV' });
 
         if (buyTrades.length > 0) finalMarkers.push({ time: time, position: 'belowBar', color: getToken('info'), shape: 'circle', text: 'T-BUY' });
         if (sellTrades.length > 0) finalMarkers.push({ time: time, position: 'aboveBar', color: getToken('purple'), shape: 'circle', text: 'T-SELL' });
+        if (shortTrades.length > 0) finalMarkers.push({ time: time, position: 'aboveBar', color: getToken('info'), shape: 'circle', text: 'T-SHORT' });
+        if (coverTrades.length > 0) finalMarkers.push({ time: time, position: 'belowBar', color: getToken('purple'), shape: 'circle', text: 'T-COVER' });
     }); 
 
     finalMarkers.sort((a, b) => a.time - b.time); 
@@ -552,7 +578,7 @@ function ChartEngine({ dataset, openDataVault }) {
                 lineWidth: 2, 
                 lineStyle: 2,  
                 axisLabelVisible: true, 
-                title: `ENTRY (${isBacktest ? 'BT' : 'LIVE'})`, 
+                title: `ENTRY (${modeTag(pos.mode)})`, 
             }; 
             try { priceLinesRef.current.push(candleSeriesRef.current.createPriceLine(priceLine)); } catch { /* silent */ } 
         } 
@@ -673,7 +699,7 @@ function ChartEngine({ dataset, openDataVault }) {
           )}
         </div>
 
-        <div className="flex items-center space-x-2 md:space-x-4 relative">
+        <div ref={menuRef} className="flex items-center space-x-2 md:space-x-4 relative">
 
           <Badge variant={isLiveStreamActive ? 'success' : 'accent'} dot pulse={isLiveStreamActive}>
             {isLiveStreamActive ? 'Synced: Live' : 'Synced: Static'}
@@ -709,16 +735,16 @@ function ChartEngine({ dataset, openDataVault }) {
                         <div className="flex flex-col space-y-4 pl-6 md:pl-8 pr-4 pb-4 bg-bg/50 border-l-2 border-border ml-4 mt-1">
                             <div className="flex flex-col space-y-2 mt-2">
                                 <span className="text-3xs md:text-2xs font-bold text-info uppercase tracking-wider">Live & Paper Mode</span>
-                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-info rounded border-border bg-inset" checked={config.showRealTrades} onChange={() => toggleBotSetting(botName, 'showRealTrades')} /><span className="ml-2 text-xs text-text">Real Trades (T-B / T-S)</span></label>
+                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-info rounded border-border bg-inset" checked={config.showRealTrades} onChange={() => toggleBotSetting(botName, 'showRealTrades')} /><span className="ml-2 text-xs text-text">Real Trades (T-BUY / T-SELL · T-SHORT / T-COVER)</span></label>
                                 <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-info rounded border-border bg-inset" checked={config.showRealPositions} onChange={() => toggleBotSetting(botName, 'showRealPositions')} /><span className="ml-2 text-xs text-text">Real Position Line</span></label>
                             </div>
                             <div className="flex flex-col space-y-2">
                                 <span className="text-3xs md:text-2xs font-bold text-accent uppercase tracking-wider">Backtest Mode</span>
-                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-accent rounded border-border bg-inset" checked={config.showBacktestTrades} onChange={() => toggleBotSetting(botName, 'showBacktestTrades')} /><span className="ml-2 text-xs text-text-secondary">Historical Trades (T-B / T-S)</span></label>
+                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-accent rounded border-border bg-inset" checked={config.showBacktestTrades} onChange={() => toggleBotSetting(botName, 'showBacktestTrades')} /><span className="ml-2 text-xs text-text-secondary">Historical Trades (T-BUY / T-SELL · T-SHORT / T-COVER)</span></label>
                                 <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-accent rounded border-border bg-inset" checked={config.showBacktestPositions} onChange={() => toggleBotSetting(botName, 'showBacktestPositions')} /><span className="ml-2 text-xs text-text-secondary">Historical Position Line</span></label>
                             </div>
                             <div className="h-px bg-border w-full my-1"></div>
-                            <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3.5 w-3.5 text-success rounded border-border bg-inset" checked={config.showSignals} onChange={() => toggleBotSetting(botName, 'showSignals')} /><span className="ml-2 text-xs text-text italic">Engine Thoughts (S-B / S-S)</span></label>
+                            <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3.5 w-3.5 text-success rounded border-border bg-inset" checked={config.showSignals} onChange={() => toggleBotSetting(botName, 'showSignals')} /><span className="ml-2 text-xs text-text italic">Engine Thoughts (S-B / S-S · S-SH / S-CV)</span></label>
                             {Object.keys(config.indicators).map(indKey => (
                                 <label key={indKey} className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3.5 w-3.5 text-accent rounded border-border bg-inset" checked={config.indicators[indKey]} onChange={() => toggleIndicatorConfig(botName, indKey)} /><span className="ml-2 text-xs text-text">Draw Line: <span className="font-num">{indKey}</span></span></label>
                             ))}
@@ -805,33 +831,52 @@ function ChartEngine({ dataset, openDataVault }) {
         {/* Signal-marker legend */}
         {!loading && !errorMsg && (
           <div className="absolute top-2 right-2 md:top-3 md:right-3 z-10 hidden sm:flex items-center gap-3 bg-raised/80 backdrop-blur-sm border border-border px-2.5 py-1.5 rounded-lg pointer-events-none">
-            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted"><span className="text-success text-2xs leading-none">▲</span> S-B</span>
-            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted"><span className="text-danger text-2xs leading-none">▼</span> S-S</span>
-            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted"><span className="w-1.5 h-1.5 rounded-full bg-info" /> T-Buy</span>
-            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted"><span className="w-1.5 h-1.5 rounded-full bg-purple" /> T-Sell</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted" title="Buy signal"><span className="text-success text-2xs leading-none">▲</span> S-B</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted" title="Sell signal"><span className="text-danger text-2xs leading-none">▼</span> S-S</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted" title="Short signal"><span className="text-danger text-2xs leading-none">▼</span> S-SH</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted" title="Cover signal"><span className="text-success text-2xs leading-none">▲</span> S-CV</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted" title="Buy fill (open long)"><span className="w-1.5 h-1.5 rounded-full bg-info" /> T-BUY</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted" title="Sell fill (close long)"><span className="w-1.5 h-1.5 rounded-full bg-purple" /> T-SELL</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted" title="Short fill (open short)"><span className="w-1.5 h-1.5 rounded-full bg-info" /> T-SHORT</span>
+            <span className="flex items-center gap-1 text-3xs font-bold uppercase tracking-wider text-muted" title="Cover fill (close short)"><span className="w-1.5 h-1.5 rounded-full bg-purple" /> T-COVER</span>
           </div>
         )}
 
         {hoverData && snappedTradeMap[hoverData.time] && snappedTradeMap[hoverData.time].length > 0 && (
           <div className="absolute top-12 left-2 md:top-14 md:left-3 z-20 flex flex-col space-y-2 pointer-events-none max-w-[calc(100vw-1rem)] md:max-w-none">
             {snappedTradeMap[hoverData.time].map((trade, idx) => {
-                const totalValue = trade.price * trade.amount;
-                const isWin = trade.position ? trade.price >= trade.position.entry_price : true;
-                const pnlPct = trade.position ? (((trade.price - trade.position.entry_price) / trade.position.entry_price) * 100).toFixed(2) : "0.00";
-                const pnlAbs = trade.position ? ((trade.price - trade.position.entry_price) * trade.amount).toFixed(2) : "0.00";
+                // Prices are in the pair's quote; the total and PnL are in the
+                // cash currency (settle on a swap — the base coin on inverse)
+                const quote = symbolParts(trade.symbol).quote;
+                const ccy = rowCurrency(trade.position) || rowCurrency(trade);
+                const inverse = rowKind(trade.position || trade) === 'inverse';
+                const totalValue = inverse ? trade.amount : trade.price * trade.amount;
+                const isOpening = isOpeningOrder(trade);
+                const dir = trade.position?.side === 'short' ? -1 : 1;
+                // Realized PnL: the booked, after-fee figure when the position
+                // is closed; the gross price move only as a fallback
+                const booked = trade.position && trade.position.status === 'closed' && trade.position.profit_abs != null && Number.isFinite(Number(trade.position.profit_abs));
+                const grossAbs = trade.position ? positionPnl({ ...trade.position, amount: trade.amount }, trade.price) : 0;
+                const grossPct = trade.position ? (dir * (trade.price - trade.position.entry_price) / trade.position.entry_price) * 100 : 0;
+                const realAbs = booked ? Number(trade.position.profit_abs) : grossAbs;
+                const realPct = booked && trade.position.profit_pct != null ? Number(trade.position.profit_pct) : grossPct;
+                const isWin = trade.position ? realAbs >= 0 : true;
+                const pnlPct = realPct.toFixed(2);
+                const pnlAbs = fmtMoney(Math.abs(realAbs), ccy);
+                const headline = isOpening ? (trade.side === 'sell' ? 'SHORT ENTRY' : 'ENTRY EXECUTION') : (trade.side === 'buy' ? 'COVER EXECUTION' : 'EXIT EXECUTION');
 
                 return (
-                    <div key={idx} className={`bg-raised/95 backdrop-blur-md border p-3 rounded-lg shadow-pop flex flex-col min-w-[240px] md:min-w-[260px] ${trade.side === 'buy' ? 'border-info' : 'border-purple'}`}>
+                    <div key={idx} className={`bg-raised/95 backdrop-blur-md border p-3 rounded-lg shadow-pop flex flex-col min-w-[240px] md:min-w-[260px] ${isOpening ? 'border-info' : 'border-purple'}`}>
                         <div className="flex justify-between items-center mb-2 pb-2 border-b border-border">
-                            <span className={`text-2xs md:text-xs font-bold uppercase tracking-wider ${trade.side === 'buy' ? 'text-info' : 'text-purple'}`}>
-                                {trade.side === 'buy' ? 'ENTRY EXECUTION' : 'EXIT EXECUTION'}
+                            <span className={`text-2xs md:text-xs font-bold uppercase tracking-wider ${isOpening ? 'text-info' : 'text-purple'}`}>
+                                {headline}
                             </span>
                             <span className="bg-overlay border border-border text-text text-3xs px-1.5 py-0.5 rounded uppercase font-bold">{trade.mode}</span>
                         </div>
                         <div className="grid grid-cols-2 gap-y-3 gap-x-4">
                             <div className="flex flex-col">
                                 <span className="text-3xs md:text-3xs text-muted uppercase font-bold">Price</span>
-                                <span className="text-2xs md:text-xs text-text font-num">${formatNum(trade.price)}</span>
+                                <span className="text-2xs md:text-xs text-text font-num" title={fmtMoneyTitle(quote)}>{fmtMoney(trade.price, quote)}</span>
                             </div>
                             <div className="flex flex-col text-right">
                                 <span className="text-3xs md:text-3xs text-muted uppercase font-bold">Size</span>
@@ -840,25 +885,25 @@ function ChartEngine({ dataset, openDataVault }) {
 
                             <div className="flex flex-col">
                                 <span className="text-3xs md:text-3xs text-muted uppercase font-bold">Total</span>
-                                <span className="text-2xs md:text-xs text-text font-num">${formatNum(totalValue)}</span>
+                                <span className="text-2xs md:text-xs text-text font-num" title={inverse ? 'inverse contract: notional in the base coin' : fmtMoneyTitle(ccy)}>{fmtMoney(totalValue, ccy)}</span>
                             </div>
                             <div className="flex flex-col text-right">
                                 <span className="text-3xs md:text-3xs text-muted uppercase font-bold">Type</span>
                                 <span className="text-2xs md:text-xs text-text uppercase">{trade.order_type || 'Market'}</span>
                             </div>
 
-                            {trade.side === 'sell' && trade.position && (
+                            {!isOpening && trade.position && (
                                 <div className="flex flex-col col-span-2 pt-2 border-t border-border">
                                     <span className="text-3xs md:text-3xs text-muted uppercase font-bold mb-1">PnL</span>
                                     <div className="grid grid-cols-2 gap-2 bg-inset p-2 rounded-lg border border-border">
                                         <div className="flex flex-col">
                                             <span className="text-3xs text-muted uppercase">Avg Entry</span>
-                                            <span className="text-3xs md:text-2xs text-text font-num">${formatNum(trade.position.entry_price)}</span>
+                                            <span className="text-3xs md:text-2xs text-text font-num" title={fmtMoneyTitle(quote)}>{fmtMoney(trade.position.entry_price, quote)}</span>
                                         </div>
                                         <div className="flex flex-col text-right">
-                                            <span className="text-3xs text-muted uppercase">Realized</span>
+                                            <span className="text-3xs text-muted uppercase">{booked ? 'Realized (after fees)' : 'Realized (gross)'}</span>
                                             <span className={`text-3xs md:text-2xs font-num font-bold ${isWin ? 'text-success' : 'text-danger'}`}>
-                                                {isWin ? '+' : ''}${pnlAbs} ({pnlPct}%)
+                                                {isWin ? '+' : '-'}{pnlAbs} ({pnlPct}%)
                                             </span>
                                         </div>
                                     </div>

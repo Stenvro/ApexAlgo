@@ -11,19 +11,10 @@ import { Input, Select } from './ui/Input';
 import { SkeletonCard } from './ui/Skeleton';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
+import { useExchanges } from '../api/exchanges';
+import { fmtMoney, normCcy, isCryptoCash } from '../utils/money';
 
-/* Static fallback until /api/keys/exchanges answers */
-const FALLBACK_EXCHANGES = [
-  { id: 'okx', name: 'OKX', needs_passphrase: true, has_sandbox: true },
-  { id: 'binance', name: 'Binance', needs_passphrase: false, has_sandbox: true },
-  { id: 'bitvavo', name: 'Bitvavo', needs_passphrase: false, has_sandbox: false },
-  { id: 'coinbase', name: 'Coinbase', needs_passphrase: false, has_sandbox: false },
-  { id: 'cryptocom', name: 'Crypto.com', needs_passphrase: false, has_sandbox: true },
-  { id: 'kraken', name: 'Kraken', needs_passphrase: false, has_sandbox: false },
-  { id: 'kucoin', name: 'KuCoin', needs_passphrase: true, has_sandbox: false },
-];
-
-/* Deterministic avatar color per exchange (token values) */
+/* Deterministic avatar color per exchange (token values); unknown ids get the neutral class in the avatar */
 const AVATAR_COLORS = {
   okx: 'text-info border-info/30 bg-info/10',
   binance: 'text-accent border-accent/30 bg-accent/10',
@@ -32,6 +23,12 @@ const AVATAR_COLORS = {
   cryptocom: 'text-purple border-purple/30 bg-purple/10',
   kraken: 'text-purple border-purple/30 bg-purple/10',
   kucoin: 'text-success border-success/30 bg-success/10',
+  bybit: 'text-accent border-accent/30 bg-accent/10',
+  gateio: 'text-info border-info/30 bg-info/10',
+  bitget: 'text-info border-info/30 bg-info/10',
+  mexc: 'text-success border-success/30 bg-success/10',
+  htx: 'text-purple border-purple/30 bg-purple/10',
+  bingx: 'text-info border-info/30 bg-info/10',
 };
 
 const IconKeyEmpty = (
@@ -51,7 +48,6 @@ const IconBlock = (
   </svg>
 );
 
-const usd = (v, digits = 2) => `$${(Number(v) || 0).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 const qty = (v) => {
   const n = Number(v) || 0;
   if (n === 0) return '0';
@@ -72,15 +68,23 @@ function ExchangeAvatar({ exchange, name }) {
   );
 }
 
-/* Wallet contents with a single USD total, largest holdings first */
-function WalletPanel({ wallet }) {
+/* Wallet contents valued in the exchange's valuation currency (the API's
+   `valuation_currency`; older backends valued in USD), largest first. Assets
+   without a spot market against that currency stay unvalued ("n/a") rather
+   than counting as zero. */
+function WalletPanel({ wallet, exchangeLabel = 'the exchange' }) {
   const [showDust, setShowDust] = useState(false);
+  const ccy = normCcy(wallet?.valuation_currency) || 'USD';
+  const val = (v) => fmtMoney(v, ccy);
   const rows = useMemo(() => {
     const entries = Object.entries(wallet?.balances || {}).map(([coin, d]) => ({ coin, ...d }));
     entries.sort((a, b) => (b.usd_value ?? -1) - (a.usd_value ?? -1) || b.total - a.total);
     return entries;
   }, [wallet]);
-  const dust = rows.filter(r => r.usd_value !== null && r.usd_value !== undefined && r.usd_value < 1);
+  // "Dust" = worth less than one unit of the valuation currency; meaningless
+  // when that currency is a coin (1 BTC is not dust), so no folding then
+  const dustLimit = isCryptoCash(ccy) ? 0 : 1;
+  const dust = rows.filter(r => r.usd_value !== null && r.usd_value !== undefined && r.usd_value < dustLimit);
   const visible = showDust ? rows : rows.filter(r => !dust.includes(r));
   const total = wallet?.total_usd || 0;
 
@@ -90,14 +94,14 @@ function WalletPanel({ wallet }) {
     <div>
       <div className="flex items-end justify-between mb-3 flex-wrap gap-2">
         <div>
-          <p className="text-3xs font-bold uppercase tracking-wider text-muted">Estimated value</p>
-          <p className="text-xl font-num font-bold text-text leading-none mt-1">{usd(total)}</p>
+          <p className="text-3xs font-bold uppercase tracking-wider text-muted">Estimated value <span className="text-faint normal-case tracking-normal">in {ccy}</span></p>
+          <p className="text-xl font-num font-bold text-text leading-none mt-1">{val(total)}</p>
         </div>
         <div className="text-right">
-          <p className="text-3xs text-faint font-num">{rows.length} asset{rows.length === 1 ? '' : 's'}{wallet.unpriced?.length ? ` · ${wallet.unpriced.length} unpriced` : ''}</p>
+          <p className="text-3xs text-faint font-num">{rows.length} asset{rows.length === 1 ? '' : 's'}{wallet.unpriced?.length ? ` · ${wallet.unpriced.length} unvalued` : ''}</p>
           {dust.length > 0 && (
             <button type="button" onClick={() => setShowDust(v => !v)} className="text-3xs text-muted hover:text-text underline-offset-2 hover:underline">
-              {showDust ? 'hide' : 'show'} {dust.length} dust (&lt;$1)
+              {showDust ? 'hide' : 'show'} {dust.length} dust (&lt;{fmtMoney(dustLimit, ccy, { digits: 0 })})
             </button>
           )}
         </div>
@@ -109,7 +113,7 @@ function WalletPanel({ wallet }) {
               <th className="px-3 py-2">Asset</th>
               <th className="px-3 py-2 text-right">Available</th>
               <th className="px-3 py-2 text-right">In orders</th>
-              <th className="px-3 py-2 text-right">Value</th>
+              <th className="px-3 py-2 text-right">Value ({ccy})</th>
               <th className="px-3 py-2 w-24">Share</th>
             </tr>
           </thead>
@@ -121,7 +125,7 @@ function WalletPanel({ wallet }) {
                   <td className="px-3 py-2 font-bold text-text">{r.coin}</td>
                   <td className="px-3 py-2 text-right text-text">{qty(r.free)}</td>
                   <td className={`px-3 py-2 text-right ${r.used > 0 ? 'text-warn' : 'text-faint'}`}>{r.used > 0 ? qty(r.used) : '—'}</td>
-                  <td className="px-3 py-2 text-right text-text-secondary">{r.usd_value !== null && r.usd_value !== undefined ? usd(r.usd_value) : <span className="text-faint" title="No USD market found for this asset on the exchange">n/a</span>}</td>
+                  <td className="px-3 py-2 text-right text-text-secondary">{r.usd_value !== null && r.usd_value !== undefined ? val(r.usd_value) : <span className="text-faint" title={`Not valued: ${exchangeLabel} has no spot market to price ${r.coin} in ${ccy}, so it is left out of the estimated total`}>n/a</span>}</td>
                   <td className="px-3 py-2">
                     <div className="h-1 rounded-full bg-border overflow-hidden">
                       <div className="h-full bg-success rounded-full" style={{ width: `${share}%` }} />
@@ -139,7 +143,7 @@ function WalletPanel({ wallet }) {
 
 export default function Settings() {
   const [keys, setKeys] = useState([]);
-  const [exchanges, setExchanges] = useState(FALLBACK_EXCHANGES);
+  const exchanges = useExchanges();
   const [initialLoading, setInitialLoading] = useState(true);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -155,11 +159,17 @@ export default function Settings() {
   const [apiSecret, setApiSecret] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [isSandbox, setIsSandbox] = useState(true);
+  // A key is bound to one market type: spot or perpetual swaps
+  const [marketType, setMarketType] = useState('spot');
 
-  const exchangeInfo = exchanges.find(e => e.id === selectedExchange) || FALLBACK_EXCHANGES[0];
+  const exchangeInfo = exchanges.find(e => e.id === selectedExchange) || exchanges[0];
   const exchangeNames = useMemo(() => Object.fromEntries(exchanges.map(e => [e.id, e.name])), [exchanges]);
   const needsPassphrase = !!exchangeInfo.needs_passphrase;
-  const hasSandbox = !!exchangeInfo.has_sandbox;
+  const markets = exchangeInfo.markets || { spot: { has_sandbox: !!exchangeInfo.has_sandbox } };
+  const marketInfo = markets[marketType] || markets.spot || {};
+  const hasSwap = !!markets.swap;
+  // Sandbox availability differs per market (Binance: spot testnet ≠ futures testnet)
+  const hasSandbox = marketType === 'spot' ? !!exchangeInfo.has_sandbox : !!marketInfo.has_sandbox;
 
   const [swapModal, setSwapModal] = useState(null);
   const [swapFrom, setSwapFrom] = useState('USDC');
@@ -182,15 +192,16 @@ export default function Settings() {
 
   useEffect(() => {
     fetchKeys(); // eslint-disable-line react-hooks/set-state-in-effect -- initial data fetch on mount
-    apiClient.get('/api/keys/exchanges')
-      .then(res => { if (Array.isArray(res.data) && res.data.length) setExchanges(res.data); })
-      .catch(() => { /* keep fallback list */ });
   }, [fetchKeys]);
 
   // Exchanges without a testnet can only be added as Live
   useEffect(() => {
     if (!hasSandbox) setIsSandbox(false); // eslint-disable-line react-hooks/set-state-in-effect -- derived from exchange capability
   }, [hasSandbox]);
+  // Spot-only exchange selected → the market type falls back to spot
+  useEffect(() => {
+    if (!hasSwap && marketType !== 'spot') setMarketType('spot'); // eslint-disable-line react-hooks/set-state-in-effect -- derived from exchange capability
+  }, [hasSwap, marketType]);
 
   const handleSave = async (e) => {
     e.preventDefault();
@@ -203,6 +214,7 @@ export default function Settings() {
         api_secret: apiSecret.trim(),
         passphrase: needsPassphrase ? passphrase : '',
         is_sandbox: hasSandbox ? isSandbox : false,
+        market_type: marketType,
       });
       toast.success(`Key '${keyName.trim()}' verified and securely stored.`);
       setKeyName('');
@@ -387,9 +399,9 @@ export default function Settings() {
 
   return (
     <PageShell>
-      {/* Swap modal */}
+      {/* Swap modal — overlay layer (z-200): the confirmDialog (Modal, z-300) must stack above it */}
       {swapModal && (
-        <div className="fixed inset-0 z-[999] flex items-center justify-center p-4" role="dialog" aria-modal="true">
+        <div className="fixed inset-0 z-[200] flex items-center justify-center p-4" role="dialog" aria-modal="true">
           <div className="absolute inset-0 backdrop" onClick={() => setSwapModal(null)} />
           <div className="relative modal-enter terminal-card max-w-md w-full shadow-pop">
             <div className="px-5 py-4 border-b border-border flex justify-between items-center">
@@ -503,6 +515,7 @@ export default function Settings() {
                             ? <Badge variant="success" dot>Connected</Badge>
                             : <Badge variant="danger" dot pulse>Error</Badge>}
                           <Badge variant={k.is_sandbox ? 'info' : 'accent'}>{k.is_sandbox ? 'Sandbox' : 'Live'}</Badge>
+                          {k.market_type === 'swap' && <Badge variant="warn" title="Perpetual swaps — bots on this key trade with leverage; each pair is linear (settled in the quote) or inverse (settled in the base coin), shown per pair in the builder">Perps</Badge>}
                         </div>
                         <div className="flex items-center gap-2 flex-wrap mt-1 text-2xs text-muted">
                           <span className="uppercase font-bold tracking-wider">{exchangeNames[k.exchange] || k.exchange}</span>
@@ -560,7 +573,7 @@ export default function Settings() {
 
                   {balances[k.name] && (
                     <div className="mt-4 pt-4 border-t border-border/50 fade-in">
-                      <WalletPanel wallet={balances[k.name]} />
+                      <WalletPanel wallet={balances[k.name]} exchangeLabel={exchangeNames[k.exchange] || k.exchange} />
                     </div>
                   )}
                 </div>
@@ -584,6 +597,18 @@ export default function Settings() {
               {exchanges.map(ex => (
                 <option key={ex.id} value={ex.id}>{ex.name}</option>
               ))}
+            </Select>
+            <Select
+              label="Market"
+              value={marketType}
+              onChange={e => setMarketType(e.target.value)}
+              disabled={!hasSwap}
+              hint={hasSwap
+                ? (marketType === 'swap' ? `Perpetual swaps (linear or inverse, per pair), up to ${marketInfo.max_leverage || 1}× in ApexAlgo. Bots on this key trade swaps only.` : 'Spot wallet. A key is bound to one market — add a second key for perpetuals.')
+                : `${exchangeInfo.name}: spot only in ApexAlgo.`}
+            >
+              <option value="spot">Spot</option>
+              {hasSwap && <option value="swap">Perpetual swaps</option>}
             </Select>
             <Input
               label="Connection Name"
@@ -661,12 +686,13 @@ export default function Settings() {
                 <p className="text-xs text-muted mt-1">Create an API key in your {exchangeInfo.name} account settings.</p>
               )}
               <ul className="mt-2 space-y-1 text-2xs text-text-secondary">
-                <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Enable <b>read</b> + <b>spot trade</b> permissions</li>
+                <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Enable <b>read</b> + <b>{marketType === 'swap' ? 'futures/derivatives trade' : 'spot trade'}</b> permissions</li>
+                {marketType === 'swap' && marketInfo.note && <li className="flex items-start gap-1.5"><span className="text-info mt-0.5">{IconCheck}</span><span>{marketInfo.note}</span></li>}
                 <li className="flex items-center gap-1.5"><span className="text-danger">{IconBlock}</span>Leave <b>withdrawal</b> disabled — the bot never needs it</li>
                 <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Restrict the key to this machine's IP if the exchange allows it</li>
                 {needsPassphrase && <li className="flex items-center gap-1.5"><span className="text-success">{IconCheck}</span>Note the passphrase you set — it is required here</li>}
                 {exchangeInfo.sandbox_note && <li className="flex items-start gap-1.5"><span className="text-info mt-0.5">{IconCheck}</span><span>{exchangeInfo.sandbox_note}</span></li>}
-                {!hasSandbox && <li className="flex items-start gap-1.5"><span className="text-warn mt-0.5">{IconBlock}</span><span>No testnet: use paper mode in the bot (simulated fills on real prices) before enabling live orders.</span></li>}
+                {!hasSandbox && <li className="flex items-start gap-1.5"><span className="text-warn mt-0.5">{IconBlock}</span><span>No testnet{marketType === 'swap' ? ' for perpetuals' : ''}: use forward test in the bot (simulated fills on real prices) before enabling live orders.</span></li>}
               </ul>
             </div>
             <div className="border-t border-border pt-3">

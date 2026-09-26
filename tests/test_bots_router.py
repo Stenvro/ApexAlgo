@@ -3,6 +3,7 @@
 poller or engine thread is started; the exchange is the ``ExchangeMock`` from
 the live-tick tests, wired into ``close_position_now`` via
 ``get_authenticated_exchange``."""
+import json
 import os
 
 import pytest
@@ -15,7 +16,7 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.models.orders import Order
 from backend.models.positions import Position
 from backend.routers import trades as trades_router
-from tests.conftest import insert_candles, make_candles
+from tests.conftest import EXAMPLES_DIR, example_names, insert_candles, make_candles
 from tests.test_live_tick import EXCHANGE, KEY_NAME, SYMBOL, TF, ExchangeMock, _settings
 
 HEADERS = {"X-API-Key": os.environ["MASTER_API_KEY"]}
@@ -166,6 +167,9 @@ def test_update_flushes_signals_only_when_strategy_changes(db, client, running_b
     from backend.models.signals import Signal
     bot = running_bot(positions=[("backtest", SYMBOL, 1.0)])
     bot.is_active = False
+    # A live bot must carry a max_order_value; it is a strategy variant now
+    # (caps the backtest too), so the layout-only save below leaves it as is
+    bot.settings = {**bot.settings, "max_order_value": 500}
     db.add(Signal(symbol=SYMBOL, timestamp=datetime(2023, 1, 1), bot_name=bot.name, name="TRADE_TRIGGER", action="buy"))
     db.commit()
 
@@ -175,7 +179,7 @@ def test_update_flushes_signals_only_when_strategy_changes(db, client, running_b
                 db.query(Position).filter(Position.bot_name == bot.name, Position.mode == "backtest").count())
 
     # Layout-only save: results survive (TestClient runs background tasks before returning)
-    r = client.put(f"/api/bots/{bot.id}", json={"settings": {"ui_layout": {"nodes": [1]}, "max_order_value": 999}}, headers=HEADERS)
+    r = client.put(f"/api/bots/{bot.id}", json={"settings": {"ui_layout": {"nodes": [1]}, "live_allocation_pct": 50}}, headers=HEADERS)
     assert r.status_code == 200, r.text
     assert counts() == (1, 1)
 
@@ -289,18 +293,32 @@ def test_symbols_endpoint_lists_active_spot_markets_and_degrades_to_unknown(clie
     class Ex:
         def load_markets(self):
             return {"BTC/USDT": {"spot": True, "active": True}, "ETH/USDT": {"spot": True},
-                    "OLD/USDT": {"spot": True, "active": False}, "BTC/USDT:USDT": {"spot": False, "swap": True}}
+                    "OLD/USDT": {"spot": True, "active": False},
+                    "BTC/USDT:USDT": {"spot": False, "swap": True, "type": "swap", "linear": True, "active": True},
+                    "BTC/USD:BTC": {"spot": False, "swap": True, "type": "swap", "linear": False, "inverse": True}}
     monkeypatch.setattr(reg, "_markets_cache", {})
-    monkeypatch.setattr(reg, "build_exchange", lambda exchange_id: Ex())
+    monkeypatch.setattr(reg, "build_exchange", lambda exchange_id, **kw: Ex())
     r = client.get("/api/data/symbols/okx", headers=HEADERS)
-    assert r.status_code == 200 and r.json() == {"exchange": "okx", "symbols": ["BTC/USDT", "ETH/USDT"], "known": True}
+    assert r.status_code == 200
+    body = r.json()
+    assert {k: v for k, v in body.items() if k != "markets"} == {"exchange": "okx", "market_type": "spot", "symbols": ["BTC/USDT", "ETH/USDT"], "known": True}
+    # Sprint D: `markets` describes each symbol's contract and cash unit
+    assert body["markets"]["BTC/USDT"] == {"kind": "spot", "base": "BTC", "quote": "USDT", "settle": None, "contract_size": 1.0, "cash_currency": "USDT"}
+    # Swap listing = linear AND inverse perpetuals, cached separately from spot
+    r = client.get("/api/data/symbols/okx?market_type=swap", headers=HEADERS)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["symbols"] == ["BTC/USD:BTC", "BTC/USDT:USDT"] and body["known"] is True
+    assert body["markets"]["BTC/USD:BTC"]["kind"] == "inverse" and body["markets"]["BTC/USD:BTC"]["cash_currency"] == "BTC"
+    assert body["markets"]["BTC/USDT:USDT"]["kind"] == "linear" and body["markets"]["BTC/USDT:USDT"]["settle"] == "USDT"
+    assert client.get("/api/data/symbols/bitvavo?market_type=swap", headers=HEADERS).status_code == 400
 
-    def boom(exchange_id):
+    def boom(exchange_id, **kw):
         raise RuntimeError("offline")
     monkeypatch.setattr(reg, "_markets_cache", {})
     monkeypatch.setattr(reg, "build_exchange", boom)
     r = client.get("/api/data/symbols/kraken", headers=HEADERS)
-    assert r.status_code == 200 and r.json() == {"exchange": "kraken", "symbols": [], "known": False}
+    assert r.status_code == 200 and r.json() == {"exchange": "kraken", "market_type": "spot", "symbols": [], "known": False, "markets": {}}
     assert client.get("/api/data/symbols/nope", headers=HEADERS).status_code == 400
 
 
@@ -375,3 +393,118 @@ def test_chart_signals_and_bot_exchange_are_scoped_per_exchange(db, client):
     assert bots_on("binance") == ["bin-bot", "key-off"]
     assert bots_on("OKX") == ["okx-bot", "routed-okx"]
     assert bots_on("kraken") == []
+
+
+# ── audit 2026-09-24: sprint A/B router items ──────────────────────────────
+
+def _wire_exchange(monkeypatch, mock):
+    monkeypatch.setattr(trades_router, "get_authenticated_exchange", lambda key, **kw: mock)
+    from backend.engine.bot_manager import BotManager, bot_manager
+    real = BotManager._reconcile_order
+    monkeypatch.setattr(bot_manager, "_reconcile_order",
+                        lambda inst, order, sym, attempts=5, delay=1.0: real(bot_manager, inst, order, sym, attempts, 0))
+
+
+def test_force_close_of_a_legacy_position_without_side_sells(db, client, running_bot, monkeypatch):
+    """Item 1: rows from before shorts have `side=None`; they are longs and
+    must be closed with a sell, never a buy."""
+    running_bot(positions=[("live", SYMBOL, 0.5)])
+    pos = db.query(Position).one()
+    pos.side = None
+    db.commit()
+    mock = ExchangeMock(average=110.0)
+    _wire_exchange(monkeypatch, mock)
+    r = client.post(f"/api/trades/positions/{pos.id}/close", headers=HEADERS)
+    assert r.status_code == 200, r.text
+    assert [(o["side"], o["amount"]) for o in mock.created] == [("sell", 0.5)]
+    db.expire_all()
+    pos = db.get(Position, pos.id)
+    assert pos.status == "closed" and pos.profit_abs == pytest.approx(5.0)
+    assert pos.profit_pct == pytest.approx(10.0)
+    assert db.query(Order).filter(Order.position_id == pos.id).order_by(Order.id.desc()).first().side == "sell"
+
+
+def test_manual_close_passes_leverage_where_the_exchange_wants_it_per_order(db, client, monkeypatch):
+    """Item 20: kucoinfutures needs `leverage` in the close order params."""
+    from tests.test_swap import SwapExchangeMock, SWAP, CONTRACT_SIZE
+    candles = make_candles("kucoin", SWAP, TF, 30, seed=3, start_price=100.0)
+    insert_candles(db, candles)
+    db.add(ExchangeKey(name="kc", exchange="kucoin", api_key="x", api_secret="y", passphrase="p", is_sandbox=False, market_type="swap"))
+    s = _settings(symbols=(SWAP,))
+    s.update({"api_key_name": "kc", "data_exchange": "kucoin", "market_type": "swap", "leverage": 3, "margin_mode": "isolated"})
+    db.add(BotConfig(name="kc-bot", is_active=True, is_sandbox=False, strategy="node_graph", settings=s))
+    pos = Position(exchange="kucoin", bot_name="kc-bot", symbol=SWAP, mode="live", status="open", side="long",
+                   entry_price=100.0, amount=0.5, created_at=candles[-2].timestamp, market_type="swap", leverage=3.0,
+                   contracts=0.5 / CONTRACT_SIZE)
+    db.add(pos)
+    db.commit()
+    mock = SwapExchangeMock(average=101.0)
+    _wire_exchange(monkeypatch, mock)
+    r = client.post(f"/api/trades/positions/{pos.id}/close", headers=HEADERS)
+    assert r.status_code == 200, r.text
+    assert mock.created[0]["side"] == "sell"
+    assert mock.created[0]["params"] == {"reduceOnly": True, "leverage": 3}
+
+
+def test_key_save_and_delete_invalidate_the_leverage_cache(db, client, monkeypatch):
+    """Item 20: a re-created key must confirm leverage/margin mode again."""
+    from backend.engine import broker
+    from backend.routers import keys as keys_router
+    db.add(ExchangeKey(name="k1", exchange="binance", api_key="x", api_secret="y", passphrase="", is_sandbox=False))
+    db.add(BotConfig(name="idle", is_active=False, is_sandbox=False, strategy="node_graph",
+                     settings={**_settings(), "api_key_name": None, "api_execution": False}))
+    db.commit()
+    broker._leverage_applied.clear()
+    broker._leverage_applied.update({("k1", "BTC/USDT:USDT", 3, "isolated"), ("other", "BTC/USDT:USDT", 3, "isolated")})
+    r = client.delete("/api/keys/k1", headers=HEADERS)
+    assert r.status_code == 200, r.text
+    assert broker._leverage_applied == {("other", "BTC/USDT:USDT", 3, "isolated")}
+
+    broker._leverage_applied.add(("k1", "BTC/USDT:USDT", 3, "isolated"))
+    monkeypatch.setattr(keys_router, "build_exchange", lambda *a, **kw: ExchangeMock())
+    r = client.post("/api/keys", json={"name": "k1", "exchange": "binance", "api_key": "x", "api_secret": "y",
+                                        "passphrase": "", "is_sandbox": False}, headers=HEADERS)
+    assert r.status_code in (200, 201), r.text
+    assert ("k1", "BTC/USDT:USDT", 3, "isolated") not in broker._leverage_applied
+    broker._leverage_applied.clear()
+
+
+def test_stats_capital_basis_is_the_sum_of_the_bots_in_view(db, client, running_bot):
+    """Sprint B: the max-drawdown base of a multi-bot view is the sum of the
+    bots' pools, not the largest one."""
+    from datetime import datetime, timedelta
+    a = running_bot(name="bot-a")
+    b = running_bot(name="bot-b")
+    a.settings = {**a.settings, "backtest_capital": 1000}
+    b.settings = {**b.settings, "backtest_capital": 500}
+    t0 = datetime(2024, 1, 1)
+    for i, (name, pnl) in enumerate([("bot-a", -300.0), ("bot-b", -150.0)]):
+        db.add(Position(exchange=EXCHANGE, bot_name=name, symbol=SYMBOL, mode="live", status="closed", side="long",
+                        entry_price=100.0, amount=1.0, profit_abs=pnl, created_at=t0 + timedelta(hours=i),
+                        closed_at=t0 + timedelta(hours=i + 1)))
+    db.commit()
+    r = client.get("/api/trades/stats", params={"mode": "live"}, headers=HEADERS)
+    assert r.status_code == 200, r.text
+    # 450 lost on a 1500 base = 30% (would be 45% on max(1000, 500))
+    assert r.json()["maxDDpct"] == pytest.approx(30.0)
+    r = client.get("/api/trades/stats", params={"mode": "live", "bot_name": "bot-b"}, headers=HEADERS)
+    assert r.json()["maxDDpct"] == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize("name", example_names())
+def test_bundled_example_imports_clean(db, client, name, monkeypatch):
+    """Every ``examples/*.apex.json`` must pass the import validator as
+    shipped (the "Load example strategy" path), with its swap/short fields
+    intact — a template that needs hand-editing after import is not vetted."""
+    import backend.engine.settings_validator as sv
+    monkeypatch.setattr(sv, "get_exchange_timeframes", lambda _eid: {})  # no network
+    with open(EXAMPLES_DIR / f"{name}.apex.json") as fh:
+        payload = json.load(fh)
+    r = client.post("/api/bots/import", json=payload, headers=HEADERS)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert not body.get("validation_warnings"), body.get("validation_warnings")
+    saved = body["settings"]
+    src = payload["bot"]["settings"]
+    for key in ("market_type", "leverage", "short_node", "cover_node"):
+        assert saved.get(key) == src.get(key)

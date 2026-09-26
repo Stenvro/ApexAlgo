@@ -26,13 +26,14 @@ from backend.models.exchange_keys import ExchangeKey
 from backend.models.bots import BotConfig
 from backend.models.bot_logs import BotLog
 from backend.models.bot_config_runs import BotConfigRun
+from backend.models.market_data import FundingRate, LeverageTier
 
 # Import the routers
 from backend.routers import auth, keys, data, bots, trades, indicators
 # Import the background services
 from backend.engine.candle_poller import candle_poller
 from backend.engine.bot_manager import bot_manager
-from backend.core.exchange_registry import build_exchange
+from backend.core.exchange_registry import build_exchange_for_symbol
 
 # Create database tables and run migrations for existing DBs
 Base.metadata.create_all(bind=engine)
@@ -63,7 +64,7 @@ async def lifespan(app: FastAPI):
 enable_docs = os.getenv("ENABLE_DOCS", "0") == "1"
 app = FastAPI(
     title="ApexAlgo Engine API",
-    version="2.2.1",
+    version="2.3.0",
     swagger_ui_init_oauth={"clientId": "test"},
     lifespan=lifespan,
     docs_url="/docs" if enable_docs else None,
@@ -105,8 +106,8 @@ def read_root():
 @app.get("/api/price/{symbol}", dependencies=[Depends(verify_api_key)])
 def get_price(symbol: str, exchange: str = Query(default="okx")):
     try:
-        exch = build_exchange(exchange.lower())
         formatted_symbol = symbol.replace('-', '/').upper()
+        exch = build_exchange_for_symbol(exchange.lower(), formatted_symbol)
         ticker = exch.fetch_ticker(formatted_symbol)
         return {
             "exchange": exchange.upper(),
