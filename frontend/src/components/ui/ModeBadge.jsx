@@ -29,7 +29,7 @@ const ModeBadge = ({ mode, short = false, className = '' }) => {
   const meta = MODE_META[mode] || { label: String(mode || '—'), short: String(mode || '—'), variant: 'neutral', glyph: null, title: mode };
   return (
     <Badge variant={meta.variant} className={className} title={meta.title}>
-      {meta.glyph && <span aria-hidden="true" className="text-[8px] leading-none">{meta.glyph}</span>}
+      {meta.glyph && <span aria-hidden="true" className="text-3xs leading-none">{meta.glyph}</span>}
       {short ? meta.short : meta.label}
     </Badge>
   );

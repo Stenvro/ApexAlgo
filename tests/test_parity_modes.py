@@ -32,6 +32,7 @@ Divergences that exist by definition are asserted, not hidden:
 import asyncio
 from datetime import datetime, timedelta
 
+import ccxt
 import pytest
 
 from backend.core import exchange_registry as reg
@@ -174,7 +175,7 @@ class ParityExchange(SwapExchangeMock):
 
     def _fill(self, side, symbol, amount, reduce_only):
         if reduce_only and self.liquidated:
-            raise RuntimeError("ReduceOnly Order is rejected")
+            raise ccxt.InvalidOrder("ReduceOnly Order is rejected")
         order = self._create(side, symbol, amount)
         if symbol == INVERSE:
             usd = amount * INVERSE_SIZE
@@ -372,21 +373,22 @@ def test_live_books_exactly_the_backtest_trades(db, monkeypatch, name):
     assert [t["exits"] for t in backtest] == _expected_exits(case)
     _assert_same_trades(live_trades, backtest, ignore_close_price_on_liquidation=True)
     if liq_candle is not None:
-        # Documented divergence: live books the liquidation at the candle
-        # close (the price the engine had in hand when the exchange said the
-        # position was gone); the backtest/forward model books the modelled
-        # liquidation price. Loss is margin + entry fee in both.
+        # Live detects the liquidation from the candle range through the
+        # modelled level (confirmed by fetch_positions) before any close is
+        # sent, and books it at that level — the same price the
+        # backtest/forward model books. Loss is margin + entry fee in both.
         (lp, _, lf), = live_trades[0]["closes"]
         (bp, _, bf), = backtest[0]["closes"]
         spec = _spec(case)
-        assert lp == pytest.approx(case["series"][1][3]) and lf == 0
-        assert bp == pytest.approx(spec.liquidation_price(case["side"], backtest[0]["entry"], case["leverage"])) and bf == 0
+        assert lp == pytest.approx(bp) and lf == 0
+        assert bp == pytest.approx(spec.liquidation_price(case["side"], backtest[0]["entry"], case["leverage"], fee=FEE_PCT / 100)) and bf == 0
         margin = spec.margin(backtest[0]["amount"], backtest[0]["entry"], case["leverage"])
         assert live_trades[0]["profit_abs"] == pytest.approx(-(margin + backtest[0]["entry_fee"]))
     # every live fill went to the exchange and nothing was left open
     assert len(mock.created) == 2 * len(backtest) - (1 if liq_candle is not None else 0)
     assert db.query(Position).filter(Position.bot_name == "parity-live", Position.status == "open").count() == 0
-    assert db.query(Order).filter(Order.bot_name == "parity-live", Order.status == "rejected").count() == (1 if liq_candle is not None else 0)
+    # No close is sent for a position the exchange already liquidated
+    assert db.query(Order).filter(Order.bot_name == "parity-live", Order.status == "rejected").count() == 0
     # Sprint D: live records carry the money unit and what the exchange charged
     cash = case.get("cash", "USDT")
     for p in db.query(Position).filter(Position.bot_name == "parity-live").all():

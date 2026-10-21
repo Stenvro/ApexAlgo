@@ -496,6 +496,9 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   const liveKeySandbox = !!activeKeyRecord?.is_sandbox;
   const entryActionNode = nodes.find(n => n.type === 'action' && n.data.actionType === 'buy');
   const entryFee = entryActionNode ? (entryActionNode.data.fee === '' || entryActionNode.data.fee === undefined ? 0.1 : Number(entryActionNode.data.fee)) : null;
+  // Exit fee feeds the liquidation-distance line of the go-live checklist (1/lev − mmr − fee)
+  const exitActionNodeForCtx = nodes.find(n => n.type === 'action' && (n.data.actionType === 'sell' || n.data.actionType === 'cover'));
+  const exitFee = exitActionNodeForCtx ? (exitActionNodeForCtx.data.fee === '' || exitActionNodeForCtx.data.fee === undefined ? 0.1 : Number(exitActionNodeForCtx.data.fee)) : (entryFee ?? 0);
   const liveLeverage = activeMarketType === 'swap' ? (Number(activeApiKeyNode?.data.leverage) || 1) : 1;
   const liveMarginMode = activeApiKeyNode?.data.marginMode || 'isolated';
   // Short leg presence for the go-live checklist: a SHORT block, and whether
@@ -506,7 +509,7 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
   const hasShortStop = !!shortActionNode && edges.some(e => e.source === shortActionNode.id && e.sourceHandle === 'sl');
   useEffect(() => {
       if (!initRef.current) return;
-      const liveContext = { keyName: liveKeyName, exchange: liveKeyExchange, isSandbox: liveKeySandbox, entryFee,
+      const liveContext = { keyName: liveKeyName, exchange: liveKeyExchange, isSandbox: liveKeySandbox, entryFee, exitFee,
                             marketType: activeMarketType, leverage: liveLeverage, marginMode: liveMarginMode,
                             hasShort, hasCover, hasShortStop };
       setNodes(nds => nds.map(n => {
@@ -517,12 +520,12 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
           }
           if (n.type !== 'botConfig') return n;
           const cur = n.data.liveContext;
-          if (cur && cur.keyName === liveContext.keyName && cur.exchange === liveContext.exchange && cur.isSandbox === liveContext.isSandbox && cur.entryFee === liveContext.entryFee
+          if (cur && cur.keyName === liveContext.keyName && cur.exchange === liveContext.exchange && cur.isSandbox === liveContext.isSandbox && cur.entryFee === liveContext.entryFee && cur.exitFee === liveContext.exitFee
               && cur.marketType === liveContext.marketType && cur.leverage === liveContext.leverage && cur.marginMode === liveContext.marginMode
               && cur.hasShort === hasShort && cur.hasCover === hasCover && cur.hasShortStop === hasShortStop) return n;
           return { ...n, data: { ...n.data, liveContext } };
       }));
-  }, [liveKeyName, liveKeyExchange, liveKeySandbox, entryFee, activeMarketType, liveLeverage, liveMarginMode, hasShort, hasCover, hasShortStop, setNodes]);
+  }, [liveKeyName, liveKeyExchange, liveKeySandbox, entryFee, exitFee, activeMarketType, liveLeverage, liveMarginMode, hasShort, hasCover, hasShortStop, setNodes]);
 
   // Cash currency of the whitelist (from the exchange's market list, else the
   // symbol form) for the capital / order-cap labels and the inverse note.
@@ -949,7 +952,6 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
             : await apiClient.post('/api/bots/', payload);
         const savedWarnings = Array.isArray(res?.data?.validation_warnings) ? res.data.validation_warnings : [];
         setIssues(null);
-        if (savedWarnings.length) toast.warn(savedWarnings.join('\n'));
 
         if (hasLogic) {
             toast.success(editingBot ? 'Algorithm configuration updated.' : 'Algorithm successfully compiled & deployed.');
@@ -957,6 +959,19 @@ const BotBuilderFlow = ({ closeBuilder, editingBot }) => {
             toast.warn('Draft saved without logic — the engine will ignore it until you connect an Entry (or Short) signal.');
         }
         baselineRef.current = graphSnapshot(nodes, edges);
+        // The save is done either way; the validator's safety warnings
+        // (leverage, cross margin, missing cover/stop, …) are the product's
+        // main risk text, so they get a dialog instead of a 4.5 s toast.
+        if (savedWarnings.length) {
+            const close = await confirmDialog({
+                title: 'Saved with warnings',
+                message: savedWarnings.join('\n'),
+                confirmText: 'Close builder',
+                cancelText: 'Keep editing',
+                type: 'warning',
+            });
+            if (!close) return;
+        }
         closeBuilder();
 
     } catch (err) {

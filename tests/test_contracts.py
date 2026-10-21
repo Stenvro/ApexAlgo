@@ -147,30 +147,42 @@ def test_inverse_pnl_equals_the_quote_pnl_valued_at_exit(qty, entry, exit_, size
 @given(sides, prices, st.floats(min_value=1.0, max_value=125.0))
 def test_inverse_liquidation_lies_on_the_losing_side_and_closer_with_leverage(side, entry, lev):
     liq = INVERSE.liquidation_price(side, entry, lev)
+    if side == "short" and lev <= 1:
+        assert liq is None  # R3: no level for a 1x inverse short
+        return
     assert liq is not None and liq > 0
+    # R3 (audit 2026-10): the level keeps the maintenance margin (and the
+    # fee reserve, 0 here) on the *mark* notional — the coin-margined curve
     if side == "long":
         assert liq < entry
-        assert liq == pytest.approx(entry * lev / (lev + 1 - MAINTENANCE_MARGIN), rel=REL)
-        # at the liquidation price the long has lost (almost) its whole margin
+        assert liq == pytest.approx(entry * lev * (1 + MAINTENANCE_MARGIN) / (lev + 1), rel=REL)
+        # at the level what is left of the margin is exactly the maintenance margin at the mark
         loss = -INVERSE.pnl_cash("long", 1.0, entry, liq)
-        assert loss == pytest.approx(INVERSE.margin(1.0, entry, lev) * (1 - MAINTENANCE_MARGIN), rel=1e-6)
+        assert INVERSE.margin(1.0, entry, lev) - loss == pytest.approx(MAINTENANCE_MARGIN * INVERSE.notional_cash(1.0, liq), rel=1e-6)
     else:
         assert liq > entry
-        assert liq == pytest.approx(entry * lev / (lev - 1 + MAINTENANCE_MARGIN), rel=REL)
+        assert liq == pytest.approx(entry * lev * (1 - MAINTENANCE_MARGIN) / (lev - 1), rel=REL)
         loss = -INVERSE.pnl_cash("short", 1.0, entry, liq)
-        assert loss == pytest.approx(INVERSE.margin(1.0, entry, lev) * (1 - MAINTENANCE_MARGIN), rel=1e-6)
+        assert INVERSE.margin(1.0, entry, lev) - loss == pytest.approx(MAINTENANCE_MARGIN * INVERSE.notional_cash(1.0, liq), rel=1e-6)
     if lev < 100:
         further = INVERSE.liquidation_price(side, entry, lev * 1.25)
         assert abs(further - entry) < abs(liq - entry)
 
 
 def test_inverse_liquidation_at_1x():
-    # a 1x inverse short can never be liquidated by the formula's denominator
-    # going to zero: lev − 1 + mmr = mmr → far above entry, still finite
-    assert INVERSE.liquidation_price("short", 100.0, 1) == pytest.approx(100 / MAINTENANCE_MARGIN)
-    assert INVERSE.liquidation_price("long", 100.0, 1) == pytest.approx(100 / (2 - MAINTENANCE_MARGIN))
+    # R3: a 1x inverse short has no level (lev − 1 = 0), a 1x inverse long is
+    # liquidated when the coin has lost half its value (margin = notional at entry)
+    assert INVERSE.liquidation_price("short", 100.0, 1) is None
+    assert INVERSE.liquidation_price("long", 100.0, 1) == pytest.approx(100 * (1 + MAINTENANCE_MARGIN) / 2)
     assert LINEAR.liquidation_price("long", 100.0, 1) is None
     assert INVERSE.liquidation_price("long", 0, 5) is None
+    # the fee reserve moves every level toward the entry
+    assert INVERSE.liquidation_price("long", 100.0, 5, fee=0.001) > INVERSE.liquidation_price("long", 100.0, 5)
+    assert INVERSE.liquidation_price("short", 100.0, 5, fee=0.001) < INVERSE.liquidation_price("short", 100.0, 5)
+    assert LINEAR.liquidation_price("long", 100.0, 5, fee=0.001) == pytest.approx(100 * (1 - 0.2 + MAINTENANCE_MARGIN + 0.001))
+    assert LINEAR.liquidation_price("short", 100.0, 5, fee=0.001) == pytest.approx(100 * (1 + 0.2 - MAINTENANCE_MARGIN - 0.001))
+    # a band that is not positive (maintenance margin + fee ≥ 1/leverage) has no level
+    assert LINEAR.liquidation_price("long", 100.0, 10, mmr=0.2) is None
 
 
 @given(sides, qtys, prices, prices, leverages, st.floats(min_value=0, max_value=0.01))

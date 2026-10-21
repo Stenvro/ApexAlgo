@@ -9,7 +9,7 @@ from itertools import pairwise
 from sqlalchemy.orm import Session
 
 from backend.core.database import SessionLocal
-from backend.core.exchange_registry import build_exchange_for_symbol, exchange_spec
+from backend.core.exchange_registry import build_exchange_for_symbol, ccxt_id_for, exchange_spec, kind_of_symbol
 from backend.engine.symbols import is_derivative, market_type_of
 from backend.engine import funding
 from backend.core.events import event_bus
@@ -38,7 +38,7 @@ class CandlePoller:
         self.running = False
         self.needs_reconnect = False
         self._poll_tasks: list[asyncio.Task] = []
-        self._exchange_cache: dict[tuple[str, str], tuple[float, object, threading.Lock]] = {}  # (exchange_id, market type) → (created_at, ccxt instance, lock)
+        self._exchange_cache: dict[tuple[str, str, str], tuple[float, object, threading.Lock]] = {}  # (exchange_id, market type, ccxt class) → (created_at, ccxt instance, lock)
         self._exchange_cache_ttl = 3600  # rebuild exchange instances after 1 hour
         # Last closed candle ts per (exchange, symbol, timeframe), kept across
         # reconnects so a restarted poll task does not re-publish the same candle.
@@ -585,12 +585,17 @@ class CandlePoller:
                 found_new = False
                 candles = await asyncio.to_thread(_fetch, fetch_limit)
                 if len(candles) >= 2:
-                    # Every candle except the last (still forming) is closed
+                    # Every candle except the last (still forming) is closed.
+                    # After a gap all but the newest closed candle are a
+                    # replay: the bots stop-check them at their own row but
+                    # must not place entries hours late at today's price.
+                    newest_closed_ts = int(candles[-2][0])
                     for closed in candles[:-1]:
                         closed_ts = int(closed[0])
                         if last_closed_ts is not None and closed_ts <= last_closed_ts:
                             continue
-                        await self._save_and_notify(exchange_name, symbol, timeframe, closed)
+                        await self._save_and_notify(exchange_name, symbol, timeframe, closed,
+                                                    replay=closed_ts < newest_closed_ts)
                         last_closed_ts = closed_ts
                         self._last_closed_ts[sub_key] = closed_ts
                         found_new = True
@@ -614,6 +619,7 @@ class CandlePoller:
         symbol: str,
         timeframe: str,
         candle_data: list,
+        replay: bool = False,
     ):
         ts_ms = int(candle_data[0])
         dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
@@ -675,6 +681,8 @@ class CandlePoller:
             "symbol":    symbol,
             "timeframe": timeframe,
             "timestamp": dt,
+            # True for every candle of a gap except the newest one
+            "replay": bool(replay),
         })
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -703,9 +711,12 @@ class CandlePoller:
     def _get_public_exchange(self, exchange_name: str, symbol: str = ""):
         """Return (instance, lock) for a cached unauthenticated exchange used for
         public market data. Spot and swap symbols get separate instances (the
-        market type is read off the symbol). Callers must hold the lock around
-        every fetch since sync CCXT instances are not thread-safe."""
-        cache_key = (exchange_name, market_type_of(symbol))
+        market type is read off the symbol), and so do contract kinds that
+        live on their own ccxt class (binance inverse → binancecoinm) — one
+        shared swap instance would serve the other kind a BadSymbol on every
+        poll. Callers must hold the lock around every fetch since sync CCXT
+        instances are not thread-safe."""
+        cache_key = self._cache_key(exchange_name, symbol)
         now = time.monotonic()
         cached = self._exchange_cache.get(cache_key)
         if cached and (now - cached[0]) < self._exchange_cache_ttl:
@@ -715,6 +726,14 @@ class CandlePoller:
         lock = cached[2] if cached else threading.Lock()
         self._exchange_cache[cache_key] = (now, instance, lock)
         return instance, lock
+
+    @staticmethod
+    def _cache_key(exchange_name: str, symbol: str = "") -> tuple[str, str, str]:
+        """(exchange, market type, ccxt class) — the class is what actually
+        differs between `BTC/USDT:USDT` and `BTC/USD:BTC` on binance."""
+        mt = market_type_of(symbol)
+        kind = kind_of_symbol(symbol) if mt != "spot" else None
+        return (exchange_name, mt, ccxt_id_for(exchange_name, mt, kind))
 
 
 candle_poller = CandlePoller()

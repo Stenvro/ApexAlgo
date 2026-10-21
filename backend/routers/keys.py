@@ -20,6 +20,8 @@ from backend.core.exchange_registry import (
 )
 from backend.engine.symbols import DEFAULT_MARKET_TYPE, MARKET_TYPES
 from backend.engine.broker import invalidate_leverage_cache
+from backend.engine.contracts import MAINTENANCE_MARGIN
+from backend.engine.settings_validator import LEVERAGE_WARN_ABOVE
 
 logger = logging.getLogger("apexalgo.keys")
 
@@ -45,7 +47,9 @@ def list_exchanges():
     """Capabilities per supported exchange (from the registry spec) for the
     connection form, the data manager and the builder. `has_sandbox` is
     probed from ccxt so it tracks the installed version. `markets` lists the
-    market types ApexAlgo can trade on the exchange with their limits."""
+    market types ApexAlgo can trade on the exchange with their limits.
+    `leverage_warn_above` / `maintenance_margin` are the engine's guard and
+    flat MMR, so the builder's go-live checklist never duplicates them."""
     out = []
     for ex_id, spec in EXCHANGES.items():
         out.append({
@@ -55,6 +59,8 @@ def list_exchanges():
             "has_sandbox": exchange_has_sandbox(ex_id),
             "keys_url": spec.keys_url,
             "sandbox_note": spec.sandbox_note,
+            "leverage_warn_above": LEVERAGE_WARN_ABOVE,
+            "maintenance_margin": MAINTENANCE_MARGIN,
             "markets": {
                 mt: {
                     "has_sandbox": exchange_has_sandbox(ex_id, mt),

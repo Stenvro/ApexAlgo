@@ -41,6 +41,9 @@ class BotManager:
         # in-memory — re-derived from the drawdown cache on the first tick
         # after a restart, so it survives without persistence.
         self._entries_blocked = set()
+        # (bot_name, symbol) pairs told once that entries are skipped on a
+        # replayed candle; cleared by the next non-replay tick of the pair
+        self._replay_notified = set()
         self._deleted_bots = set()  # bot names pending cleanup, skip in processing
         self._backfilling_bots = set()  # bot names currently in backfill, skip in live processing
         self._candle_locks = defaultdict(asyncio.Lock)  # (exchange, symbol, timeframe) -> serializer
@@ -96,8 +99,8 @@ class BotManager:
 
     # Drawdown state lives in engine/risk.py; the dict and lock are shared by
     # reference so routers keep invalidating `_drawdown_cache` directly
-    def _get_drawdown(self, bot_name, db, mode_group="live", starting_capital=1000.0, peak_reset_at=None):
-        return self._risk.get(bot_name, db, mode_group, starting_capital, peak_reset_at)
+    def _get_drawdown(self, bot_name, db, mode_group="live", starting_capital=1000.0, peak_reset_at=None, cash_currency=None):
+        return self._risk.get(bot_name, db, mode_group, starting_capital, peak_reset_at, cash_currency=cash_currency)
 
     def _update_drawdown(self, bot_name, mode_group, profit_abs):
         self._risk.update(bot_name, mode_group, profit_abs)
@@ -122,23 +125,26 @@ class BotManager:
                 symbol = event_data["symbol"]
                 timeframe = event_data["timeframe"]
                 candle_ts = event_data.get("timestamp")
-                self._spawn(self._handle_candle_close(exchange, symbol, timeframe, candle_ts))
+                replay = bool(event_data.get("replay", False))
+                self._spawn(self._handle_candle_close(exchange, symbol, timeframe, candle_ts, replay))
             except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
 
-    async def _handle_candle_close(self, exchange: str, symbol: str, timeframe: str, candle_ts):
+    async def _handle_candle_close(self, exchange: str, symbol: str, timeframe: str, candle_ts, replay: bool = False):
         """Serialize processing per subscription and skip re-published candles.
         Poll tasks re-emit after a reconnect, so the same candle can arrive twice;
-        without this, two concurrent runs could place duplicate live orders."""
+        without this, two concurrent runs could place duplicate live orders.
+        `replay` marks a candle the poller caught up on after a gap (not the
+        newest one): paper/live bots run their exits on it but place no entries."""
         key = (exchange, symbol, timeframe)
         async with self._candle_locks[key]:
             if candle_ts is not None:
                 prev = self._processed_candles.get(key)
                 if prev is not None and candle_ts <= prev:
                     return
-            await self._process_bots(exchange, symbol, timeframe, candle_ts)
+            await self._process_bots(exchange, symbol, timeframe, candle_ts, replay=replay)
             if candle_ts is not None:
                 self._processed_candles[key] = candle_ts
 
@@ -199,7 +205,7 @@ class BotManager:
         return broker.get_live_capital(self._balance_cache, ccxt_inst, api_key_record, ccxt_symbol, bot_name, ttl)
 
     def _close_all_open_positions(self, bot, db, key_records):
-        live_cycle.close_all_open_positions(self, bot, db, key_records)
+        return live_cycle.close_all_open_positions(self, bot, db, key_records)
 
     def _check_exits(self, open_position, row_close, row_high, row_low, is_sell_signal, bot_settings, current_atr=0.0, row_open=None, side="long"):
         return exits.check_exits(self.position_states, self._position_states_lock, open_position,
@@ -240,9 +246,9 @@ class BotManager:
     def _execute_sync_backfill(self, bot_id: int):
         startup.execute_sync_backfill(self, bot_id)
 
-    async def _process_bots(self, exchange: str, symbol: str, timeframe: str, candle_ts=None):
+    async def _process_bots(self, exchange: str, symbol: str, timeframe: str, candle_ts=None, replay: bool = False):
         """One live candle for every matching bot — see engine/live_cycle.py."""
-        await asyncio.to_thread(live_cycle.process_tick, self, exchange, symbol, timeframe, candle_ts)
+        await asyncio.to_thread(live_cycle.process_tick, self, exchange, symbol, timeframe, candle_ts, replay)
 
     def mark_deleted(self, bot_name: str):
         """Mark a bot as deleted so _process_bots skips it."""

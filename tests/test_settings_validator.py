@@ -148,4 +148,5 @@ def test_leverage_warning_quotes_the_maintenance_margin_move():
     _, settings = load_example("Donchian_Breakout_1d")
     res = validate_bot_settings(_swap(settings, symbols=["BTC/USDT:USDT"], leverage=5), exchange_id="binance")
     assert res["errors"] == []
-    assert any("liquidation" in w and "19.9%" in w for w in res["warnings"]), res["warnings"]
+    # R3: 100 × (1/5 − 0.5% maintenance margin − 0.1% exit fee) = 19.4%
+    assert any("liquidation" in w and "19.4%" in w for w in res["warnings"]), res["warnings"]

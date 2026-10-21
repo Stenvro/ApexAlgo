@@ -91,7 +91,8 @@ def get_positions(
         Position.mode, Position.status, Position.side, Position.entry_price,
         Position.amount, Position.profit_abs, Position.profit_pct,
         Position.created_at, Position.closed_at, Position.market_type, Position.leverage,
-        Position.cash_currency, Position.contract_kind, Position.contract_size
+        Position.cash_currency, Position.contract_kind, Position.contract_size,
+        Position.triggered_exits, Position.funding_paid
     )
     if symbol:
         formatted_symbol = symbol.replace('-', '/').upper()
@@ -122,7 +123,11 @@ def get_positions(
          # `amount` reads: base units (spot/linear) or contracts (inverse)
          "cash_currency": r[15] or cash_currency(r[3]),
          "contract_kind": r[16] or spec_from_symbol(r[3]).kind,
-         "contract_size": r[17] if r[17] is not None else spec_from_symbol(r[3]).contract_size}
+         "contract_size": r[17] if r[17] is not None else spec_from_symbol(r[3]).contract_size,
+         # Which exit tiers fired (incl. "liquidation") and the net funding
+         # booked inside profit_abs — the ledger/chart cards show both
+         "triggered_exits": list(r[18] or []),
+         "funding_paid": r[19] or 0.0}
         for r in query.all()
     ]
 
@@ -477,7 +482,19 @@ def close_position_now(pos: Position, db: Session) -> float:
     """Force-close one open position and book the result. Real modes (live, and
     paper = real orders on the exchange sandbox) are closed on the exchange;
     forward_test at the last candle close. Raises HTTPException on failure and
-    leaves the position open. Shared by the force-close route and bot deletion."""
+    leaves the position open. Shared by the force-close route and bot deletion.
+    A partial fill is booked (the sold leg, the remainder stays open) and then
+    raised as 409, so bot stop/delete never treat the position as gone."""
+    result = close_position_detailed(pos, db)
+    if result["partial"]:
+        raise HTTPException(status_code=409, detail=result["message"])
+    return result["price"]
+
+
+def close_position_detailed(pos: Position, db: Session) -> dict:
+    """`close_position_now` returning `{price, closed, remaining, partial,
+    message}` — a partially filled exchange close keeps the remainder open
+    with its record intact instead of booking the whole position closed."""
     # Serialize with the engine's tick for this bot: the open→closing update
     # below guards the record, the lock guards the exchange (no second sell
     # while a tick is mid-order on the same position)
@@ -485,7 +502,7 @@ def close_position_now(pos: Position, db: Session) -> float:
         return _close_position_locked(pos, db)
 
 
-def _close_position_locked(pos: Position, db: Session) -> float:
+def _close_position_locked(pos: Position, db: Session) -> dict:
     # Atomically mark as closing to prevent a double-close race with the engine
     rows_updated = db.query(Position).filter(
         Position.id == pos.id,
@@ -531,8 +548,17 @@ def _close_position_locked(pos: Position, db: Session) -> float:
 
         realized_pnl = pnl.price_pnl(pos_side, pos.entry_price, close_price, close_qty, spec=spec) - entry_fee_portion - exit_fee
 
-        pos.status = "closed"
-        pos.closed_at = datetime.now(timezone.utc)
+        # Same rule as the engine's close_all: a fill short of the position
+        # keeps the remainder open (it is still on the exchange) — booking
+        # it closed would leave coins/contracts with no record and no stop
+        requested_qty = float(pos.amount or 0.0)
+        partial = close_qty < requested_qty - pnl.close_epsilon(original_amount)
+        if partial:
+            pos.status = "open"
+            pos.amount = requested_qty - close_qty
+        else:
+            pos.status = "closed"
+            pos.closed_at = datetime.now(timezone.utc)
         pos.profit_abs = (pos.profit_abs or 0.0) + realized_pnl
         # profit_pct on the capital this leg had locked (margin + entry fee),
         # added to what earlier partial exits already booked — same basis as
@@ -562,7 +588,14 @@ def _close_position_locked(pos: Position, db: Session) -> float:
         db.add(close_order)
         db.commit()
         _invalidate_drawdown_cache([pos.bot_name])
-        return float(close_price)
+        unit = "contracts" if spec.is_inverse else spec.base
+        if partial:
+            msg = f"Closed {close_qty:g} of {requested_qty:g} {unit} — {pos.amount:g} remains open"
+            logger.warning("Force close of position %d partial: %s", pos.id, msg)
+        else:
+            msg = f"Position forcefully closed at {close_price:.2f} {spec.quote}"
+        return {"price": float(close_price), "closed": float(close_qty), "remaining": float(pos.amount if partial else 0.0),
+                "partial": partial, "message": msg}
     except HTTPException:
         db.rollback()
         raise
@@ -580,10 +613,14 @@ def force_close_position(position_id: int, db: Session = Depends(get_db)):
     if pos.status == "closed":
         return JSONResponse(status_code=400, content={"detail": "Position is already closed."})
     try:
-        close_price = close_position_now(pos, db)
+        result = close_position_detailed(pos, db)
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"detail": e.detail})
-    return {"status": "success", "message": f"Position forcefully closed at {close_price:.2f} {spec_from_symbol(pos.symbol).quote}"}
+    if result["partial"]:
+        return {"status": "partial", "partial": True, "closed": result["closed"], "remaining": result["remaining"],
+                "price": result["price"], "message": result["message"]}
+    return {"status": "success", "partial": False, "closed": result["closed"], "remaining": 0.0,
+            "price": result["price"], "message": result["message"]}
 
 @router.get("/export")
 def export_trades_csv(mode: str = "live"):

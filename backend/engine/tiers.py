@@ -30,11 +30,12 @@ MAX_AGE = timedelta(days=7)
 def fetch(exchange_id: str, symbol: str) -> list:
     """`[(tier, min_size, max_size|None, mmr, max_leverage|None)]` from the
     exchange; empty when it has no tier endpoint. Raises on network errors."""
-    from backend.core.exchange_registry import build_exchange_for_symbol
+    from backend.core.exchange_registry import build_exchange_for_symbol, remember_markets
     exchange = build_exchange_for_symbol(exchange_id, symbol)
     if not exchange.has.get("fetchMarketLeverageTiers") and not exchange.has.get("fetchLeverageTiers"):
         return []
     exchange.load_markets()
+    remember_markets(exchange_id, exchange.markets)  # real contract sizes for the spec cache
     if exchange.has.get("fetchMarketLeverageTiers"):
         rows = exchange.fetch_market_leverage_tiers(symbol) or []
     else:

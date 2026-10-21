@@ -38,8 +38,6 @@ export default function ApiKeyGate({ onUnlock, signedOutReason = null }) {
   return (
     <div className="relative flex h-[100dvh] items-center justify-center bg-bg text-text font-sans p-4 overflow-hidden grid-background">
       {/* Ambient glows */}
-      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 w-[560px] h-[560px] bg-accent/[0.05] rounded-full blur-[130px] pointer-events-none" />
-      <div className="absolute bottom-0 right-1/4 w-[360px] h-[360px] bg-info/[0.04] rounded-full blur-[110px] pointer-events-none" />
 
       <div className="relative w-full max-w-md fade-in">
         <div className="bg-raised/80 backdrop-blur-xl border border-border rounded-xl shadow-pop p-8 relative overflow-hidden">

@@ -103,13 +103,13 @@ def test_backtest_charges_stored_funding_on_open_positions(db):
 
 
 def test_backtest_uses_the_stored_tier_rate_for_liquidation(db):
-    """A tier with a 20% maintenance rate liquidates the 10x long on a move
-    that the flat 0.5% rate survives."""
+    """A tier with a 5% maintenance rate (level at −4.9% at 10x) liquidates
+    the long on a move that the flat 0.5% rate (−9.4%) survives."""
     candles = make_candles(EXCHANGE, SWAP, TF, 400, seed=5, start_price=100.0)
     insert_candles(db, candles)
     settings = _bt_settings(leverage=10, sl=50, tp=200, amount_pct=20)
     bot0, flat, _ = _run(db, settings, name="flat", candles=candles)
-    db.add(LeverageTier(exchange=EXCHANGE, symbol=SWAP, tier=1, min_size=0, max_size=None, mmr=0.2, max_leverage=10))
+    db.add(LeverageTier(exchange=EXCHANGE, symbol=SWAP, tier=1, min_size=0, max_size=None, mmr=0.05, max_leverage=10))
     db.commit()
     bot1, tiered, _ = _run(db, settings, name="tiered", candles=candles)
     assert bot0.settings["last_backtest_summary"]["mmr_source"] == "flat"
@@ -118,7 +118,7 @@ def test_backtest_uses_the_stored_tier_rate_for_liquidation(db):
     liq = [o for o in db.query(Order).filter(Order.bot_name == "tiered", Order.side == "sell", Order.fee == 0)]
     for o in liq:
         p = db.get(Position, o.position_id)
-        assert o.price == pytest.approx(SPEC.liquidation_price("long", p.entry_price, 10, mmr=0.2))
+        assert o.price == pytest.approx(SPEC.liquidation_price("long", p.entry_price, 10, mmr=0.05, fee=0.001))
 
 
 def _cross_settings(leverage=10):
@@ -223,7 +223,7 @@ def test_forward_tick_uses_the_stored_tier_rate(db, swap_bot, run_tick):  # noqa
     p = db.get(Position, pos.id)
     assert p.status == "closed" and "liquidation" in (p.triggered_exits or [])
     sell = db.query(Order).filter(Order.position_id == pos.id, Order.side == "sell").one()
-    assert sell.price == pytest.approx(SPEC.liquidation_price("long", 100.0, 10, mmr=0.05))
+    assert sell.price == pytest.approx(SPEC.liquidation_price("long", 100.0, 10, mmr=0.05, fee=0.001))
 
 
 def test_forward_cross_liquidation_books_the_free_cash(db, swap_bot, run_tick):  # noqa: F811

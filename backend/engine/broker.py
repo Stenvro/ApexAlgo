@@ -267,12 +267,16 @@ def invalidate_leverage_cache(key_name=None):
                 _leverage_applied.discard(tag)
 
 
-def exchange_position_gone(ccxt_inst, ccxt_symbol, side="long"):
+def exchange_position_gone(ccxt_inst, ccxt_symbol, side="long", positions=None):
     """True when `fetch_positions([symbol])` shows no open contracts on
     `side` — the position was liquidated or closed outside the bot. Raises
-    when the exchange cannot be asked (the caller decides what to do)."""
+    when the exchange cannot be asked (the caller decides what to do).
+    `positions` is an already fetched list for the symbol (one call per
+    symbol per tick when several layers are probed)."""
     sym = normalize(ccxt_symbol)
-    for p in ccxt_inst.fetch_positions([sym]) or []:
+    if positions is None:
+        positions = ccxt_inst.fetch_positions([sym]) or []
+    for p in positions:
         if normalize(p.get("symbol")) != sym:
             continue
         if float(p.get("contracts") or 0) <= 0:
@@ -280,6 +284,27 @@ def exchange_position_gone(ccxt_inst, ccxt_symbol, side="long"):
         if str(p.get("side") or "long").lower() == side:
             return False
     return True
+
+
+def free_base(ccxt_inst, ccxt_symbol):
+    """Free balance of the pair's base coin in the spot wallet (what a sell
+    can actually move), None when it cannot be read. Used when a close is
+    refused for insufficient funds: the record may say more than the wallet
+    holds (fee charged in base, a manual dust sale, rounding)."""
+    base = base_of(ccxt_symbol)
+    try:
+        balance = ccxt_inst.fetch_balance()
+    except Exception as exc:
+        logger.warning("fetch_balance failed while re-reading %s after a rejected close: %s", base, exc)
+        return None
+    v = balance.get(base)
+    free = v.get("free") if isinstance(v, dict) else None
+    if free is None:
+        free = (balance.get("free") or {}).get(base)
+    try:
+        return float(free) if free is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def ensure_leverage(ccxt_inst, api_key_record, ccxt_symbol, leverage, margin_mode, bot_name):

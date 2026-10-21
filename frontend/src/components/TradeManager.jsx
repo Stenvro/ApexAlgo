@@ -11,6 +11,7 @@ import { Skeleton } from './ui/Skeleton';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
 import { orderAction, positionSide } from '../utils/orders';
+import { humanizeApiError } from '../api/errors';
 import { fmtMoney, fmtMoneyTitle, rowCurrency, rowKind, botCurrency, currencyOf, symbolParts, currenciesOf, sumByCurrency, fmtByCurrency, positionMargin, positionPnl, isCryptoCash } from '../utils/money';
 
 // ─── Formatters ──────────────────────────────────────────────────────────────
@@ -80,9 +81,14 @@ const pnlSign = (v) => (v >= 0 ? '+' : '');
 const signed = (v, ccy, opts) => `${Number(v) >= 0 ? '+' : '-'}${fmtMoney(Math.abs(Number(v) || 0), ccy, opts)}`;
 // Fees: 4 decimals for fiat/stable, significant digits for coin-denominated fees
 const fmtFee = (v, ccy) => fmtMoney(v, ccy, isCryptoCash(ccy) ? {} : { digits: 4 });
-// Fee of an order in its position's cash currency (the server converts when
-// the fee was charged in another asset, e.g. a spot buy fee taken in the base)
-const feeCash = (o) => Number(o?.fee_cash ?? o?.fee) || 0;
+// Fee of an order in its position's cash currency: `fee` is always booked in
+// the cash currency (the server converts when the exchange charged another
+// asset); `fee_cash`/`fee_currency` are the raw charge and are only a hint.
+const feeCash = (o) => Number(o?.fee) || 0;
+// Size label: inverse contracts are a contract count, never coins
+const sizeLabel = (row) => (rowKind(row) === 'inverse' ? ' contracts' : '');
+const normFeeCcy = (c) => String(c || '').trim().toUpperCase() || null;
+const wasLiquidated = (pos) => Array.isArray(pos?.triggered_exits) && pos.triggered_exits.includes('liquidation');
 // Prices (entry/exit/fill) are quoted in the QUOTE currency of the pair —
 // on an inverse swap that differs from the cash currency
 const quoteOf = (symbol) => symbolParts(symbol).quote;
@@ -490,6 +496,8 @@ export default function TradeManager({ setError, bots = [], request = null }) {
     }, [positions, orders]);
 
     const [lastUpdated, setLastUpdated] = useState(null);
+    // Set when a background poll fails: the tables still show the last good data
+    const [staleSince, setStaleSince] = useState(null);
     // Server-side window: the earliest backtest window of the bots on screen.
     // Backtest rows dominate the volume, so this keeps the initial load small;
     // open positions are always returned by the API regardless of the window
@@ -540,11 +548,13 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             setPositions(pos);
             setOrders(ord);
             setLastUpdated(polledAt);
+            setStaleSince(null);
             if (setError) setError(null);
             fetchLivePrices(pos);
         } catch (err) {
             if (signal?.aborted) return;
-            if (!silent && setError) setError(err.response?.data?.detail || 'Failed to load analytics data.');
+            if (silent) setStaleSince(new Date());
+            else if (setError) setError(humanizeApiError(err, 'Failed to load analytics data.'));
         }
         if (!silent) setLoading(false);
         setHasLoadedOnce(true);
@@ -680,7 +690,8 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         setClosingId(id);
         try {
             const res = await apiClient.post(`/api/trades/positions/${id}/close`);
-            toast.success(res.data?.message || 'Position closed.');
+            if (res.data?.partial) toast.warn(res.data?.message || 'Position partially closed — the remainder is still open.');
+            else toast.success(res.data?.message || 'Position closed.');
             fetchAllData();
         } catch (e) {
             toast.error(e.response?.data?.detail || 'Failed to close position.');
@@ -1248,19 +1259,25 @@ export default function TradeManager({ setError, bots = [], request = null }) {
         if (!cur) return { abs: 0, pct: 0 };
         // In the position's cash currency (base coin on an inverse swap)
         const abs = positionPnl(pos, cur);
-        const isLong = pos.side !== 'short';
-        const pct = isLong ? ((cur - pos.entry_price) / pos.entry_price) * 100 : ((pos.entry_price - cur) / pos.entry_price) * 100;
+        // Return on the capital the position locks (margin at entry) — the same
+        // basis as `profit_pct` on closed trades, so a 2 % move at 5× reads ≈ 10 %
+        const margin = positionMargin(pos);
+        const pct = margin > 0 ? (abs / margin) * 100 : 0;
         return { abs, pct };
     };
 
-    // Exit price implied by the realised PnL. Spot/linear: pnl = ±(exit − entry) × size.
-    // Inverse (PnL in the base coin): pnl = ±size × (exit − entry) / exit
-    // → exit = entry / (1 ∓ pnl/size).
+    // Exit price implied by the realised PnL (fees and funding are inside
+    // profit_abs, so it is approximate). Spot/linear: pnl = ±(exit − entry) × size.
+    // Inverse (PnL in the base coin, `amount` = contracts of `contract_size`
+    // quote units): pnl = ±amount × size × (1/entry − 1/exit)
+    // → exit = entry / (1 − dir × pnl × entry / (amount × size)).
     const getExitPrice = (pos) => {
         if (!pos.profit_abs || !pos.entry_price || !pos.amount) return null;
         const dir = pos.side === 'short' ? -1 : 1;
         if (rowKind(pos) === 'inverse') {
-            const k = 1 - dir * pos.profit_abs / pos.amount;
+            const size = Number(pos.contract_size);
+            if (!Number.isFinite(size) || size <= 0) return null; // old row without contract_size: hide
+            const k = 1 - dir * pos.profit_abs * pos.entry_price / (pos.amount * size);
             return k > 0 ? pos.entry_price / k : null;
         }
         return pos.entry_price + dir * pos.profit_abs / pos.amount;
@@ -1287,11 +1304,12 @@ export default function TradeManager({ setError, bots = [], request = null }) {
             toast.success(`Exported ${closedPositions.length} trades to CSV.`);
         } else {
             if (filteredOrders.length === 0) { toast.info('No orders to export for the current filters.'); return; }
-            const headers = ['Timestamp', 'Bot', 'Exchange', 'Mode', 'Symbol', 'Side', 'Action', 'Type', 'Price', 'Amount', 'Fee', 'Fee Currency', 'Status'];
+            const headers = ['Timestamp', 'Bot', 'Exchange', 'Mode', 'Symbol', 'Side', 'Action', 'Type', 'Price', 'Amount', 'Fee (cash)', 'Cash Currency', 'Fee charged', 'Fee currency', 'Status'];
             const rows = filteredOrders.map(o => csvLine([
                 new Date(o.timestamp).toISOString(),
                 o.bot_name, rowExchange(o) || '', o.mode, o.symbol,
-                o.side, orderAction(o), o.order_type, o.price, o.amount, o.fee ?? '', o.fee_currency || rowCurrency(o) || '', o.status,
+                o.side, orderAction(o), o.order_type, o.price, o.amount,
+                o.fee ?? '', rowCurrency(o) || '', o.fee_cash ?? '', o.fee_currency || '', o.status,
             ]));
             triggerDownload([csvLine(headers), ...rows].join('\r\n'), 'apex_raw_orders');
             toast.success(`Exported ${filteredOrders.length} orders to CSV.`);
@@ -1393,8 +1411,11 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                             Export
                         </Button>
                         {lastUpdated && (
-                            <span className="text-2xs text-faint font-num whitespace-nowrap" title={anyBotActive ? 'Refreshes every 30 s while a bot is running' : 'Press Sync to refresh'}>
-                                updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{anyBotActive ? ' · auto' : ''}
+                            <span className={`text-2xs font-num whitespace-nowrap ${staleSince ? 'text-warn' : 'text-faint'}`}
+                                title={staleSince
+                                    ? `The last background refresh at ${staleSince.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} failed — tables show the data from ${lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}; retrying every 30 s`
+                                    : (anyBotActive ? 'Refreshes every 30 s while a bot is running' : 'Press Sync to refresh')}>
+                                updated {lastUpdated.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}{staleSince ? ' · stale' : (anyBotActive ? ' · auto' : '')}
                             </span>
                         )}
                         <span className="hidden md:inline-flex">
@@ -1963,7 +1984,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                     <th className={`${thClass} text-right`}>Entry</th>
                                     <th className={`${thClass} text-right`}>Size</th>
                                     <th className={`${thClass} text-right`}>Unreal. PNL</th>
-                                    <th className={`${thClass} text-right`}>Unreal. %</th>
+                                    <th className={`${thClass} text-right`} title="Unrealised PnL as a % of the capital the position locks (margin + entry fee basis, like Yield on closed trades) — not the raw price move">Unreal. % on margin</th>
                                     <th className={`${thClass} text-right`}>Actions</th>
                                 </tr>
                             </thead>
@@ -1995,7 +2016,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                 )}
                                             </td>
                                             <td className="px-3 py-2 text-right font-num text-muted" title={fmtMoneyTitle(quote)}>{fmtMoney(pos.entry_price, quote)}</td>
-                                            <td className="px-3 py-2 text-right font-num text-muted">{formatCrypto(pos.amount)}</td>
+                                            <td className="px-3 py-2 text-right font-num text-muted">{formatCrypto(pos.amount)}{sizeLabel(pos) && <span className="ml-1 text-3xs text-faint" title={`Inverse contract: ${pos.contract_size ? `${pos.contract_size} ${quote} per contract` : 'amount is a contract count'}`}>contracts</span>}</td>
                                             <td className={`px-3 py-2 text-right font-num font-bold ${hasPrice ? pnlColor(pnl.abs) : 'text-muted'}`} title={fmtMoneyTitle(ccy)}>
                                                 {hasPrice ? signed(pnl.abs, ccy) : '—'}
                                             </td>
@@ -2105,7 +2126,10 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                 </td>
                                                 <td className="px-3 py-1.5 text-accent font-bold uppercase text-2xs">{rowExchange(pos) || '—'}</td>
                                                 <td className="px-3 py-1.5 font-bold font-num text-text">{pos.symbol}{(Number(pos.leverage) || 1) > 1 && <span className="ml-1 text-3xs text-warn" title={`Perpetual swap at ${pos.leverage}× — margin ≈ ${fmtMoney(positionMargin(pos), ccy)}`}>{Number(pos.leverage)}×</span>}</td>
-                                                <td className="px-3 py-1.5"><Badge variant={positionSide(pos) === 'long' ? 'success' : 'danger'} className="text-3xs!">{positionSide(pos).toUpperCase()}</Badge></td>
+                                                <td className="px-3 py-1.5">
+                                                    <Badge variant={positionSide(pos) === 'long' ? 'success' : 'danger'} className="text-3xs!">{positionSide(pos).toUpperCase()}</Badge>
+                                                    {wasLiquidated(pos) && <Badge variant="danger" className="ml-1 text-3xs!" title="Liquidated — the position was closed by the liquidation engine; loss = margin + entry fee">LIQ</Badge>}
+                                                </td>
                                                 <td className="px-3 py-1.5 text-right font-num text-2xs" title={fmtMoneyTitle(quote)}>
                                                     <span className="text-muted">{fmtMoney(pos.entry_price, quote)}</span>
                                                     <span className="text-faint mx-1">→</span>
@@ -2113,7 +2137,7 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                         {exitPrice ? fmtMoney(exitPrice, quote) : '—'}
                                                     </span>
                                                 </td>
-                                                <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">{formatCrypto(pos.amount)}</td>
+                                                <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">{formatCrypto(pos.amount)}{sizeLabel(pos) && <span className="ml-1 text-3xs text-faint">contracts</span>}</td>
                                                 <td className="px-3 py-1.5 text-right font-num text-muted text-2xs">{formatHoldTime(holdMs)}</td>
                                                 <td className="px-3 py-1.5 text-right">
                                                     <span className={`px-1.5 py-0.5 rounded text-3xs font-bold font-num ${isWin ? 'bg-success/10 text-success' : 'bg-danger/10 text-danger'}`}>
@@ -2205,14 +2229,18 @@ export default function TradeManager({ setError, bots = [], request = null }) {
                                                 {!!order.reduce_only && <span className="ml-1.5 text-faint text-3xs uppercase" title="reduce-only">RO</span>}
                                             </td>
                                             <td className="px-3 py-1.5 text-right font-num text-text" title={fmtMoneyTitle(quoteOf(order.symbol))}>{fmtMoney(order.price, quoteOf(order.symbol))}</td>
-                                            <td className="px-3 py-1.5 text-right font-num text-muted">{formatCrypto(order.amount)}</td>
-                                            <td className="px-3 py-1.5 text-right font-num text-muted text-2xs" title={fmtMoneyTitle(order.fee_currency || rowCurrency(order))}>
-                                                {order.fee > 0 ? `-${fmtFee(order.fee, order.fee_currency || rowCurrency(order))}` : '—'}
+                                            <td className="px-3 py-1.5 text-right font-num text-muted">{formatCrypto(order.amount)}{sizeLabel(order) && <span className="ml-1 text-3xs text-faint">contracts</span>}</td>
+                                            <td className="px-3 py-1.5 text-right font-num text-muted text-2xs" title={fmtMoneyTitle(rowCurrency(order))}>
+                                                {order.fee > 0 ? `-${fmtFee(order.fee, rowCurrency(order))}` : '—'}
+                                                {order.fee_cash != null && order.fee_currency && normFeeCcy(order.fee_currency) !== rowCurrency(order) && (
+                                                    <span className="ml-1 text-faint" title="What the exchange actually charged (converted into the cash currency for the booked fee)">({fmtFee(order.fee_cash, order.fee_currency)})</span>
+                                                )}
                                             </td>
                                             <td className="px-3 py-1.5 text-right">
                                                 <Badge
-                                                    variant={order.status === 'filled' ? 'success' : (order.status === 'rejected' || order.status === 'canceled') ? 'danger' : 'accent'}
-                                                    className="text-3xs!">
+                                                    variant={order.status === 'filled' ? 'success' : (order.status === 'rejected' || order.status === 'canceled') ? 'danger' : order.status === 'unknown' ? 'warn' : 'accent'}
+                                                    className="text-3xs!"
+                                                    title={order.status === 'unknown' ? 'The exchange did not confirm this order — check the exchange and the bot console' : undefined}>
                                                     {order.status}
                                                 </Badge>
                                             </td>

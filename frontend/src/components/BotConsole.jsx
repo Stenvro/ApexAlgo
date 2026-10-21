@@ -93,10 +93,10 @@ export default function BotConsole({ botName, isOpen, clearSignal = 0 }) {
         <div className="flex items-center gap-2 shrink-0">
           <button
             onClick={clearLocal}
-            title="Clear console output (local only)"
+            title="Hide the console output on this screen — the bot's stored log is untouched (the broom on the card resets it)"
             className="text-3xs font-bold uppercase text-muted hover:text-text transition-colors px-1.5 py-0.5 rounded-sm hover:bg-overlay"
           >
-            CLEAR
+            HIDE OUTPUT
           </button>
           <button
             onClick={jumpToBottom}

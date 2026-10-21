@@ -3,9 +3,10 @@ tracker keeps one realized-equity state per (bot, mode group), lazily rebuilt
 from closed positions; `unrealized_pnl` marks the open positions to the
 latest stored close so the gates measure the same curve as the backtest."""
 import threading
+from datetime import datetime, timezone
 from sqlalchemy import func
 from backend.engine import pnl
-from backend.engine.sizing import position_spec
+from backend.engine.sizing import _naive_utc, currency_filter, position_spec
 from backend.models.candles import Candle
 from backend.models.positions import Position
 
@@ -32,29 +33,36 @@ class DrawdownTracker:
         # router's force-close and delete paths all touch it from their own threads
         self.lock = threading.Lock()
 
-    def get(self, bot_name, db, mode_group="live", starting_capital=1000.0, peak_reset_at=None):
+    def get(self, bot_name, db, mode_group="live", starting_capital=1000.0, peak_reset_at=None, cash_currency=None):
         """Return cached drawdown state, lazy-initializing from DB on first access.
         mode_group: "backtest" for backtest-only, "forward" for forward_test,
         "live" for paper/live (see `mode_group_for`) — a simulated forward
         loss never counts against the real-money curve.
         starting_capital: wallet size used as equity base for percentage calculation.
         peak_reset_at: naive-UTC datetime; closes before it only move the equity
-        base (block_entries cooldown started a new drawdown campaign there)."""
+        base (block_entries cooldown started a new drawdown campaign there).
+        cash_currency: when given, only positions booked in that currency
+        build the curve (`starting_capital` is in it) — closes of a pair the
+        bot traded in another currency are not added to it."""
         cache_key = (bot_name, mode_group)
         with self.lock:
             if cache_key in self.cache:
                 return self.cache[cache_key]
+        modes = MODES_BY_GROUP.get(mode_group, MODES_BY_GROUP["live"])
         query = db.query(Position.profit_abs, Position.closed_at).filter(
-            Position.bot_name == bot_name, Position.status == "closed"
+            Position.bot_name == bot_name, Position.status == "closed", Position.mode.in_(modes)
         )
-        query = query.filter(Position.mode.in_(MODES_BY_GROUP.get(mode_group, MODES_BY_GROUP["live"])))
+        if cash_currency:
+            query = query.filter(currency_filter(cash_currency))
         closed = query.order_by(Position.closed_at).all()
         # Partial exits book their PnL on the still-open position as they
         # fill (and `update` the state per leg), so the realized curve
         # includes them before the last leg closes
-        open_realized = db.query(func.coalesce(func.sum(Position.profit_abs), 0.0)).filter(
-            Position.bot_name == bot_name, Position.status == "open",
-            Position.mode.in_(MODES_BY_GROUP.get(mode_group, MODES_BY_GROUP["live"]))).scalar() or 0.0
+        open_q = db.query(func.coalesce(func.sum(Position.profit_abs), 0.0)).filter(
+            Position.bot_name == bot_name, Position.status == "open", Position.mode.in_(modes))
+        if cash_currency:
+            open_q = open_q.filter(currency_filter(cash_currency))
+        open_realized = open_q.scalar() or 0.0
         running = 0.0
         peak_equity = starting_capital
         dd = 0.0
@@ -104,6 +112,50 @@ class DrawdownTracker:
             start = state["starting_capital"]
             loss = ((start - equity) / start) * 100 if start > 0 else 0.0
         return max(dd, 0.0), max(loss, 0.0)
+
+
+# ── entry-block persistence (block_entries) ────────────────────────────────
+# The in-memory `engine._entries_blocked` set is lost on a restart; the block
+# is recorded in the bot's settings so the first tick after a restart
+# re-arms it instead of resuming entries while the drawdown is still above
+# the resume threshold. Cleared when the block lifts (and by a cache wipe).
+BLOCK_KEY = "entries_blocked_at"
+BLOCK_REASON_KEY = "entries_blocked_reason"
+
+
+def persist_block(db, bot, reason=None, at=None):
+    """Record that the drawdown/capital-loss entry block engaged for `bot`
+    (settings `entries_blocked_at` / `entries_blocked_reason`). Reassigns
+    `bot.settings` (JSON column) and flushes; the caller's commit persists it."""
+    at = _naive_utc(at) if at is not None else _naive_utc(datetime.now(timezone.utc))
+    settings = {**(bot.settings or {}), BLOCK_KEY: at.isoformat()}
+    if reason:
+        settings[BLOCK_REASON_KEY] = str(reason)
+    else:
+        settings.pop(BLOCK_REASON_KEY, None)
+    bot.settings = settings
+    db.flush()
+
+
+def clear_block(db, bot):
+    """Forget a persisted entry block (the block lifted or the bot stopped)."""
+    if not bot.settings or BLOCK_KEY not in bot.settings and BLOCK_REASON_KEY not in bot.settings:
+        return
+    bot.settings = {k: v for k, v in bot.settings.items() if k not in (BLOCK_KEY, BLOCK_REASON_KEY)}
+    db.flush()
+
+
+def restore_blocked(bot):
+    """Whether a persisted entry block is on record for `bot` (returns the
+    block timestamp as naive UTC, else None) — the startup re-arms the
+    in-memory block from it; `drawdown_action: block_entries` only."""
+    raw = (bot.settings or {}).get(BLOCK_KEY)
+    if not raw or (bot.settings or {}).get("drawdown_action", "close_all") != "block_entries":
+        return None
+    try:
+        return _naive_utc(datetime.fromisoformat(str(raw)))
+    except (ValueError, TypeError):
+        return None
 
 
 def unrealized_pnl(db, positions, exchange, timeframe, close_cache, candle_ts=None):

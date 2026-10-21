@@ -355,6 +355,40 @@ def remember_markets(exchange_id: str, markets: dict) -> None:
             continue
 
 
+def has_contract_spec(exchange_id: str, symbol: str) -> bool:
+    """Whether the spec cache holds a market-derived spec for the symbol."""
+    from backend.engine.symbols import normalize
+    with _spec_lock:
+        return (str(exchange_id or "").lower(), normalize(symbol)) in _spec_cache
+
+
+def ensure_contract_specs(exchange_id: str, symbols) -> list:
+    """Best effort: load the public market map for every symbol whose spec
+    is not cached yet (one `load_markets` per contract kind) so the engine
+    knows the real contract sizes. Returns the symbols still unknown
+    afterwards (network errors are logged, never raised)."""
+    from backend.engine.symbols import normalize
+    missing = [normalize(s) for s in symbols if not has_contract_spec(exchange_id, s)]
+    if not missing:
+        return []
+    loaded = set()
+    for sym in missing:
+        try:
+            cls = ccxt_id_for(exchange_id, "swap" if ":" in sym else "spot", kind_of_symbol(sym) if ":" in sym else None)
+        except Exception:
+            cls = None
+        if cls in loaded:
+            continue
+        loaded.add(cls)
+        try:
+            inst = build_exchange_for_symbol(exchange_id, sym)
+            inst.load_markets()
+            remember_markets(exchange_id, inst.markets)
+        except Exception as exc:
+            logger.warning("Could not load markets for %s on %s: %s", sym, exchange_id, exc)
+    return [s for s in missing if not has_contract_spec(exchange_id, s)]
+
+
 def _load_markets_for(exchange_id: str, market_type: str) -> dict[str, dict]:
     """{symbol: info} for every active market of `market_type`, across all
     contract kinds the registry lists for it. Raises when nothing could be loaded."""

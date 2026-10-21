@@ -4,8 +4,10 @@ from datetime import datetime
 
 from backend.core.exchange_registry import exchange_spec, get_exchange_timeframes, market_caps, supported_kinds
 from backend.engine.indicator_registry import get_spec
-from backend.engine.symbols import DEFAULT_MARGIN_MODE, DEFAULT_MARKET_TYPE, MARGIN_MODES, MARKET_TYPES, base_of, cash_currency, is_derivative, settle_of
+from backend.engine.symbols import DEFAULT_MARGIN_MODE, DEFAULT_MARKET_TYPE, MARGIN_MODES, MARKET_TYPES, base_of, cash_currency, is_derivative, leverage_for, settle_of
 from backend.engine.pnl import MAINTENANCE_MARGIN
+from backend.engine.contracts import spec_from_symbol
+from backend.engine.sizing import sim_frictions
 
 logger = logging.getLogger("apexalgo.settings_validator")
 # BASE/QUOTE for spot, BASE/QUOTE:SETTLE for perpetual swaps
@@ -13,6 +15,12 @@ SYMBOL_PATTERN = re.compile(r'^[A-Z0-9]+/[A-Z0-9]+(:[A-Z0-9]+)?$')
 # Above this the liquidation sits close enough to the entry that a normal
 # stop loss barely gets a chance — worth a warning, not a refusal
 LEVERAGE_WARN_ABOVE = 3
+# A percentage stop at or beyond this share of the liquidation distance
+# (`100*(1/lev - mmr - fee)` on linear contracts) sits "inside the band":
+# live stops are only evaluated at candle close while the exchange's
+# liquidation engine runs continuously, so the exchange would act first.
+# Error for exchange execution (paper/live), warning for forward/backtest.
+STOP_BAND_SHARE = 0.8
 MAX_PRICE_OFFSET = 500
 VALID_EXIT_TYPES = {'percentage', 'trailing', 'atr', 'fixed'}
 VALID_AMOUNT_TYPES = {'percentage', 'fixed'}
@@ -117,8 +125,9 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
                 if caps is not None and lev > caps.max_leverage:
                     errors.append(f"leverage {int(lev)}x exceeds the {caps.max_leverage}x ApexAlgo allows on {exchange_spec(eid).name} swaps.")
                 elif lev > LEVERAGE_WARN_ABOVE:
-                    warnings.append(f"leverage {int(lev)}x: the estimated liquidation sits about {100 * (1 - MAINTENANCE_MARGIN) / lev:.1f}% "
-                                    "from the entry — a stop loss that is not tighter than that never fires.")
+                    _xfee = sim_frictions(settings)[1]
+                    warnings.append(f"leverage {int(lev)}x: the estimated liquidation sits about {100 * (1 / lev - MAINTENANCE_MARGIN - _xfee):.1f}% "
+                                    "from the entry (1/leverage − maintenance margin − fee reserve) — a stop loss that is not tighter than that never fires.")
             elif lev > 1:
                 errors.append(f"leverage {int(lev)}x has no effect on a spot bot; set it to 1 or switch market_type to 'swap'.")
     mm_raw = settings.get("margin_mode")
@@ -330,6 +339,13 @@ def validate_bot_settings(settings: dict, exchange_id: str | None = None, key_ma
     _validate_entry_leg(entry_ts, "", errors, warnings)
     if isinstance(trade_settings.get("short"), dict) and trade_settings["short"]:
         _validate_entry_leg(trade_settings["short"], "Short ", errors, warnings)
+    if derivative and _pairs:
+        _lev_eff = leverage_for(settings, market_type)
+        _live = bool(settings.get("api_execution"))
+        _check_stop_inside_liquidation_band(entry_ts, "long", "", _lev_eff, _pairs, sim_frictions(settings)[1], _live, errors, warnings)
+        if isinstance(trade_settings.get("short"), dict) and trade_settings["short"]:
+            _check_stop_inside_liquidation_band(trade_settings["short"], "short", "Short ", _lev_eff, _pairs,
+                                                sim_frictions(settings, "short")[1], _live, errors, warnings)
 
     # Live allocation: share of the exchange wallet this bot may deploy
     if settings.get("live_allocation_pct") not in (None, ""):
@@ -452,6 +468,59 @@ def _longest_indicator_length(nodes: dict) -> int:
                 except (ValueError, TypeError):
                     pass
     return longest
+
+
+def tightest_percentage_stop(entry_ts: dict):
+    """Smallest `percentage` stop-loss of a leg (as % of the entry), None
+    without one. `fixed` stops are absolute prices in this engine and
+    trailing/ATR stops depend on the path, so none of them can be placed
+    against the liquidation level at validation time."""
+    best = None
+    for sl in entry_ts.get("stop_losses", []) or []:
+        if sl.get("type") != "percentage":
+            continue
+        try:
+            v = float(sl.get("value", 0))
+        except (ValueError, TypeError):
+            continue
+        if v > 0 and (best is None or v < best):
+            best = v
+    return best
+
+
+def liquidation_band_pct(side: str, leverage: float, pairs, exit_fee: float = 0.0):
+    """Distance (% of entry) to the liquidation level of `side` at `leverage`,
+    the tightest over the whitelist's contract kinds (linear:
+    `100*(1/lev - mmr - fee)`); None when no pair has a level (1x long)."""
+    best = None
+    for sym in pairs:
+        try:
+            liq = spec_from_symbol(sym).liquidation_price(side, 100.0, leverage, MAINTENANCE_MARGIN, exit_fee)
+        except Exception:
+            liq = None
+        if liq is None:
+            continue
+        dist = abs(100.0 - liq)
+        if best is None or dist < best:
+            best = dist
+    return best
+
+
+def _check_stop_inside_liquidation_band(entry_ts: dict, side: str, leg: str, leverage: float, pairs, exit_fee: float,
+                                        live: bool, errors: list, warnings: list) -> None:
+    """R5: a percentage stop at ≥ `STOP_BAND_SHARE` of the liquidation
+    distance is refused for exchange execution and flagged otherwise."""
+    sl_pct = tightest_percentage_stop(entry_ts)
+    if sl_pct is None:
+        return
+    band = liquidation_band_pct(side, leverage, pairs, exit_fee)
+    if band is None or band <= 0:
+        return
+    if sl_pct >= STOP_BAND_SHARE * band:
+        msg = (f"{leg}stop-loss at {sl_pct:g}% sits inside the liquidation band (≈{band:.1f}% at {leverage:g}x); "
+               "live stops are only evaluated at candle close, the exchange would liquidate first — tighten the stop or lower the leverage.")
+        msg = msg[0].upper() + msg[1:]
+        (errors if live else warnings).append(msg)
 
 
 def _validate_entry_leg(entry_ts: dict, leg: str, errors: list, warnings: list) -> None:

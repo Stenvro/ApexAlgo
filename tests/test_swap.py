@@ -9,6 +9,7 @@ of these branches (goldens pin that).
 """
 import asyncio
 
+import ccxt
 import pytest
 
 from backend.engine import broker, pnl
@@ -40,6 +41,8 @@ class SwapExchangeMock(ExchangeMock):
         self.margin_calls = []
         self.positions = positions or []
         self.leverage_raises = leverage_raises
+        # What `fetch_my_trades` returns (the close recovery after a network error)
+        self.my_trades = []
 
     def set_leverage(self, leverage, symbol=None, params=None):
         if self.leverage_raises:
@@ -53,6 +56,9 @@ class SwapExchangeMock(ExchangeMock):
 
     def fetch_positions(self, symbols=None, params=None):
         return list(self.positions)
+
+    def fetch_my_trades(self, symbol=None, since=None, limit=None, params=None):
+        return [dict(t) for t in self.my_trades if symbol is None or t.get("symbol") == symbol]
 
     def create_order(self, symbol, order_type, side, amount, price=None, params=None):
         order = self._create(side, symbol, amount)
@@ -336,14 +342,15 @@ def test_backtest_liquidation_closes_at_minus_margin(db):
     assert p.profit_abs == pytest.approx(-(margin + buy.fee), rel=1e-6)
     assert p.profit_pct == pytest.approx(-100.0, rel=1e-6)
     sell = db.query(Order).filter(Order.position_id == p.id, Order.side == "sell").one()
-    assert sell.price == pytest.approx(pnl.liquidation_price("long", p.entry_price, lev), rel=1e-9)
+    assert sell.price == pytest.approx(pnl.liquidation_price("long", p.entry_price, lev, fee=0.001), rel=1e-9)
     assert sell.fee == 0
 
 
 def test_liquidation_price_formula():
     assert pnl.liquidation_price("long", 100.0, 1) is None  # 1x long: can only lose its margin, never liquidated
-    assert pnl.liquidation_price("short", 100.0, 1) == pytest.approx(100 * (1 + 0.995))  # 1x short: ~doubling
-    assert pnl.liquidation_price("long", 100.0, 10) == pytest.approx(100 * (1 - 0.995 / 10))
+    assert pnl.liquidation_price("short", 100.0, 2) == pytest.approx(100 * (1 + 0.5 - 0.005))
+    assert pnl.liquidation_price("long", 100.0, 10) == pytest.approx(100 * (1 - 0.1 + 0.005))
+    assert pnl.liquidation_price("long", 100.0, 10, fee=0.001) == pytest.approx(100 * (1 - 0.1 + 0.005 + 0.001))
     assert pnl.liquidation_price("long", 100.0, 2) < 100.0
 
 
@@ -413,7 +420,7 @@ def test_forward_position_is_liquidated_on_the_candle_low(db, swap_bot, run_tick
     sell = db.query(Order).filter(Order.position_id == pos.id, Order.side == "sell").one()
     assert sell.reduce_only == 1 and sell.fee == 0
     assert sell.exchange_order_id.startswith("liq_")
-    assert sell.price == pytest.approx(pnl.liquidation_price("long", 100.0, 10))
+    assert sell.price == pytest.approx(pnl.liquidation_price("long", 100.0, 10, fee=0.001))  # exit-fee reserve, same level as the backtest
     assert bm._drawdown_cache.get(("live-bot", "forward"), {}).get("running_pnl", closed.profit_abs) == pytest.approx(closed.profit_abs)
 
 
@@ -474,14 +481,16 @@ def test_profit_pct_basis_is_locked_capital_in_backtest_and_live(db, swap_bot, r
 
 
 def test_rejected_reduce_only_close_books_liquidation_when_exchange_has_no_position(db, swap_bot, run_tick):
-    """Item 11 (live): a rejected reduce-only close plus `fetch_positions`
-    showing nothing means the exchange liquidated us — book it, stop retrying."""
+    """Item 11 (live): a reduce-only close the exchange *rejected*
+    (ccxt.ExchangeError) plus `fetch_positions` showing nothing means the
+    exchange liquidated us — book it, stop retrying. A network error is not
+    a rejection (see test_audit_r3_live)."""
     _, candles = swap_bot(_swap_settings(entry_always=False, sl_pct=10), last_low=80.0)
     pos = _open_swap_position(db, candles, entry=100.0, amount=0.5, leverage=3.0)
     mock = SwapExchangeMock(positions=[])
 
     def refuse(symbol, order_type, side, amount, price=None, params=None):
-        raise RuntimeError("ReduceOnly Order is rejected")
+        raise ccxt.InvalidOrder("ReduceOnly Order is rejected")
     mock.create_order = refuse
     run_tick(mock)
     db.expire_all()

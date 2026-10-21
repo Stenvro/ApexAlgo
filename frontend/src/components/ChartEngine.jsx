@@ -7,7 +7,7 @@ import { getToken } from '../theme';
 import Button from './ui/Button';
 import Badge from './ui/Badge';
 import { isShortOpen, isOpeningOrder, modeTag } from '../utils/orders';
-import { fmtMoney, fmtMoneyTitle, rowCurrency, rowKind, symbolParts, positionPnl } from '../utils/money';
+import { fmtMoney, fmtMoneyTitle, rowCurrency, rowKind, symbolParts, positionPnl, positionNotional } from '../utils/money';
 
 const safeParseTime = (ts) => { 
   if (!ts) return null; 
@@ -21,14 +21,19 @@ const safeParseTime = (ts) => {
   return isNaN(parsed) ? null : parsed; 
 }; 
 
-const getTimeframeSeconds = (tf) => { 
-    if (!tf) return 60; 
-    const val = parseInt(tf); 
-    if (tf.endsWith('m')) return val * 60; 
-    if (tf.endsWith('h')) return val * 3600; 
-    if (tf.endsWith('d')) return val * 86400; 
-    return 60; 
-}; 
+// Seconds per bar. ccxt timeframes: m=minute, h=hour, d=day, w=week,
+// M=month (30 d — a forming monthly bar is approximate; closed bars come
+// from the database so the engine never sees it).
+const getTimeframeSeconds = (tf) => {
+    if (!tf) return 60;
+    const val = parseInt(tf);
+    if (tf.endsWith('M')) return val * 30 * 86400;
+    if (tf.endsWith('m')) return val * 60;
+    if (tf.endsWith('h')) return val * 3600;
+    if (tf.endsWith('d')) return val * 86400;
+    if (tf.endsWith('w')) return val * 604800;
+    return 60;
+};
 
 // Series palette resolved from the live CSS tokens at call time so indicator
 // lines re-tint when the theme switches (chart is re-created on theme change).
@@ -69,6 +74,7 @@ function ChartEngine({ dataset, openDataVault }) {
   const tradeCursorRef = useRef({ ordId: 0, posId: 0, since: null });
   const lastDbTimeRef = useRef(null);   // newest CLOSED candle time from the DB
   const formingCandleRef = useRef(null); // synthetic in-progress bar (ticker-fed)
+  const [formingPainted, setFormingPainted] = useState(false); // a forming bar is on screen (drives the Synced badge)
    
   const { registry: indicatorRegistry } = useIndicators();
   const [candleTimes, setCandleTimes] = useState([]); 
@@ -157,6 +163,7 @@ function ChartEngine({ dataset, openDataVault }) {
     formingCandleRef.current = bar;
     try {
       candleSeriesRef.current.update(bar);
+      setFormingPainted(true);
       if (!isCrosshairActive.current) setHoverData({ ...bar, value: 0 });
     } catch { /* series may briefly lag behind DB updates */ }
   };
@@ -300,6 +307,7 @@ function ChartEngine({ dataset, openDataVault }) {
         lastCandleRef.current = { ...uniqueData[uniqueData.length - 1], value: volumeData[volumeData.length - 1].value };
         lastDbTimeRef.current = lastCandleRef.current.time;
         formingCandleRef.current = null;
+        setFormingPainted(false);
         if (!isCrosshairActive.current) setHoverData({ ...lastCandleRef.current, time: lastCandleRef.current.time });
       }
     } catch (e) { console.error("Data Load Crash Prevented:", e); } 
@@ -336,6 +344,7 @@ function ChartEngine({ dataset, openDataVault }) {
             lastCandleRef.current = newHoverState;
             if (formingCandleRef.current && formingCandleRef.current.time <= latestDbCandle.time) {
                 formingCandleRef.current = null;
+                setFormingPainted(false);
             }
         }
       } 
@@ -701,8 +710,12 @@ function ChartEngine({ dataset, openDataVault }) {
 
         <div ref={menuRef} className="flex items-center space-x-2 md:space-x-4 relative">
 
-          <Badge variant={isLiveStreamActive ? 'success' : 'accent'} dot pulse={isLiveStreamActive}>
-            {isLiveStreamActive ? 'Synced: Live' : 'Synced: Static'}
+          {/* "Live" only while a ticker-fed forming bar is actually painted;
+              a polled ticker without a forming candle (bar not yet closed in
+              the DB, weekly/monthly bars) reads "Static" */}
+          <Badge variant={isLiveStreamActive && formingPainted ? 'success' : 'accent'} dot pulse={isLiveStreamActive && formingPainted}
+            title={isLiveStreamActive && formingPainted ? 'The in-progress bar follows the live ticker' : isLiveStreamActive ? 'Ticker polled — the in-progress bar appears once the previous bar is stored' : 'Closed bars from the database only'}>
+            {isLiveStreamActive && formingPainted ? 'Synced: Live' : 'Synced: Static'}
           </Badge>
 
           <button
@@ -735,18 +748,18 @@ function ChartEngine({ dataset, openDataVault }) {
                         <div className="flex flex-col space-y-4 pl-6 md:pl-8 pr-4 pb-4 bg-bg/50 border-l-2 border-border ml-4 mt-1">
                             <div className="flex flex-col space-y-2 mt-2">
                                 <span className="text-3xs md:text-2xs font-bold text-info uppercase tracking-wider">Live & Paper Mode</span>
-                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-info rounded border-border bg-inset" checked={config.showRealTrades} onChange={() => toggleBotSetting(botName, 'showRealTrades')} /><span className="ml-2 text-xs text-text">Real Trades (T-BUY / T-SELL · T-SHORT / T-COVER)</span></label>
-                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-info rounded border-border bg-inset" checked={config.showRealPositions} onChange={() => toggleBotSetting(botName, 'showRealPositions')} /><span className="ml-2 text-xs text-text">Real Position Line</span></label>
+                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="h-3.5 w-3.5 accent-info rounded-sm cursor-pointer" checked={config.showRealTrades} onChange={() => toggleBotSetting(botName, 'showRealTrades')} /><span className="ml-2 text-xs text-text">Real Trades (T-BUY / T-SELL · T-SHORT / T-COVER)</span></label>
+                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="h-3.5 w-3.5 accent-info rounded-sm cursor-pointer" checked={config.showRealPositions} onChange={() => toggleBotSetting(botName, 'showRealPositions')} /><span className="ml-2 text-xs text-text">Real Position Line</span></label>
                             </div>
                             <div className="flex flex-col space-y-2">
                                 <span className="text-3xs md:text-2xs font-bold text-accent uppercase tracking-wider">Backtest Mode</span>
-                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-accent rounded border-border bg-inset" checked={config.showBacktestTrades} onChange={() => toggleBotSetting(botName, 'showBacktestTrades')} /><span className="ml-2 text-xs text-text-secondary">Historical Trades (T-BUY / T-SELL · T-SHORT / T-COVER)</span></label>
-                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3 w-3 text-accent rounded border-border bg-inset" checked={config.showBacktestPositions} onChange={() => toggleBotSetting(botName, 'showBacktestPositions')} /><span className="ml-2 text-xs text-text-secondary">Historical Position Line</span></label>
+                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="h-3.5 w-3.5 accent-accent rounded-sm cursor-pointer" checked={config.showBacktestTrades} onChange={() => toggleBotSetting(botName, 'showBacktestTrades')} /><span className="ml-2 text-xs text-text-secondary">Historical Trades (T-BUY / T-SELL · T-SHORT / T-COVER)</span></label>
+                                <label className="flex items-center cursor-pointer"><input type="checkbox" className="h-3.5 w-3.5 accent-accent rounded-sm cursor-pointer" checked={config.showBacktestPositions} onChange={() => toggleBotSetting(botName, 'showBacktestPositions')} /><span className="ml-2 text-xs text-text-secondary">Historical Position Line</span></label>
                             </div>
                             <div className="h-px bg-border w-full my-1"></div>
-                            <label className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3.5 w-3.5 text-success rounded border-border bg-inset" checked={config.showSignals} onChange={() => toggleBotSetting(botName, 'showSignals')} /><span className="ml-2 text-xs text-text italic">Engine Thoughts (S-B / S-S · S-SH / S-CV)</span></label>
+                            <label className="flex items-center cursor-pointer"><input type="checkbox" className="h-3.5 w-3.5 accent-success rounded-sm cursor-pointer" checked={config.showSignals} onChange={() => toggleBotSetting(botName, 'showSignals')} /><span className="ml-2 text-xs text-text italic">Engine Thoughts (S-B / S-S · S-SH / S-CV)</span></label>
                             {Object.keys(config.indicators).map(indKey => (
-                                <label key={indKey} className="flex items-center cursor-pointer"><input type="checkbox" className="form-checkbox h-3.5 w-3.5 text-accent rounded border-border bg-inset" checked={config.indicators[indKey]} onChange={() => toggleIndicatorConfig(botName, indKey)} /><span className="ml-2 text-xs text-text">Draw Line: <span className="font-num">{indKey}</span></span></label>
+                                <label key={indKey} className="flex items-center cursor-pointer"><input type="checkbox" className="h-3.5 w-3.5 accent-accent rounded-sm cursor-pointer" checked={config.indicators[indKey]} onChange={() => toggleIndicatorConfig(botName, indKey)} /><span className="ml-2 text-xs text-text">Draw Line: <span className="font-num">{indKey}</span></span></label>
                             ))}
                         </div>
                       )}
@@ -850,7 +863,9 @@ function ChartEngine({ dataset, openDataVault }) {
                 const quote = symbolParts(trade.symbol).quote;
                 const ccy = rowCurrency(trade.position) || rowCurrency(trade);
                 const inverse = rowKind(trade.position || trade) === 'inverse';
-                const totalValue = inverse ? trade.amount : trade.price * trade.amount;
+                // Notional in the cash currency at the fill price (inverse:
+                // contracts × contract_size / price, in the base coin)
+                const totalValue = positionNotional({ ...(trade.position || trade), amount: trade.amount }, trade.price);
                 const isOpening = isOpeningOrder(trade);
                 const dir = trade.position?.side === 'short' ? -1 : 1;
                 // Realized PnL: the booked, after-fee figure when the position
@@ -863,12 +878,13 @@ function ChartEngine({ dataset, openDataVault }) {
                 const isWin = trade.position ? realAbs >= 0 : true;
                 const pnlPct = realPct.toFixed(2);
                 const pnlAbs = fmtMoney(Math.abs(realAbs), ccy);
-                const headline = isOpening ? (trade.side === 'sell' ? 'SHORT ENTRY' : 'ENTRY EXECUTION') : (trade.side === 'buy' ? 'COVER EXECUTION' : 'EXIT EXECUTION');
+                const liquidated = !isOpening && Array.isArray(trade.position?.triggered_exits) && trade.position.triggered_exits.includes('liquidation');
+                const headline = isOpening ? (trade.side === 'sell' ? 'SHORT ENTRY' : 'ENTRY EXECUTION') : liquidated ? 'LIQUIDATED' : (trade.side === 'buy' ? 'COVER EXECUTION' : 'EXIT EXECUTION');
 
                 return (
                     <div key={idx} className={`bg-raised/95 backdrop-blur-md border p-3 rounded-lg shadow-pop flex flex-col min-w-[240px] md:min-w-[260px] ${isOpening ? 'border-info' : 'border-purple'}`}>
                         <div className="flex justify-between items-center mb-2 pb-2 border-b border-border">
-                            <span className={`text-2xs md:text-xs font-bold uppercase tracking-wider ${isOpening ? 'text-info' : 'text-purple'}`}>
+                            <span className={`text-2xs md:text-xs font-bold uppercase tracking-wider ${isOpening ? 'text-info' : liquidated ? 'text-danger' : 'text-purple'}`} title={liquidated ? 'Closed by the liquidation engine — loss = margin + entry fee' : undefined}>
                                 {headline}
                             </span>
                             <span className="bg-overlay border border-border text-text text-3xs px-1.5 py-0.5 rounded uppercase font-bold">{trade.mode}</span>

@@ -80,8 +80,11 @@ const trimZeros = (str) => (str.includes('.') ? str.replace(/\.?0+$/, '') : str)
  *   fmtMoney(0.0213, 'BTC')             → '0.0213 BTC'   (6–8 significant, trailing zeros trimmed)
  *   fmtMoney(-12.3, 'USDT', {sign:true})→ '-12.30 USDT'; positive gets '+'
  *   fmtMoney(5, null)                   → '5.00'  (caller should add title="unit unknown", see fmtMoneyTitle)
- * `digits`: fixed decimals for fiat/stable (default 2); crypto cash ignores it
- * unless `digits` is given explicitly.
+ * `digits`: fixed decimals for fiat/stable (default 2). Crypto cash keeps its
+ * significant-digit formatting when `digits` is undefined **or 0** — the
+ * `{ digits: 0 }` used by the USDT/EUR tiles must never print `0 BTC`:
+ *   fmtMoney(0.0042, 'BTC', { digits: 0 }) → '0.0042 BTC'
+ * Pass an explicit positive `digits` to force fixed decimals on crypto cash.
  */
 export const fmtMoney = (value, ccy, { digits, sign = false, compact = false } = {}) => {
   const code = normCcy(ccy);
@@ -90,7 +93,7 @@ export const fmtMoney = (value, ccy, { digits, sign = false, compact = false } =
   const abs = Math.abs(v);
   const prefix = sign ? (v > 0 ? '+' : v < 0 ? '-' : '') : (v < 0 ? '-' : '');
   let num;
-  if (code && isCryptoCash(code) && digits === undefined) {
+  if (code && isCryptoCash(code) && (digits === undefined || digits === 0)) {
     // 6 significant digits, at most 8 decimals, trailing zeros trimmed
     if (abs === 0) num = '0';
     else {
@@ -135,22 +138,34 @@ export const currenciesOf = (rows, ccyOf = rowCurrency) => {
 /** Contract kind of a position/order row: the server field, else derived from the symbol. */
 export const rowKind = (row) => row?.contract_kind || contractKindOf(row?.symbol);
 
+/** Quote units per contract on an inverse row (`contract_size` from the API; 1 when absent). */
+const contractSizeOf = (row) => {
+  const n = Number(row?.contract_size);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+};
+
 /**
  * Notional of a position in its cash currency. Spot and linear swaps:
- * size × price (quote/settle units). Inverse contracts settle in the base
- * coin, so the notional in cash is simply the base size.
+ * size × price (quote/settle units). Inverse contracts: `amount` is a
+ * contract count, each worth `contract_size` quote units, and the cash
+ * currency is the base coin, so notional = amount × contract_size / price
+ * (0 when no price is known).
  */
-export const positionNotional = (pos, price = pos?.entry_price) =>
-  rowKind(pos) === 'inverse' ? (Number(pos?.amount) || 0) : (Number(pos?.amount) || 0) * (Number(price) || 0);
+export const positionNotional = (pos, price = pos?.entry_price) => {
+  const amount = Number(pos?.amount) || 0;
+  const p = Number(price) || 0;
+  if (rowKind(pos) === 'inverse') return p > 0 ? (amount * contractSizeOf(pos)) / p : 0;
+  return amount * p;
+};
 
-/** Capital locked by a position = notional / leverage, in its cash currency. */
+/** Capital locked by a position = notional at entry / leverage, in its cash currency. */
 export const positionMargin = (pos) => positionNotional(pos) / Math.max(1, Number(pos?.leverage) || 1);
 
 /**
  * Unrealised PnL of a position at `price`, in its cash currency.
- * Linear/spot: ±(price − entry) × size. Inverse (cash = base coin): the
- * base value of a fixed quote notional moves with 1/price, so
- * pnl = size × (price − entry) / price for a long (mirrored for a short).
+ * Linear/spot: ±(price − entry) × size. Inverse (cash = base coin, `amount`
+ * = contracts of `contract_size` quote units):
+ * pnl = dir × amount × contract_size × (1/entry − 1/price).
  */
 export const positionPnl = (pos, price) => {
   const entry = Number(pos?.entry_price) || 0;
@@ -158,7 +173,7 @@ export const positionPnl = (pos, price) => {
   const p = Number(price) || 0;
   if (!entry || !p) return 0;
   const dir = pos?.side === 'short' ? -1 : 1;
-  if (rowKind(pos) === 'inverse') return dir * size * (p - entry) / p;
+  if (rowKind(pos) === 'inverse') return dir * size * contractSizeOf(pos) * (1 / entry - 1 / p);
   return dir * (p - entry) * size;
 };
 

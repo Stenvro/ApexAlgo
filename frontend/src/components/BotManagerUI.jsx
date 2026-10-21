@@ -11,7 +11,9 @@ import EmptyState from './ui/EmptyState';
 import { toast } from './ui/Toast';
 import { confirmDialog } from './ui/ConfirmDialog';
 import BotConsole from './BotConsole';
-import { contractKindOf, fmtMoney, symbolParts } from '../utils/money';
+import { contractKindOf, fmtMoney, symbolParts, rowCurrency, positionNotional } from '../utils/money';
+import { positionSide } from '../utils/orders';
+import { exchangeName } from '../api/exchanges';
 
 /* ── Inline icons (stroke 1.8) ── */
 const IconEdit = (
@@ -245,7 +247,7 @@ function BacktestResult({ bot, updateBotConfig, verifyData, verifying }) {
         const fundingText = sm.funding === 'simulated'
           ? `Funding ${fmtMoney(sm.funding_paid, sm.cash_currency, { sign: true })} over ${sm.funding_events} settlement${sm.funding_events === 1 ? '' : 's'}`
           : sm.funding === 'partial'
-            ? `Funding partial: ${fmtMoney(sm.funding_paid, sm.cash_currency, { sign: true })} — not every pair had rates stored`
+            ? `Funding partial: ${fmtMoney(sm.funding_paid, sm.cash_currency, { sign: true })} — ${Number.isFinite(Number(sm.funding_covered_pct)) ? `rates stored for ${Math.round(Number(sm.funding_covered_pct))}% of the window` : 'not every pair had rates stored'}`
             : 'Funding not simulated — no funding rates stored for this range';
         const mmrText = sm.mmr_source === 'tiers' ? `${exchange} margin tiers` : 'flat 0.5% maintenance margin';
         return (
@@ -498,6 +500,57 @@ function ChevronIcon({ open }) {
 const MODE_WORD = { live: 'Live', paper: 'Paper', forward_test: 'Forward test' };
 
 /**
+ * One line per open position for the stop dialog — mode, side, symbol,
+ * amount (contracts on inverse), entry in the quote currency, leverage and
+ * the notional at entry in the cash currency. Older payloads lack side /
+ * leverage / contract fields; every part is printed only when present.
+ */
+function describeOpenPosition(p, bulk) {
+  const parts = [`${bulk && p.bot_name ? `${p.bot_name} — ` : ''}${MODE_WORD[p.mode] || p.mode}`];
+  if (p.side) parts.push(String(positionSide(p)).toUpperCase());
+  parts.push(p.symbol);
+  const amount = Number(p.amount);
+  const kind = p.contract_kind || (p.symbol ? contractKindOf(p.symbol) : null);
+  const amountText = Number.isFinite(amount) ? `${amount}${kind === 'inverse' ? ' contracts' : ''}` : null;
+  const entry = Number(p.entry_price);
+  const quote = p.symbol ? symbolParts(p.symbol).quote : null;
+  const entryText = Number.isFinite(entry) && entry > 0 ? `@ ${fmtMoney(entry, quote)}` : null;
+  const lev = Number(p.leverage);
+  const notional = Number.isFinite(amount) && Number.isFinite(entry) && entry > 0 ? positionNotional(p, entry) : 0;
+  const tail = [
+    amountText && entryText ? `${amountText} ${entryText}` : (amountText || entryText),
+    Number.isFinite(lev) && lev > 1 ? `${lev}×` : null,
+    notional > 0 ? `≈ ${fmtMoney(notional, rowCurrency(p))} at entry` : null,
+  ].filter(Boolean);
+  return `• ${parts.join(' ')}${tail.length ? `: ${tail.join(' · ')}` : ''}`;
+}
+
+/**
+ * Confirm before arming real orders: one click must never start a live bot.
+ * Returns true when the user confirmed (or no confirmation is needed).
+ */
+async function confirmLiveStart(liveBots) {
+  if (!liveBots.length) return true;
+  const describe = (b) => {
+    const s = b.settings || {};
+    const ex = exchangeName(b.exchange || s.data_exchange);
+    const mt = s.market_type === 'swap' ? `perpetual swaps${Number(s.leverage) > 1 ? ` at ${Number(s.leverage)}×` : ''}` : 'spot';
+    const cap = Number(s.max_order_value);
+    const capText = Number.isFinite(cap) && cap > 0
+      ? fmtMoney(cap, (Array.isArray(s.symbols) && s.symbols[0]) ? symbolParts(s.symbols[0]).quote : s.cash_currency)
+      : 'no cap set';
+    return `• "${b.name}" — ${ex}${s.api_key_name ? ` via key "${s.api_key_name}"` : ''}, ${mt}, max order ${capText}`;
+  };
+  const many = liveBots.length > 1;
+  return confirmDialog({
+    title: many ? `Start ${liveBots.length} live bots` : 'Start live bot',
+    message: `${liveBots.map(describe).join('\n')}\n\n${many ? 'These bots' : 'This bot'} will place real market orders with real money as soon as the strategy signals. Start ${many ? 'them' : 'it'}?`,
+    confirmText: many ? 'Start live bots' : 'Start live',
+    type: 'danger',
+  });
+}
+
+/**
  * The stop endpoints refuse (409) while a bot holds open forward/paper/live
  * positions. Turn that refusal into an explicit choice; resolves to the
  * `close_positions` value to retry with, or null when the user cancels.
@@ -505,9 +558,7 @@ const MODE_WORD = { live: 'Live', paper: 'Paper', forward_test: 'Forward test' }
 async function askAboutOpenPositions(detail, { bulk = false } = {}) {
   const positions = detail?.open_positions || [];
   const real = positions.filter((p) => p.mode === 'live' || p.mode === 'paper').length;
-  const lines = positions.map((p) =>
-    `• ${bulk && p.bot_name ? `${p.bot_name} — ` : ''}${MODE_WORD[p.mode] || p.mode} ${p.symbol}: ${p.amount} @ ${p.entry_price}`,
-  );
+  const lines = positions.map((p) => describeOpenPosition(p, bulk));
   const choice = await confirmDialog({
     title: bulk ? 'Bots hold open positions' : 'Bot holds open positions',
     message:
@@ -565,9 +616,12 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
           (extra.includes('unmanaged') ? toast.warn : toast.success)(extra ? `Bot stopped — ${extra}` : 'Bot stopped');
         }
       } else {
+        const bot = bots.find(b => b.id === botId);
+        const isLive = bot?.execution_mode === 'live';
+        if (isLive && !(await confirmLiveStart([bot]))) { setTogglingBot(null); return; }
         await apiClient.post(`/api/bots/${botId}/start`);
         refetchBots();
-        toast.success('Engine started');
+        toast.success(isLive ? 'Engine started — LIVE orders enabled' : 'Engine started');
       }
     } catch (err) {
       // A failed market close still stops the bot; make sure the card reflects that
@@ -575,7 +629,7 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
       toast.error(humanizeApiError(err, 'Failed to toggle bot state.'));
     }
     setTogglingBot(null);
-  }, [refetchBots]);
+  }, [refetchBots, bots]);
 
   const restartBot = useCallback(async (botId) => {
     setTogglingBot(botId);
@@ -591,17 +645,19 @@ export default function BotManagerUI({ bots = [], refetchBots, backendOk = true 
 
   const [bulkBusy, setBulkBusy] = useState(null); // 'start' | 'stop'
   const startAll = useCallback(async () => {
+    const stoppedLive = bots.filter(b => !b.is_active && b.execution_mode === 'live');
+    if (!(await confirmLiveStart(stoppedLive))) return;
     setBulkBusy('start');
     try {
       const res = await apiClient.post('/api/bots/bulk/start', null);
       refetchBots();
       const n = res.data?.started?.length || 0;
-      toast.success(n ? `${n} bot${n === 1 ? '' : 's'} started — they backfill in parallel` : 'All bots are already running');
+      toast.success(n ? `${n} bot${n === 1 ? '' : 's'} started — they backfill in parallel${stoppedLive.length ? ' — LIVE orders enabled' : ''}` : 'All bots are already running');
     } catch (err) {
       toast.error(humanizeApiError(err, 'Failed to start bots.'));
     }
     setBulkBusy(null);
-  }, [refetchBots]);
+  }, [refetchBots, bots]);
 
   const stopAll = useCallback(async () => {
     // Open positions are handled by the server's 409 → explicit-choice flow in postStop

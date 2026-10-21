@@ -19,7 +19,7 @@ from backend.models.positions import Position
 from backend.models.exchange_keys import ExchangeKey
 from backend.engine.evaluator import NodeEvaluator
 from backend.engine.sizing import _indicator_fingerprint, _num, _int, _tf_seconds, _naive_utc, cap_by_max_order_value, position_spec
-from backend.engine.symbols import DEFAULT_MARGIN_MODE, base_of, is_derivative, leverage_for, market_type_for, normalize
+from backend.engine.symbols import DEFAULT_MARGIN_MODE, base_of, cash_currency, is_derivative, leverage_for, market_type_for, normalize
 from backend.engine import funding, tiers
 from backend.engine import broker, pnl, risk
 from backend.engine.contracts import spec_for, spec_for_instance
@@ -107,6 +107,91 @@ def _original_amount(pos, open_side):
     return sum(o.amount for o in (pos.orders or []) if o.side == open_side and o.status == "filled") or pos.amount
 
 
+# Paper/live swap positions are checked against `fetch_positions` every N
+# processed candles (plus whenever the candle range crosses the simulated
+# liquidation level): a position the exchange liquidated between candles
+# must not keep a max_positions slot, skew the allocation or the drawdown
+# mark until a close happens to be rejected.
+LIVE_PROBE_EVERY = 6
+
+
+def _find_close_fill(ccxt_inst, ccxt_symbol, close_side, qty, since_ts, original_amount):
+    """After a network error on a close order the exchange may or may not
+    have filled it. One best-effort look at `fetch_my_trades` since the
+    candle: the trades of one order on the close side whose total size
+    matches the requested quantity (within `close_epsilon`) are that fill.
+    Returns a ccxt-shaped order dict (`id`, `status` closed, `filled`,
+    `average`, `fee`) or None when nothing matching is found. Never
+    raises — the caller then books the order state as unknown."""
+    fetch = getattr(ccxt_inst, "fetch_my_trades", None)
+    if fetch is None:
+        return None
+    try:
+        since_ms = None
+        if since_ts is not None:
+            since_ms = int(_naive_utc(since_ts).replace(tzinfo=timezone.utc).timestamp() * 1000)
+        trades = fetch(ccxt_symbol, since_ms) or []
+    except Exception as exc:
+        logger.warning("fetch_my_trades failed for %s after a network error on the close: %s", ccxt_symbol, exc)
+        return None
+    spec = spec_for_instance(ccxt_inst, ccxt_symbol) if is_derivative(ccxt_symbol) else None
+    eps = pnl.close_epsilon(original_amount)
+    groups = {}
+    for i, t in enumerate(trades):
+        if str(t.get("side") or "").lower() != close_side:
+            continue
+        try:
+            amt = float(t.get("amount") or 0)
+            price = float(t.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if amt <= 0 or price <= 0:
+            continue
+        if spec is not None:
+            amt = spec.from_contracts(amt)
+        key = str(t.get("order") or f"trade_{t.get('id') or i}")
+        g = groups.setdefault(key, {"id": key, "amount": 0.0, "cost": 0.0, "fee": 0.0, "fee_ccy": None})
+        g["amount"] += amt
+        g["cost"] += amt * price
+        fee = t.get("fee") or {}
+        try:
+            if isinstance(fee, dict) and fee.get("cost") is not None:
+                g["fee"] += float(fee["cost"])
+                g["fee_ccy"] = g["fee_ccy"] or fee.get("currency")
+        except (TypeError, ValueError):
+            pass
+    for g in reversed(list(groups.values())):  # newest order first
+        if abs(g["amount"] - qty) <= eps:
+            avg = g["cost"] / g["amount"]
+            filled = spec.to_contracts(g["amount"]) if spec is not None else g["amount"]
+            fee = {"cost": g["fee"], "currency": g["fee_ccy"]} if g["fee_ccy"] else None
+            return {"id": g["id"], "status": "closed", "filled": filled, "average": avg, "price": avg, "fee": fee, "recovered": True}
+    return None
+
+
+def _book_unknown_close(engine, db, bot, pos, exchange, mode, symbol, close_side, price, qty, ts, order_id, close_cols, label):
+    """A close whose fill state cannot be established: record it as
+    `unknown`, leave the position amount untouched and stop the bot — a
+    second close here could double-sell. The user verifies on the exchange."""
+    logger.error("%s %s state unknown for %s (id=%s) — stopping bot '%s'", mode.upper(), label, symbol, order_id, bot.name)
+    blb.push(bot.name, "ERROR", f"Order state unknown on {symbol} — verify manually on the exchange before restarting")
+    db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side=close_side, order_type="market", price=price, amount=qty, timestamp=ts, exchange_order_id=order_id, status="unknown", **close_cols))
+    engine._engine_stop(bot, db, f"{label.capitalize()} order state unknown on {symbol} — verify on the exchange before restarting")
+    db.commit()
+
+
+def _close_administratively(engine, db, pos, ts, bot_name, dd_group):
+    """Close the record of a position whose remainder cannot be sold on the
+    exchange (below the minimum, or not held at all). Partial legs were
+    booked as they closed; the drawdown state only needs the refresh."""
+    pos.status = "closed"
+    pos.closed_at = ts
+    engine._update_drawdown(bot_name, dd_group, 0.0)
+    with engine._position_states_lock:
+        engine.position_states.pop(pos.id, None)
+    db.commit()
+
+
 def _book_liquidation(engine, db, bot, pos, price, ts, dd_group, note, extra_loss=0.0):
     """Close `pos` as liquidated: the remaining margin and its share of the
     entry fee are lost, nothing comes back to the pool, no exit fee (same
@@ -182,7 +267,7 @@ def _apply_forward_funding(engine, db, bot, positions, exchange, ccxt_symbol, pr
     return total
 
 
-def _forward_cross_breached(db, engine, bot, positions, exchange, timeframe, ccxt_symbol, current_high, current_low, candle_ts, close_cache):
+def _forward_cross_breached(db, engine, bot, positions, exchange, timeframe, ccxt_symbol, current_high, current_low, candle_ts, close_cache, extra_cash=0.0):
     """Cross-margin account check of a forward-test bot on this candle:
     `forward_pool` free cash plus every open position's margin and PnL —
     the current symbol at its adverse extreme, the others at their stored
@@ -191,7 +276,7 @@ def _forward_cross_breached(db, engine, bot, positions, exchange, timeframe, ccx
     if not positions:
         return None
     ccy = _pos_spec(positions[0]).cash_currency
-    cash = engine._forward_pool(db, bot, ccy)
+    cash = engine._forward_pool(db, bot, ccy) + float(extra_cash or 0.0)
     equity = cash
     maint = 0.0
     marks = {}
@@ -221,14 +306,19 @@ def _forward_cross_breached(db, engine, bot, positions, exchange, timeframe, ccx
 def close_all_open_positions(engine, bot, db, key_records):
     """Market-close every open non-backtest position for a bot before it is
     force-stopped. A stopped bot no longer evaluates SL/TP, so leaving live
-    positions open would mean unmanaged, unbounded exposure."""
+    positions open would mean unmanaged, unbounded exposure. Returns the
+    number of positions that are still open afterwards (a close that failed
+    or whose state is unknown) so the stop reason can say so; a swap
+    position the exchange no longer holds is booked as a liquidation and
+    does not count."""
     open_positions = db.query(Position).options(selectinload(Position.orders)).filter(
         Position.bot_name == bot.name,
         Position.status == "open",
         Position.mode.in_(["forward_test", "paper", "live"]),
     ).all()
     if not open_positions:
-        return
+        return 0
+    failed = 0
 
     api_key_record = None
     if bot.settings.get("api_execution") and bot.settings.get("api_key_name"):
@@ -288,18 +378,34 @@ def close_all_open_positions(engine, bot, db, key_records):
             if ccxt_inst is None:
                 logger.error("Cannot close %s position on %s for '%s': no exchange client. Position left open.", pos.mode, pos.symbol, bot.name)
                 blb.push(bot.name, "ERROR", f"Could not close {pos.mode} position on {pos.symbol}: exchange unavailable — close it manually!")
+                failed += 1
                 continue
             try:
                 sell_qty = _precise_amount(ccxt_inst, ccxt_symbol, close_qty)
                 if sell_qty <= 0:
+                    failed += 1
                     continue
-                ex_order = _place_market_order(ccxt_inst, api_key_record, ccxt_symbol, _pos_close_side, sell_qty, reduce_only=True, leverage=pos.leverage)
+                try:
+                    ex_order = _place_market_order(ccxt_inst, api_key_record, ccxt_symbol, _pos_close_side, sell_qty, reduce_only=True, leverage=pos.leverage)
+                except ccxt.NetworkError as net_exc:
+                    # The order may have reached the exchange and filled:
+                    # look for the fill before deciding anything
+                    logger.warning("Forced close on %s hit a network error (%s: %s) — checking the trade history", pos.symbol, type(net_exc).__name__, net_exc)
+                    ex_order = _find_close_fill(ccxt_inst, ccxt_symbol, _pos_close_side, sell_qty, now_ts - timedelta(minutes=5), _original_amount(pos, _pos_open_side))
+                    if ex_order is None:
+                        db.add(Order(position_id=pos.id, exchange=pos.exchange, bot_name=bot.name, mode=pos.mode, symbol=pos.symbol, side=_pos_close_side, order_type="market", price=close_price, amount=sell_qty, timestamp=now_ts, status="unknown", **_close_cols))
+                        db.commit()
+                        blb.push(bot.name, "ERROR", f"Forced close on {pos.symbol}: {type(net_exc).__name__} and no fill found in the trade history — order state unknown, verify on the exchange!")
+                        failed += 1
+                        continue
+                    blb.push(bot.name, "WARN", f"Forced close on {pos.symbol} timed out but the exchange filled it — booked from the trade history")
                 ex_order = engine._reconcile_order(ccxt_inst, ex_order, ccxt_symbol)
                 filled_qty = _filled_base(ccxt_inst, ccxt_symbol, ex_order)
                 if filled_qty <= 0 and ex_order.get("status") != "closed":
                     db.add(Order(position_id=pos.id, exchange=pos.exchange, bot_name=bot.name, mode=pos.mode, symbol=pos.symbol, side=_pos_close_side, order_type="market", price=close_price, amount=sell_qty, timestamp=now_ts, exchange_order_id=ex_order.get("id"), status="canceled", **_close_cols))
                     db.commit()
                     blb.push(bot.name, "ERROR", f"Forced close on {pos.symbol} did not fill; position left open — close it manually!")
+                    failed += 1
                     continue
                 close_qty = filled_qty if filled_qty > 0 else sell_qty
                 actual_price = ex_order.get("average") or ex_order.get("price") or close_price
@@ -309,6 +415,19 @@ def close_all_open_positions(engine, bot, db, key_records):
             except Exception as exc:
                 logger.error("Forced close failed for '%s' on %s: %s", bot.name, pos.symbol, exc, exc_info=True)
                 blb.push(bot.name, "ERROR", f"Forced close failed on {pos.symbol}: {exc} — close it manually!")
+                failed += 1
+                # A refused reduce-only close on a perpetual usually means the
+                # exchange no longer holds the position (liquidated or closed
+                # by hand). Only an exchange *rejection* is asked — a network
+                # error says nothing about the position
+                if isinstance(exc, ccxt.ExchangeError) and is_derivative(ccxt_symbol):
+                    try:
+                        if broker.exchange_position_gone(ccxt_inst, ccxt_symbol, pos_side):
+                            _book_liquidation(engine, db, bot, pos, close_price, now_ts, risk.mode_group_for(pos.mode),
+                                              "exchange reports no open position when closing — booked as liquidation, check the exchange")
+                            failed -= 1
+                    except Exception as probe_exc:
+                        logger.warning("Could not verify %s position on the exchange after a rejected forced close: %s", pos.symbol, probe_exc)
                 continue
 
         # Same booking as the tick's exit: proportional entry fee + exit fee,
@@ -331,6 +450,7 @@ def close_all_open_positions(engine, bot, db, key_records):
                 engine.position_states.pop(pos.id, None)
         else:
             pos.amount -= close_qty
+            failed += 1
             blb.push(bot.name, "WARN", f"Partial forced close on {pos.symbol}: {close_qty} {'covered' if pos_side == 'short' else 'sold'}, {pos.amount} still open — close it manually!")
 
         # Committed before the console line (the log buffer writes on its own connection)
@@ -338,6 +458,7 @@ def close_all_open_positions(engine, bot, db, key_records):
 
         logger.info("Forced close [%s] %s: %s @ %s (PnL %+.2f %s)", pos.mode, pos.symbol, close_qty, actual_price, realized_pnl, spec.cash_currency)
         blb.push(bot.name, "INFO", f"Forced close [{pos.mode}] {pos.symbol}: {close_qty} @ {actual_price} (PnL {realized_pnl:+.2f} {spec.cash_currency})")
+    return failed
 
 
 def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record, get_ccxt,
@@ -583,12 +704,17 @@ def maybe_open_position(engine, db, bot, exchange, symbol, mode, api_key_record,
     return None
 
 
-def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=None):
+def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=None, replay: bool = False):
     """Evaluate every matching bot on the candle that closed at `candle_ts`.
     The poller publishes one event per missed candle after a gap, and each
     must be traded and stop-checked in order — evaluating only the newest
     row would skip the entries and exits of everything in between. Without
-    `candle_ts` the newest stored candle is used. Runs in a worker thread."""
+    `candle_ts` the newest stored candle is used. `replay` marks such a
+    caught-up candle (every one of the gap but the newest): paper/live bots
+    still run their exits on it — a missed stop must be sent — but place no
+    entries, since a market order now would fill hours after the signal at
+    a price the backtest never saw; a forward test keeps replaying entries
+    (it is a simulation). Runs in a worker thread."""
     db = SessionLocal()
     try:
         active_bots = db.query(BotConfig).filter(BotConfig.is_active == True).all()
@@ -762,7 +888,8 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                             _peak_reset_at = _naive_utc(datetime.fromisoformat(_reset_raw)) if _reset_raw else None
                         except (ValueError, TypeError):
                             _peak_reset_at = None
-                        dd_state = engine._get_drawdown(bot.name, db, mode_group=_dd_group, starting_capital=live_capital, peak_reset_at=_peak_reset_at)
+                        dd_state = engine._get_drawdown(bot.name, db, mode_group=_dd_group, starting_capital=live_capital, peak_reset_at=_peak_reset_at,
+                                                        cash_currency=cash_currency(symbol))  # M12: one currency per curve
                         _open_real = [p for k, v in _positions_by_bot_mode.items() if k[0] == bot.name and k[1] in risk.MODES_BY_GROUP[_dd_group] for p in v]
                         # Mark-to-market like the backtest: open losses count
                         # before they are realized, so a stop fires on the
@@ -782,6 +909,7 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                 # unlike the drawdown block there is no resume.
                                 if bot.name not in engine._entries_blocked:
                                     engine._entries_blocked.add(bot.name)
+                                    risk.persist_block(db, bot, reason=f"capital loss {loss_now:.1f}% > {max_capital_loss_pct:.0f}% — winding down")
                                     logger.warning("Bot '%s' capital loss %.2f%% > %.2f%% — winding down (entries blocked, stops when flat)", bot.name, loss_now, max_capital_loss_pct)
                                     blb.push(bot.name, "WARN", f"Capital loss {loss_now:.1f}% > {max_capital_loss_pct:.0f}% — winding down: entries blocked, {_open_any} open position(s) keep their exits, bot stops when flat")
                             else:
@@ -794,11 +922,15 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                         if stop_reason:
                             logger.warning("Bot '%s': %s", bot.name, stop_reason)
                             blb.push(bot.name, "WARN", "Closing all open positions before stopping — a stopped bot no longer manages SL/TP")
-                            close_all_open_positions(engine, bot, db, key_records)
+                            _not_closed = close_all_open_positions(engine, bot, db, key_records) or 0
+                            if _not_closed:
+                                # Honest stop reason: the card must not say "positions closed" while some are still open on the exchange
+                                stop_reason = stop_reason.replace("positions closed", f"{_not_closed} position(s) could not be closed — close them manually")
                             engine._engine_stop(bot, db, stop_reason)
                             engine._drawdown_cache.pop((bot.name, _dd_group), None)
                             engine._drawdown_cache.pop((bot.name, "backtest"), None)
                             engine._entries_blocked.discard(bot.name)
+                            risk.clear_block(db, bot)
                             db.commit()
                             continue
 
@@ -813,11 +945,15 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                             _cooldown_days = _num(bot.settings.get("drawdown_cooldown_days"), 7)
                             if bot.name not in engine._entries_blocked and dd_now >= max_drawdown_pct:
                                 engine._entries_blocked.add(bot.name)
+                                risk.persist_block(db, bot, reason=f"drawdown {dd_now:.1f}% > {max_drawdown_pct:.0f}%")
+                                db.commit()
                                 logger.warning("Bot '%s' drawdown %.2f%% > %.2f%% — new entries blocked", bot.name, dd_now, max_drawdown_pct)
                                 blb.push(bot.name, "WARN", f"Max drawdown {dd_now:.1f}% > {max_drawdown_pct:.0f}% — new entries blocked (open positions keep their exits; resumes below {max_drawdown_pct * 0.5:.1f}% or after {_cooldown_days:.0f}d flat)")
                             elif bot.name in engine._entries_blocked:
                                 if dd_now < max_drawdown_pct * 0.5:
                                     engine._entries_blocked.discard(bot.name)
+                                    risk.clear_block(db, bot)
+                                    db.commit()
                                     blb.push(bot.name, "INFO", f"Drawdown recovered to {dd_now:.1f}% — new entries allowed again")
                                 elif _open_any == 0:
                                     _last_close = db.query(func.max(Position.closed_at)).filter(
@@ -827,6 +963,7 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                     _flat_secs = (_now_ts - _last_close).total_seconds() if _last_close is not None else float("inf")
                                     if _flat_secs >= _cooldown_days * 86400:
                                         engine._entries_blocked.discard(bot.name)
+                                        risk.clear_block(db, bot)
                                         bot.settings = {**bot.settings, "drawdown_peak_reset_at": _now_ts.isoformat()}
                                         engine._drawdown_cache.pop((bot.name, _dd_group), None)
                                         db.commit()
@@ -886,6 +1023,14 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                             _cached_ccxt.load_markets()
                         return _cached_ccxt
 
+                    # One fetch_positions per symbol per tick, shared by every
+                    # layer's liquidation probe
+                    _probe_cache = {}
+                    def _exchange_positions(sym):
+                        if sym not in _probe_cache:
+                            _probe_cache[sym] = get_ccxt().fetch_positions([sym]) or []
+                        return _probe_cache[sym]
+
                     max_pos = _int(bot.settings.get("max_positions"), 1)
                     scope = bot.settings.get("max_positions_scope", "per_pair")
 
@@ -916,14 +1061,25 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                     # signal is ignored (same rule as the backtest)
                     pair_side = (bot_positions[0].side or "long") if bot_positions else None
                     _try_buy = is_buy
-                    if is_buy and pair_side == "short":
+                    _try_short = is_short
+                    if replay and mode in ("paper", "live"):
+                        # Replayed candle after a gap: the signal is hours old
+                        # and a market order now fills at today's price. Exits
+                        # below still run (a missed stop must be sent).
+                        if (is_buy or is_short) and (bot.name, symbol) not in engine._replay_notified:
+                            engine._replay_notified.add((bot.name, symbol))
+                            blb.push(bot.name, "INFO", f"Entry signal on {symbol} skipped — replaying missed candles (exits still run; entries resume on the newest candle)")
+                        _try_buy = _try_short = False
+                    elif not replay:
+                        engine._replay_notified.discard((bot.name, symbol))
+                    if _try_buy and pair_side == "short":
                         blb.push(bot.name, "INFO", f"BUY signal on {symbol} ignored while a short is open (long and short never coexist on a pair)")
                         _try_buy = False
                     opened = maybe_open_position(engine,
                         db, bot, exchange, symbol, mode, api_key_record, get_ccxt,
                         _try_buy, entries_blocked, bot_positions, open_count, max_pos, can_buy_cooldown,
                         current_price, latest_time)
-                    if opened is None and is_short and not is_buy and _shorts_enabled:
+                    if opened is None and _try_short and not is_buy and _shorts_enabled:
                         if pair_side == "long":
                             blb.push(bot.name, "INFO", f"SHORT signal on {symbol} ignored while a long is open (long and short never coexist on a pair)")
                         else:
@@ -942,9 +1098,15 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                     # decides between a level per position and one account
                     _fwd_swap = mode == "forward_test" and is_derivative(ccxt_symbol)
                     _fwd_cross = _fwd_swap and (bot.settings.get("margin_mode") or DEFAULT_MARGIN_MODE) == "cross"
+                    # Paper/live on a perpetual: the exchange liquidates, the
+                    # bot only detects it (candle range through the simulated
+                    # isolated level, plus a periodic fetch_positions probe)
+                    _real_swap = mode in ("paper", "live") and api_key_record is not None and is_derivative(ccxt_symbol)
+                    _real_cross = _real_swap and (bot.settings.get("margin_mode") or DEFAULT_MARGIN_MODE) == "cross"
                     if _fwd_swap:
                         _apply_forward_funding(engine, db, bot, [p for p in active_positions if p.id not in just_opened_ids],
                                                exchange, ccxt_symbol, current_price, latest_time, _dd_group, _funding_cache)
+                    if _fwd_swap or _real_swap:
                         _sym_tiers = tiers.load(db, exchange, ccxt_symbol)
 
                     for pos in active_positions:
@@ -964,13 +1126,54 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                         # Exits that fill before the liquidation level are
                         # regular exits; whatever is still open afterwards
                         # (or would have filled beyond it) is liquidated.
-                        _liq_price, _liq_hit = None, False
-                        if _fwd_swap and not _fwd_cross:
+                        # Paper/live: the same level only says when to ask
+                        # the exchange — it liquidates, the bot never books
+                        # a real-money liquidation from the candle alone.
+                        _liq_price, _liq_hit, _real_liq_hit = None, False, False
+                        if (_fwd_swap and not _fwd_cross) or (_real_swap and not _real_cross):
                             _mmr = tiers.mmr_for(_sym_tiers, tiers.tier_size(pos_spec, pos.amount, pos.entry_price))
-                            _liq_price = pos_spec.liquidation_price(pos_side, pos.entry_price, pos.leverage or 1, mmr=_mmr)
-                            _liq_hit = pnl.liquidated(pos_side, _liq_price, current_high, current_low)
-                            if _liq_hit:
-                                exit_events = [ev for ev in exit_events if not pnl.liquidated(pos_side, _liq_price, ev['price'], ev['price'])]
+                            # Same level as the backtest: the exchange keeps a
+                            # taker-fee reserve, so the bot's exit fee moves the
+                            # level toward entry (fallback for the fee-less signature)
+                            _liq_fee = engine._sim_frictions(bot.settings, pos_side)[1]
+                            try:
+                                _liq_price = pos_spec.liquidation_price(pos_side, pos.entry_price, pos.leverage or 1, mmr=_mmr, fee=_liq_fee)
+                            except TypeError:
+                                _liq_price = pos_spec.liquidation_price(pos_side, pos.entry_price, pos.leverage or 1, mmr=_mmr)
+                            _hit = pnl.liquidated(pos_side, _liq_price, current_high, current_low)
+                            if _fwd_swap:
+                                _liq_hit = _hit
+                                if _liq_hit:
+                                    exit_events = [ev for ev in exit_events if not pnl.liquidated(pos_side, _liq_price, ev['price'], ev['price'])]
+                            else:
+                                _real_liq_hit = _hit
+                        if _real_swap:
+                            # Ask the exchange whether it still holds the
+                            # position: on a level hit, and every
+                            # LIVE_PROBE_EVERY candles regardless (a stop
+                            # wider than the band never crosses the level)
+                            with engine._position_states_lock:
+                                _st = engine.position_states.get(pos.id)
+                                _ticks = int((_st or {}).get("ticks_since_probe", 0)) + 1
+                            _probe_now = _real_liq_hit or _ticks >= LIVE_PROBE_EVERY
+                            _gone = False
+                            if _probe_now:
+                                _ticks = 0
+                                try:
+                                    _gone = broker.exchange_position_gone(get_ccxt(), ccxt_symbol, pos_side, positions=_exchange_positions(ccxt_symbol))
+                                except Exception as probe_exc:
+                                    logger.warning("Could not verify %s position #%s on the exchange: %s", symbol, pos.id, probe_exc)
+                                    blb.push(bot.name, "WARN", f"Could not verify the {symbol} position on the exchange: {probe_exc}")
+                            with engine._position_states_lock:
+                                if pos.id in engine.position_states:
+                                    engine.position_states[pos.id]["ticks_since_probe"] = _ticks
+                            if _gone:
+                                _why = (f"candle range reached the liquidation level {_liq_price:g} at {pos.leverage or 1:g}x and the exchange reports no open position"
+                                        if _real_liq_hit else "exchange reports no open position (periodic check) — liquidated or closed by hand")
+                                _book_liquidation(engine, db, bot, pos, _liq_price if _real_liq_hit else current_price, latest_time, _dd_group, _why)
+                                continue
+                            if _real_liq_hit:
+                                blb.push(bot.name, "WARN", f"{symbol} candle range crossed the simulated liquidation level {_liq_price:g} but the exchange still holds the position — exits run as usual")
 
                         # Track original amount for weighted profit_pct
                         # Use the sum of all opening orders as the original position size
@@ -986,6 +1189,10 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                 close_qty = pos_original_amount * (ev['qty_pct'] / 100)
                             close_qty = min(close_qty, pos.amount)
                             if close_qty <= 0: continue
+                            # What this tier asked for; a smaller fill keeps it armed
+                            requested_qty = close_qty
+                            # Spot wallet held less than the record and was sold out
+                            _wallet_drained = False
 
                             try:
                                 actual_price = ev['price']
@@ -1001,6 +1208,7 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                 elif mode in ["paper", "live"] and api_key_record:
                                     ccxt_inst = get_ccxt()
                                     close_qty = _precise_amount(ccxt_inst, ccxt_symbol, close_qty)
+                                    requested_qty = close_qty
                                     if close_qty <= 0:
                                         logger.warning("Sell amount rounded to zero for %s after precision, skipping", ccxt_symbol)
                                         continue
@@ -1012,17 +1220,48 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                             # instead of retrying a doomed sell forever
                                             logger.warning("%s position remainder on %s unsellable (%s) — closing administratively", mode.upper(), symbol, min_violation)
                                             blb.push(bot.name, "WARN", f"Position remainder on {symbol} below exchange minimum ({min_violation}) — closed administratively, dust remains on the exchange")
-                                            pos.status = "closed"
-                                            pos.closed_at = latest_time
-                                            engine._update_drawdown(bot.name, _dd_group, 0.0)  # partial legs were booked as they closed
-                                            with engine._position_states_lock:
-                                                engine.position_states.pop(pos.id, None)
-                                            db.commit()
+                                            _close_administratively(engine, db, pos, latest_time, bot.name, _dd_group)
                                             break
                                         logger.warning("%s %s skipped for %s: %s", mode.upper(), _close_label, symbol, min_violation)
                                         blb.push(bot.name, "WARN", f"{_close_label.capitalize()} on {symbol} skipped: {min_violation}")
                                         continue
-                                    okx_order = _place_market_order(ccxt_inst, api_key_record, ccxt_symbol, _pos_close_side, close_qty, reduce_only=True, leverage=pos.leverage)
+                                    try:
+                                        okx_order = _place_market_order(ccxt_inst, api_key_record, ccxt_symbol, _pos_close_side, close_qty, reduce_only=True, leverage=pos.leverage)
+                                    except ccxt.NetworkError as net_exc:
+                                        # The order may have reached the exchange and
+                                        # filled: look for the fill before deciding
+                                        # anything. Nothing found → state unknown, stop
+                                        # the bot (never a liquidation, never a retry).
+                                        logger.warning("%s %s on %s hit a network error (%s: %s) — checking the trade history", mode.upper(), _close_label, symbol, type(net_exc).__name__, net_exc)
+                                        okx_order = _find_close_fill(ccxt_inst, ccxt_symbol, _pos_close_side, close_qty, latest_time, pos_original_amount)
+                                        if okx_order is None:
+                                            blb.push(bot.name, "ERROR", f"{mode.upper()} {_close_label} on {symbol}: {type(net_exc).__name__} and no fill found in the trade history")
+                                            _book_unknown_close(engine, db, bot, pos, exchange, mode, symbol, _pos_close_side, ev['price'], close_qty, latest_time, None, _close_cols, _close_label)
+                                            break
+                                        blb.push(bot.name, "WARN", f"{mode.upper()} {_close_label} on {symbol} timed out but the exchange filled it ({close_qty:g} @ {okx_order['average']:g}) — booked from the trade history")
+                                    except ccxt.InsufficientFunds as funds_exc:
+                                        if is_derivative(ccxt_symbol):
+                                            raise
+                                        # Spot: the wallet holds less than the record
+                                        # says (fee charged in base, a manual dust sale,
+                                        # rounding). Sell what is actually there instead
+                                        # of retrying the same doomed order every candle.
+                                        _held = broker.free_base(ccxt_inst, ccxt_symbol)
+                                        if _held is None:
+                                            raise
+                                        _base = base_of(ccxt_symbol)
+                                        _retry_qty = _precise_amount(ccxt_inst, ccxt_symbol, min(_held, close_qty)) if _held > 0 else 0.0
+                                        if _retry_qty <= 0 or engine._below_market_minimum(ccxt_inst, ccxt_symbol, _retry_qty, ev['price']):
+                                            logger.warning("%s %s on %s rejected (%s); wallet holds %s %s — closing administratively", mode.upper(), _close_label, symbol, funds_exc, _held, _base)
+                                            blb.push(bot.name, "WARN", f"{_close_label.capitalize()} on {symbol} rejected (insufficient funds): wallet holds {_held:g} {_base}, below the exchange minimum — closed administratively")
+                                            db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side=_pos_close_side, order_type="market", price=current_price, amount=close_qty, timestamp=latest_time, status="rejected", **_close_cols))
+                                            _close_administratively(engine, db, pos, latest_time, bot.name, _dd_group)
+                                            break
+                                        logger.warning("%s %s on %s rejected (%s); wallet holds %s %s of the recorded %s — selling what is held", mode.upper(), _close_label, symbol, funds_exc, _held, _base, close_qty)
+                                        blb.push(bot.name, "WARN", f"{_close_label.capitalize()} on {symbol} rejected (insufficient funds): wallet holds {_held:g} {_base} of the recorded {close_qty:g} — selling what is held")
+                                        _wallet_drained = _held <= close_qty + pnl.close_epsilon(pos_original_amount)
+                                        close_qty = requested_qty = _retry_qty
+                                        okx_order = _place_market_order(ccxt_inst, api_key_record, ccxt_symbol, _pos_close_side, close_qty, reduce_only=True, leverage=pos.leverage)
                                     logger.info("%s %s response: id=%s status=%s filled=%s avg=%s fee=%s",
                                         mode.upper(), _close_label, okx_order.get("id"), okx_order.get("status"),
                                         okx_order.get("filled"), okx_order.get("average"), okx_order.get("fee"))
@@ -1037,11 +1276,7 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                         # Cancel did not go through: the sell may still fill on
                                         # the exchange. Keep the position amount untouched and
                                         # stop the bot — a second sell here could double-sell.
-                                        logger.error("%s %s state unknown for %s (id=%s) — stopping bot '%s'", mode.upper(), _close_label, symbol, okx_order.get("id"), bot.name)
-                                        blb.push(bot.name, "ERROR", f"Order state unknown on {symbol} — verify manually on the exchange before restarting")
-                                        db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side=_pos_close_side, order_type="market", price=ev['price'], amount=close_qty, timestamp=latest_time, exchange_order_id=okx_order.get("id"), status="unknown", **_close_cols))
-                                        engine._engine_stop(bot, db, f"{_close_label.capitalize()} order state unknown on {symbol} — verify on the exchange before restarting")
-                                        db.commit()
+                                        _book_unknown_close(engine, db, bot, pos, exchange, mode, symbol, _pos_close_side, ev['price'], close_qty, latest_time, okx_order.get("id"), _close_cols, _close_label)
                                         break
                                     # Book only what actually sold so a partial fill
                                     # reduces the position pro rata instead of being
@@ -1070,14 +1305,25 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                     weight = close_qty / pos_original_amount
                                     pos.profit_pct = (pos.profit_pct or 0.0) + (portion_pct * weight)
 
+                                # A tier is spent only when its whole request
+                                # filled; a partial fill leaves it armed so the
+                                # next candle re-sends the stop for the remainder
+                                # (what a resting stop order would do)
+                                _full_fill = close_qty >= requested_qty - pnl.close_epsilon(pos_original_amount)
                                 with engine._position_states_lock:
                                     if pos.id in engine.position_states:
-                                        engine.position_states[pos.id]['triggered_exits'].add(ev['id'])
+                                        if _full_fill:
+                                            engine.position_states[pos.id]['triggered_exits'].add(ev['id'])
                                         pos.triggered_exits = list(engine.position_states[pos.id]['triggered_exits'])
+                                if not _full_fill:
+                                    logger.warning("%s %s [%s] on %s filled %s of %s — %s stays armed for the remainder", mode.upper(), _close_label, ev['reason'], symbol, close_qty, requested_qty, ev['id'])
+                                    blb.push(bot.name, "WARN", f"{mode.upper()} {_close_label} [{ev['reason']}] {symbol} filled {close_qty:g} of {requested_qty:g} — {ev['id']} stays armed, the remainder is re-sent on the next candle")
 
                                 # Every closed leg moves the realized curve, partial or not
                                 engine._update_drawdown(bot.name, _dd_group, realized_pnl)
-                                if close_qty >= pos.amount - pnl.close_epsilon(pos_original_amount):
+                                if _wallet_drained or close_qty >= pos.amount - pnl.close_epsilon(pos_original_amount):
+                                    if _wallet_drained and close_qty < pos.amount - pnl.close_epsilon(pos_original_amount):
+                                        blb.push(bot.name, "WARN", f"{symbol}: the recorded {pos.amount - close_qty:g} {base_of(ccxt_symbol)} beyond the wallet balance was never held — position closed")
                                     pos.status = "closed"
                                     pos.closed_at = latest_time
                                     with engine._position_states_lock:
@@ -1099,11 +1345,13 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                                 db.add(Order(position_id=pos.id, exchange=exchange, bot_name=bot.name, mode=mode, symbol=symbol, side=_pos_close_side, order_type="market", price=current_price, amount=close_qty, timestamp=latest_time, status="rejected", **_close_cols))
                                 if mode in ["paper", "live"]:
                                     db.commit()
-                                    # A rejected reduce-only close on a perpetual
-                                    # usually means the exchange no longer holds
-                                    # the position (liquidated or closed by
-                                    # hand): ask, and stop retrying forever
-                                    if is_derivative(ccxt_symbol) and api_key_record and pos.status == "open":
+                                    # A reduce-only close on a perpetual the exchange
+                                    # *rejected* usually means it no longer holds the
+                                    # position (liquidated or closed by hand): ask, and
+                                    # stop retrying forever. Only an exchange rejection
+                                    # is asked — a network error says nothing about the
+                                    # position and is handled above
+                                    if isinstance(e, ccxt.ExchangeError) and is_derivative(ccxt_symbol) and api_key_record and pos.status == "open":
                                         try:
                                             if broker.exchange_position_gone(get_ccxt(), ccxt_symbol, pos_side):
                                                 _book_liquidation(engine, db, bot, pos, current_price, latest_time, _dd_group,
@@ -1123,8 +1371,15 @@ def process_tick(engine, exchange: str, symbol: str, timeframe: str, candle_ts=N
                     # with them (same booking as the backtest)
                     if _fwd_cross:
                         _all_open = [p for p in _positions_by_bot_mode.get((bot.name, mode), []) if p.status == "open" and p.id not in just_opened_ids]
+                        # M13: the layer opened at this close is excluded from the
+                        # breach test and its margin + entry fee (already taken out
+                        # of forward_pool) is added back — same rule as the backtest
+                        _just_cost = sum(
+                            _pos_spec(p).locked_capital(p.amount or 0.0, p.entry_price or 0.0, max(float(p.leverage or 1), 1.0),
+                                                        engine._sim_frictions(bot.settings, p.side or "long")[0])
+                            for p in _positions_by_bot_mode.get((bot.name, mode), []) if p.id in just_opened_ids)
                         _breach = _forward_cross_breached(db, engine, bot, _all_open, exchange, timeframe, ccxt_symbol,
-                                                          current_high, current_low, latest_time, _last_close_cache)
+                                                          current_high, current_low, latest_time, _last_close_cache, extra_cash=_just_cost)
                         if _breach is not None:
                             _marks, _cash_lost = _breach
                             _total_margin = sum(_pos_spec(p).margin(p.amount or 0.0, p.entry_price or 0.0, max(float(p.leverage or 1), 1.0)) for p in _all_open)

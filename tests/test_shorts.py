@@ -92,9 +92,9 @@ def test_pnl_helpers_mirror_long_and_short():
     assert pnl.price_pnl("long", 100, 110, 2) == pytest.approx(20)
     assert pnl.price_pnl("short", 100, 110, 2) == pytest.approx(-20)
     assert pnl.price_pnl(None, 100, 110, 2) == pytest.approx(20)  # legacy rows are longs
-    assert pnl.liquidation_price("short", 100.0, 10) == pytest.approx(100 * (1 + 0.995 / 10))
-    assert pnl.liquidation_price("long", 100.0, 10) == pytest.approx(100 * (1 - 0.995 / 10))
-    assert pnl.liquidation_price("short", 100.0, 1) == pytest.approx(100 * (1 + 0.995))
+    assert pnl.liquidation_price("short", 100.0, 10) == pytest.approx(100 * (1 + 0.1 - 0.005))
+    assert pnl.liquidation_price("long", 100.0, 10) == pytest.approx(100 * (1 - 0.1 + 0.005))
+    assert pnl.liquidation_price("short", 100.0, 1) == pytest.approx(100 * (2 - 0.005))  # 1x linear short: ~doubling
     assert pnl.liquidation_price("long", 100.0, 1) is None
     assert pnl.liquidated("short", 110.0, 111.0, 100.0) and not pnl.liquidated("short", 110.0, 109.0, 100.0)
     assert pnl.liquidated("long", 90.0, 100.0, 89.0) and not pnl.liquidated("long", 90.0, 100.0, 91.0)
@@ -311,7 +311,7 @@ def test_backtest_short_liquidation_on_high(db):
     assert p.profit_abs == pytest.approx(-(margin + sell.fee), rel=1e-6)  # margin + entry fee lost
     assert p.profit_pct == pytest.approx(-100.0, rel=1e-6)
     buy = db.query(Order).filter(Order.position_id == p.id, Order.side == "buy").one()
-    assert buy.price == pytest.approx(pnl.liquidation_price("short", p.entry_price, lev), rel=1e-9)
+    assert buy.price == pytest.approx(pnl.liquidation_price("short", p.entry_price, lev, fee=0.001), rel=1e-9)
     assert buy.price > p.entry_price and buy.fee == 0 and buy.reduce_only == 1
 
 
@@ -525,4 +525,4 @@ def test_forward_short_is_liquidated_on_the_candle_high(db, swap_bot, run_tick):
     assert closed.profit_pct == pytest.approx(-100.0)
     cover = db.query(Order).filter(Order.position_id == pos.id, Order.side == "buy").one()
     assert cover.reduce_only == 1 and cover.fee == 0
-    assert cover.price == pytest.approx(pnl.liquidation_price("short", 100.0, 10))
+    assert cover.price == pytest.approx(pnl.liquidation_price("short", 100.0, 10, fee=0.001))  # exit-fee reserve, same level as the backtest

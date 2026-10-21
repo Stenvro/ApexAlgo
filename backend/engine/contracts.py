@@ -197,26 +197,45 @@ class ContractSpec:
                    + self.pnl_cash(p.side, p.amount, p.entry_price, price) for p in positions)
 
     # ── liquidation ─────────────────────────────────────────────────────
-    def liquidation_price(self, side, entry_price, leverage, mmr=MAINTENANCE_MARGIN):
-        """Price at which the margin is exhausted up to the maintenance
-        margin. Linear: ``entry*(1 ∓ (1-mmr)/lev)``; a 1x linear/spot long has
-        no liquidation level (None). Inverse long: ``entry*lev/(lev+1-mmr)``,
-        inverse short: ``entry*lev/(lev-1+mmr)``."""
+    def liquidation_price(self, side, entry_price, leverage, mmr=MAINTENANCE_MARGIN, fee=0.0):
+        """Price at which the exchange liquidates an isolated position: the
+        margin is used up except for the maintenance margin ``mmr`` and the
+        liquidation (taker) fee reserve ``fee`` — the way OKX/Bybit/Bitget
+        quote their isolated level — both as a fraction of the notional.
+
+        Linear long ``entry*(1 - 1/lev + mmr + fee)``, short
+        ``entry*(1 + 1/lev - mmr - fee)``; a 1x linear/spot long has no level
+        (None). Inverse long ``entry*lev*(1 + mmr + fee)/(lev + 1)``, short
+        ``entry*lev*(1 - mmr - fee)/(lev - 1)`` (no level at 1x). None when
+        the band ``1/lev - mmr - fee`` is not positive (the stop would never
+        sit on the right side of the entry)."""
         if not entry_price:
             return None
         entry_price = float(entry_price)
         lev = max(float(leverage or 1), 1.0)
+        mmr = float(mmr or 0.0)
+        fee = float(fee or 0.0)
         short = side == "short"
         if self.is_inverse:
-            return entry_price * lev / (lev - 1 + mmr) if short else entry_price * lev / (lev + 1 - mmr)
-        if lev <= 1 and not short:
+            if short:
+                if lev <= 1:
+                    return None
+                liq = entry_price * lev * (1 - mmr - fee) / (lev - 1)
+            else:
+                liq = entry_price * lev * (1 + mmr + fee) / (lev + 1)
+        else:
+            if lev <= 1 and not short:
+                return None
+            band = 1 / lev - mmr - fee
+            liq = entry_price * (1 + band) if short else entry_price * (1 - band)
+        if liq <= 0 or (liq >= entry_price if not short else liq <= entry_price):
             return None
-        move = (1 - mmr) / lev
-        return entry_price * (1 + move) if short else entry_price * (1 - move)
+        return liq
 
     def liquidation_loss(self, qty, entry_price, leverage=1, entry_fee=0.0) -> float:
         """Cash lost on liquidation: the whole margin plus the entry fee
-        already paid (no exit fee is charged)."""
+        already paid (the exchange keeps the maintenance margin and the fee
+        reserve the level was computed with; no separate exit fee is booked)."""
         return self.margin(qty, entry_price, leverage) + self.fee_cash(qty, entry_price, entry_fee)
 
     # ── exchange plumbing ───────────────────────────────────────────────

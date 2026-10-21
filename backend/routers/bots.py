@@ -20,7 +20,7 @@ from backend.core.events import event_bus
 from backend.core.security import verify_api_key
 from backend.engine.settings_validator import validate_bot_settings
 from backend.engine.bot_manager import bot_manager, _config_fingerprint
-from backend.engine.sizing import backtest_pin
+from backend.engine.sizing import backtest_pin, position_spec
 from backend.engine.symbols import cash_currency as _cash_currency_of
 from backend.engine.data_verify import verify_window
 from backend.core.exchange_registry import build_exchange_for_symbol
@@ -499,8 +499,12 @@ def _open_real_positions(bot_name: str, db: Session) -> List[Position]:
 
 
 def _position_brief(pos: Position) -> dict:
+    spec = position_spec(pos.symbol, pos.contract_kind, pos.contract_size, pos.exchange)
     return {"id": pos.id, "symbol": pos.symbol, "mode": pos.mode, "amount": pos.amount,
-            "entry_price": pos.entry_price, "exchange": pos.exchange}
+            "entry_price": pos.entry_price, "exchange": pos.exchange,
+            "side": pos.side or "long", "leverage": pos.leverage or 1,
+            "contract_kind": spec.kind, "contract_size": spec.contract_size,
+            "cash_currency": pos.cash_currency or spec.cash_currency}
 
 
 async def _stop(bot: BotConfig, db: Session, close_positions: Optional[bool] = None) -> dict:
@@ -527,7 +531,10 @@ async def _stop(bot: BotConfig, db: Session, close_positions: Optional[bool] = N
         from backend.routers.trades import close_position_now
         for pos in open_real:
             try:
-                price = close_position_now(pos, db)
+                # Exchange round-trips and the bot lock must not freeze the
+                # event loop (delete_bot runs sync in the threadpool for the
+                # same reason); the session is only ever used sequentially
+                price = await asyncio.to_thread(close_position_now, pos, db)
                 closed.append({**_position_brief(pos), "close_price": price})
                 blb.push(bot.name, "INFO", f"Stopped by user: closed {pos.mode} {pos.symbol} position #{pos.id} at {price}")
             except HTTPException as e:
@@ -743,7 +750,7 @@ def export_bot(bot_id: int, db: Session = Depends(get_db)):
             # The pinned backtest window belongs to this machine's candle
             # store; on another install it would replay a range that may
             # not exist there
-            "settings": {k: v for k, v in (bot.settings or {}).items() if k not in ("backtest_from", "backtest_to")},
+            "settings": {k: v for k, v in (bot.settings or {}).items() if k not in ("backtest_from", "backtest_to", "entries_blocked_at", "entries_blocked_reason")},
         }
     }
     safe_name = re.sub(r'[^A-Za-z0-9_-]', '_', bot.name).strip('_') or f"bot_{bot.id}"
@@ -790,8 +797,8 @@ def clear_bot_cache(bot_name: str, db: Session = Depends(get_db)):
                 params = {"bn": bot_name, "mode": mode}
                 db.execute(text("DELETE FROM orders WHERE bot_name = :bn AND mode = :mode"), params)
                 deleted_sim += db.execute(text("DELETE FROM positions WHERE bot_name = :bn AND mode = :mode"), params).rowcount
-            if bot and bot.settings and any(k in bot.settings for k in ("last_backtest_summary", "last_backtest_max_drawdown", "last_stop_reason", "drawdown_peak_reset_at", "live_starting_capital")):
-                bot.settings = {k: v for k, v in bot.settings.items() if k not in ("last_backtest_summary", "last_backtest_max_drawdown", "last_stop_reason", "drawdown_peak_reset_at", "live_starting_capital")}
+            if bot and bot.settings and any(k in bot.settings for k in ("last_backtest_summary", "last_backtest_max_drawdown", "last_stop_reason", "drawdown_peak_reset_at", "live_starting_capital", "entries_blocked_at", "entries_blocked_reason")):
+                bot.settings = {k: v for k, v in bot.settings.items() if k not in ("last_backtest_summary", "last_backtest_max_drawdown", "last_stop_reason", "drawdown_peak_reset_at", "live_starting_capital", "entries_blocked_at", "entries_blocked_reason")}
                 flag_modified(bot, "settings")
         db.commit()
         blb.clear(bot_name)

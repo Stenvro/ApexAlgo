@@ -4,7 +4,7 @@ import json
 import logging
 from hashlib import md5, sha256
 from datetime import datetime, timezone
-from sqlalchemy import text, func
+from sqlalchemy import text, func, or_
 from backend.models.bots import BotConfig
 from backend.models.positions import Position
 from backend.models.orders import Order
@@ -72,6 +72,7 @@ _NON_STRATEGY_KEYS = frozenset({
     "backtest_on_start", "backtest_from", "backtest_to",
     "last_backtest_summary", "last_backtest_max_drawdown",
     "last_stop_reason", "drawdown_peak_reset_at", "live_starting_capital",
+    "entries_blocked_at", "entries_blocked_reason",
 })
 
 
@@ -218,15 +219,24 @@ def deployed_capital(db, bot_names, quote, modes=("paper", "live")):
     return total
 
 
+def currency_filter(quote):
+    """SQLAlchemy criterion: positions booked in `quote` (NULL rows are
+    pre-migration ones `_backfill_position_currency` fills at startup)."""
+    return or_(Position.cash_currency == quote, Position.cash_currency.is_(None))
+
+
 def forward_pool(db, bot, quote):
     """Cash a forward-test bot may still deploy: the backtest's capital
     pool carried forward — backtest_capital plus realized forward-test
     PnL (fees included) minus what its open forward-test positions have
     locked. Same economics as bt_equity, so a forward test sizes exactly
     like the backtest it is meant to confirm."""
+    # Only closes booked in this cash currency: a bot re-pointed from USDT
+    # to EUR pairs must not carry its USDT result into the EUR pool (rows
+    # without a currency are pre-migration ones, backfilled at startup)
     realized = db.query(func.coalesce(func.sum(Position.profit_abs), 0.0)).filter(
         Position.bot_name == bot.name, Position.status == "closed",
-        Position.mode == "forward_test").scalar() or 0.0
+        Position.mode == "forward_test", currency_filter(quote)).scalar() or 0.0
     deployed = deployed_capital(db, [bot.name], quote, modes=("forward_test",))
     # The entry fee left the pool on open as well (bt_equity -= cost + fee)
     open_ids = [pid for (pid, sym) in db.query(Position.id, Position.symbol).filter(

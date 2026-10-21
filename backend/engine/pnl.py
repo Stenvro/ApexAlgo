@@ -12,6 +12,8 @@ from backend.engine import contracts as _contracts
 MAINTENANCE_MARGIN = _contracts.MAINTENANCE_MARGIN
 
 SIDES = ("long", "short")
+# Linear shape for the spec-less callers (spot/linear formulas are identical)
+_LINEAR = _contracts.ContractSpec(symbol="BASE/USDT:USDT", kind="linear", base="BASE", quote="USDT", settle="USDT")
 
 
 def direction(side):
@@ -33,21 +35,18 @@ def price_pnl(side, entry_price, exit_price, amount, spec=None):
     return direction(side) * (exit_price - entry_price) * amount
 
 
-def liquidation_price(side, entry_price, leverage, spec=None):
-    """Price where the margin is exhausted up to the maintenance margin:
-    `entry*(1-(1-MMR)/lev)` for a long, `entry*(1+(1-MMR)/lev)` for a short.
-    A 1x long can lose at most its margin (None: no liquidation level); a 1x
-    short is liquidated once the price roughly doubles (`entry*(1+(1-MMR))`).
-    With a `spec` the contract kind decides (inverse has its own curve)."""
-    if spec is not None:
-        return spec.liquidation_price(side, entry_price, leverage)
-    if not entry_price:
-        return None
-    lev = max(float(leverage or 1), 1.0)
-    if lev <= 1 and not is_short(side):
-        return None
-    move = (1 - MAINTENANCE_MARGIN) / lev
-    return entry_price * (1 + move) if is_short(side) else entry_price * (1 - move)
+def liquidation_price(side, entry_price, leverage, spec=None, mmr=None, fee=0.0):
+    """Price where the exchange liquidates an isolated position: the margin
+    is used up except for the maintenance margin and the liquidation-fee
+    reserve. Linear: `entry*(1 - 1/lev + mmr + fee)` for a long,
+    `entry*(1 + 1/lev - mmr - fee)` for a short. A 1x long can lose at most
+    its margin (None: no liquidation level); a 1x short is liquidated once
+    the price roughly doubles. With a `spec` the contract kind decides
+    (inverse has its own curve); `mmr` defaults to the flat
+    `MAINTENANCE_MARGIN`, `fee` is the bot's configured exit (taker) fee."""
+    mmr = MAINTENANCE_MARGIN if mmr is None else mmr
+    spec = spec if spec is not None else _LINEAR
+    return spec.liquidation_price(side, entry_price, leverage, mmr=mmr, fee=fee)
 
 
 def locked_capital(entry_price, amount, leverage=1, fee=0.0, spec=None):

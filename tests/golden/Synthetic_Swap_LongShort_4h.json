@@ -20,7 +20,7 @@
   {
    "amount": 7.23479872,
    "fee": 0.0,
-   "price": 198.50785242,
+   "price": 197.76282712,
    "side": "buy",
    "symbol": "ETH/USDT:USDT",
    "timestamp": "2023-01-24T20:00:00"
@@ -164,7 +164,7 @@
   {
    "amount": 21.62342942,
    "fee": 0.0,
-   "price": 166.26416793,
+   "price": 165.64015729,
    "side": "buy",
    "symbol": "ETH/USDT:USDT",
    "timestamp": "2023-03-22T00:00:00"
@@ -228,7 +228,7 @@
   {
    "amount": 26.41456605,
    "fee": 0.0,
-   "price": 136.10677887,
+   "price": 135.59595276,
    "side": "buy",
    "symbol": "ETH/USDT:USDT",
    "timestamp": "2023-03-31T08:00:00"
@@ -260,7 +260,7 @@
   {
    "amount": 22.31019048,
    "fee": 0.0,
-   "price": 107.76248201,
+   "price": 108.36788922,
    "side": "sell",
    "symbol": "ETH/USDT:USDT",
    "timestamp": "2023-04-01T08:00:00"
@@ -276,7 +276,7 @@
   {
    "amount": 24.76009531,
    "fee": 0.0,
-   "price": 97.09984836,
+   "price": 97.64535313,
    "side": "sell",
    "symbol": "BTC/USDT:USDT",
    "timestamp": "2023-04-02T00:00:00"
@@ -404,7 +404,7 @@
   {
    "amount": 27.10798466,
    "fee": 0.0,
-   "price": 132.62518573,
+   "price": 132.12742649,
    "side": "buy",
    "symbol": "BTC/USDT:USDT",
    "timestamp": "2023-04-24T20:00:00"

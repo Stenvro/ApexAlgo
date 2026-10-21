@@ -67,9 +67,10 @@ def test_liquidation_price_lies_on_the_losing_side_of_entry(side, entry, lev):
         assert liq < entry
     else:
         assert liq > entry
-    # the level is exactly the price where the loss equals (1 − MMR) × margin
+    # R3: the level is exactly the price where the loss equals the margin
+    # minus the maintenance margin on the entry notional (fee reserve 0 here)
     margin = entry / lev
-    assert -pnl.price_pnl(side, entry, liq, 1.0) == pytest.approx((1 - pnl.MAINTENANCE_MARGIN) * margin, rel=REL)
+    assert -pnl.price_pnl(side, entry, liq, 1.0) == pytest.approx(margin - pnl.MAINTENANCE_MARGIN * entry, rel=REL)
     # and `liquidated` agrees with the level on a candle that just touches it
     assert pnl.liquidated(side, liq, row_high=max(entry, liq), row_low=min(entry, liq))
     assert not pnl.liquidated(side, liq, row_high=entry, row_low=entry)

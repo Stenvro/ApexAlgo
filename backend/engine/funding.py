@@ -25,6 +25,9 @@ from backend.models.market_data import FundingRate
 logger = logging.getLogger("apexalgo.funding")
 
 _PAGE = 1000
+# Longest usual gap between two settlements (8h funding); the stored range
+# may miss either end of a window by up to this much and still count as full
+SETTLEMENT_INTERVAL = timedelta(hours=8)
 _MAX_PAGES = 200  # safety valve on the pagination loop
 # The poller refreshes a symbol's funding at most this often (seconds)
 REFRESH_EVERY = 3600
@@ -44,11 +47,14 @@ def fetch_history(exchange_id: str, symbol: str, since_ms: int, until_ms: int) -
     """`[(timestamp_ms, rate)]` from the exchange for `[since_ms, until_ms]`.
     Exchanges keep a limited history (OKX ~3 months, Binance years); what
     they no longer serve is simply not returned. Raises on network errors."""
-    from backend.core.exchange_registry import build_exchange_for_symbol
+    from backend.core.exchange_registry import build_exchange_for_symbol, remember_markets
     exchange = build_exchange_for_symbol(exchange_id, symbol)
     if not exchange.has.get("fetchFundingRateHistory"):
         return []
     exchange.load_markets()
+    # The market map in hand carries the real contract sizes: seed the
+    # registry's spec cache so inverse backtests size in real contracts
+    remember_markets(exchange_id, exchange.markets)
     out = []
     since = int(since_ms)
     seen = set()
@@ -162,14 +168,33 @@ def payment(spec, side, qty, price, rate) -> float:
 
 
 def coverage(events: list, start, end) -> dict:
-    """What the stored settlements cover of a backtest window — reported in
-    the summary so a run on a partial funding history is recognisable."""
+    """What the stored settlements cover of the backtest window `[start,
+    end]` — reported in the summary so a run on a partial funding history is
+    recognisable: `"simulated"` when the stored range reaches both ends of
+    the window (within one `SETTLEMENT_INTERVAL`), `"partial"` with
+    `covered_pct` (share of the window inside the stored range) otherwise.
+    Without a window the stored range is taken as the window."""
     if not events:
         return {"funding": "no data", "funding_events": 0}
     first, last = events[0][0], events[-1][0]
-    return {
+    out = {
         "funding": "simulated",
         "funding_events": len(events),
         "funding_from": first.isoformat(),
         "funding_to": last.isoformat(),
+        "covered_pct": 100.0,
     }
+    if start is None or end is None:
+        return out
+    start, end = _naive_utc(start), _naive_utc(end)
+    span = (end - start).total_seconds()
+    if span <= 0:
+        return out
+    head_missing = first > start + SETTLEMENT_INTERVAL
+    tail_missing = last < end - SETTLEMENT_INTERVAL
+    cov_from, cov_to = max(first, start), min(last, end)
+    covered = max((cov_to - cov_from).total_seconds(), 0.0)
+    out["covered_pct"] = round(min(100.0 * covered / span, 100.0), 1)
+    if head_missing or tail_missing:
+        out["funding"] = "partial"
+    return out

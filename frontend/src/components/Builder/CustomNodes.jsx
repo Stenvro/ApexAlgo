@@ -130,9 +130,27 @@ export const BotConfigNode = ({ id, data }) => (
 );
 
 // Isolated-margin liquidation distance the engine models (engine/pnl.py):
-// entry × (1 ∓ (1 − MMR) / leverage) with MMR = 0.5 % → ≈ −19.9 % at 5×.
-const LIQ_MMR = 0.005;
-const liquidationPct = (lev) => Number((((1 - LIQ_MMR) / Math.max(1, Number(lev) || 1)) * 100).toFixed(1));
+// 100 × (1/leverage − MMR − exit fee) % from entry, with the flat maintenance
+// margin until the exchange's tiers are stored. MMR and the leverage guard
+// come from GET /api/keys/exchanges (`maintenance_margin`,
+// `leverage_warn_above`); the fallbacks only bridge an unreachable backend.
+const FALLBACK_MMR = 0.005;
+const FALLBACK_LEVERAGE_WARN_ABOVE = 3;
+const liquidationPct = (lev, mmr = FALLBACK_MMR, feePct = 0) => {
+  const l = Math.max(1, Number(lev) || 1);
+  const fee = (Number(feePct) || 0) / 100;
+  return Number(Math.max(0, (1 / l - (Number(mmr) || 0) - fee) * 100).toFixed(1));
+};
+// Engine constants of an exchange from the registry payload (fallbacks when missing)
+const engineGuards = (exchanges, exchangeId) => {
+  const hit = (exchanges || []).find(e => e.id === exchangeId) || (exchanges || [])[0] || {};
+  const mmr = Number(hit.maintenance_margin);
+  const warn = Number(hit.leverage_warn_above);
+  return {
+    mmr: Number.isFinite(mmr) && mmr > 0 ? mmr : FALLBACK_MMR,
+    warnAbove: Number.isFinite(warn) && warn >= 1 ? warn : FALLBACK_LEVERAGE_WARN_ABOVE,
+  };
+};
 
 // Execution mode + go-live checklist. `data.liveContext` is pushed in by the
 // builder: { keyName, exchange, isSandbox, entryFee, marketType, leverage,
@@ -141,6 +159,7 @@ const liquidationPct = (lev) => Number((((1 - LIQ_MMR) / Math.max(1, Number(lev)
 // to forward test at start.
 const ExecutionModeSection = ({ id, data }) => {
   const ctx = data.liveContext || {};
+  const exchanges = useExchanges();
   const hasKey = !!ctx.keyName;
   const mode = data.executionMode !== undefined ? data.executionMode : 'paper';
   const wantsExchange = mode === 'exchange';
@@ -152,14 +171,20 @@ const ExecutionModeSection = ({ id, data }) => {
   const fee = Number(ctx.entryFee);
   const isSwap = ctx.marketType === 'swap';
   const lev = isSwap ? (Number(ctx.leverage) || 1) : 1;
-  // Liquidation distance as the engine models it: (1 − MMR) / leverage with
-  // MMR 0.5 %, e.g. ≈ −19.9 % at 5× (not the naive 100 % / leverage)
-  const liqPct = liquidationPct(lev);
+  const { mmr, warnAbove } = engineGuards(exchanges, ctx.exchange);
+  // Liquidation distance as the engine models it: 1/leverage − MMR − exit
+  // fee, e.g. ≈ 19.4 % at 5× with a 0.1 % fee (not the naive 100 % / leverage)
+  const exitFeePct = Number(ctx.exitFee) || 0;
+  const liqPct = liquidationPct(lev, mmr, exitFeePct);
   const checks = [
     { ok: hasKey, label: hasKey ? `Key "${ctx.keyName}" on ${String(ctx.exchange || '').toUpperCase()} (${ctx.isSandbox ? 'sandbox → paper' : 'real → live'})` : 'Select an API key in the Exchange Routing block' },
     { ok: cap > 0, label: cap > 0 ? `Max order value ${fmtMoney(cap, quoteCcy, { digits: 0 })}${quoteCcy ? '' : ' (quote notional)'} caps every order${isSwap ? ' (notional = margin × leverage)' : ''}` : `Set the max order value above (required for live orders${isSwap ? '; caps the notional, i.e. margin × leverage' : ''})` },
     { ok: fee > 0, label: fee > 0 ? `Entry fee ${fee}% modelled` : 'Entry fee is 0% — the backtest ignores what the exchange will charge' },
-    ...(isSwap ? [{ ok: lev <= 3, label: `Perpetuals ${lev}× ${ctx.marginMode || 'isolated'} · liquidation ≈ −${liqPct}% from entry · funding simulated from stored rates${ctx.marginMode === 'cross' ? ' · cross: a liquidation takes the whole pool' : ''}${mctx.hasInverse ? ` · inverse: margin and PnL in ${mctx.inverseBases.join('/')}` : ''}` }] : []),
+    ...(isSwap ? [
+      // Facts, not a check: what the engine will do with this leverage
+      { ok: true, info: true, label: `Perpetuals ${lev}× ${ctx.marginMode || 'isolated'} · liquidation ≈ −${liqPct}% from entry (1/${lev} − ${(mmr * 100).toFixed(2)}% flat maintenance margin until the exchange's tiers are stored − ${exitFeePct}% exit fee) · live stops are evaluated at candle close, the exchange's liquidation engine runs continuously · funding simulated from stored rates${ctx.marginMode === 'cross' ? ' · cross: a liquidation takes the whole pool' : ''}${mctx.hasInverse ? ` · inverse: margin and PnL in ${mctx.inverseBases.join('/')}` : ''}` },
+      { ok: lev <= warnAbove, label: lev <= warnAbove ? `Leverage ${lev}× is within the ${warnAbove}× guard` : `${lev}× is above the ${warnAbove}× guard — a ≈ −${liqPct}% move wipes the margin and the engine warns on every start; lower the leverage in the Exchange Routing block or accept the risk` },
+    ] : []),
     ...(ctx.hasShort ? [
       { ok: isSwap, label: isSwap ? 'Short entries — routed through a swap key' : 'Short entries — requires a swap (perpetuals) key; this key trades spot' },
       { ok: !!(ctx.hasCover || ctx.hasShortStop), label: (ctx.hasCover || ctx.hasShortStop) ? 'Short leg has an exit (COVER block or stop-loss)' : 'Short leg has no COVER block and no stop-loss — a short could only be closed by liquidation' },
@@ -182,7 +207,7 @@ const ExecutionModeSection = ({ id, data }) => {
         <ul className="mt-2 space-y-1">
           {checks.map((c, i) => (
             <li key={i} className={`flex items-start gap-1.5 text-3xs ${c.ok ? 'text-muted' : 'text-danger'}`}>
-              <span aria-hidden="true" className="shrink-0">{c.ok ? '✓' : '✕'}</span>
+              <span aria-hidden="true" className="shrink-0">{c.info ? 'ⓘ' : c.ok ? '✓' : '✕'}</span>
               <span>{c.label}</span>
             </li>
           ))}
@@ -275,7 +300,7 @@ export const BacktestNode = ({ id, data }) => (
     </div>
     <div className="p-4 bg-bg/80 rounded-b space-y-4">
       <label className="flex items-center cursor-pointer nodrag">
-        <input type="checkbox" className="form-checkbox h-4 w-4 text-accent rounded border-border bg-inset focus:ring-0 focus:ring-offset-0" checked={data.runOnStart !== false} onChange={(e) => data.onChange(id, 'runOnStart', e.target.checked)} />
+        <input type="checkbox" className="h-4 w-4 accent-accent rounded-sm cursor-pointer" checked={data.runOnStart !== false} onChange={(e) => data.onChange(id, 'runOnStart', e.target.checked)} />
         <span className="ml-3 text-xs text-text font-medium">Run historical backtest on start</span>
       </label>
       <div className="flex space-x-2 pt-2 border-t border-border">
@@ -390,7 +415,7 @@ export const ApiKeyNode = ({ id, data }) => {
         )}
         {isSwap && (
           <span className="text-3xs text-muted block">
-            Up to {maxLev}× on {exchangeId.toUpperCase()}. {leverage > 3 ? `${leverage}× liquidates after a ≈ −${liquidationPct(leverage)}% move — ` : ''}Size = margin × leverage. Simulations charge funding and use the exchange's margin tiers; cross margin puts the whole pool behind every position.{data.marketCtx?.hasInverse ? ` Inverse pairs: margin and PnL in ${data.marketCtx.inverseBases.join('/')}.` : ''}
+            Up to {maxLev}× on {exchangeId.toUpperCase()}. {leverage > engineGuards(exchanges, exchangeId).warnAbove ? `${leverage}× liquidates after a ≈ −${liquidationPct(leverage, engineGuards(exchanges, exchangeId).mmr)}% move (before fees) — ` : ''}Size = margin × leverage. Simulations charge funding and use the exchange's margin tiers; cross margin puts the whole pool behind every position.{data.marketCtx?.hasInverse ? ` Inverse pairs: margin and PnL in ${data.marketCtx.inverseBases.join('/')}.` : ''}
           </span>
         )}
       </div>

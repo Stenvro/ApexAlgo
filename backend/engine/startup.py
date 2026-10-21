@@ -21,7 +21,8 @@ from backend.engine.contracts import MAINTENANCE_MARGIN
 from sqlalchemy.orm import selectinload
 from backend.engine.sizing import _num, _int, _tf_seconds, _naive_utc, backtest_pin, data_fingerprint
 from backend.engine.symbols import DEFAULT_MARGIN_MODE, base_of, cash_currency, is_derivative, leverage_for, market_type_for
-from backend.core.exchange_registry import get_exchange_timeframes
+from backend.core.exchange_registry import ensure_contract_specs, get_exchange_timeframes, has_contract_spec
+from backend.engine.contracts import spec_for
 from backend.core import bot_log_buffer as blb
 
 logger = logging.getLogger("apexalgo.bot_manager")
@@ -345,6 +346,18 @@ def execute_sync_backfill(engine, bot_id: int):
                 except Exception as _exc:
                     logger.warning("Bot '%s': leverage tiers for %s failed: %s", bot.name, c["symbol"], _exc)
                     blb.push(bot.name, "WARN", f"{c['symbol']}: could not fetch the maintenance-margin tiers ({_exc}) — flat {100 * MAINTENANCE_MARGIN:g}% assumed")
+            # Inverse contracts are sized in contracts of `contract_size`
+            # quote units: the fetches above seed the registry's spec cache
+            # from the exchange's market map; when neither had to fetch
+            # (warm tables, cold process) load the map once, best effort
+            _inverse_syms = [c["symbol"] for c in sym_contexts if is_derivative(c["symbol"]) and spec_for(exchange_name, c["symbol"]).is_inverse]
+            if _inverse_syms and any(not has_contract_spec(exchange_name, s) for s in _inverse_syms):
+                ensure_contract_specs(exchange_name, _inverse_syms)
+            for _sym in _inverse_syms:
+                _spec = spec_for(exchange_name, _sym)
+                if not has_contract_spec(exchange_name, _sym) or _spec.contract_size == 1.0:
+                    blb.push(bot.name, "WARN", f"contract size unknown for {_sym}, assuming 1 {_spec.quote} per contract — "
+                                               f"amounts are booked in those contracts until {exchange_name.upper()}'s market data loads")
             if not still_active(engine, bot_id, _run_token):
                 raise StoppedByUser()
 
@@ -509,7 +522,17 @@ def execute_sync_backfill(engine, bot_id: int):
                     engine._engine_stop(bot, db, f"Could not set {_lev:g}x {_mm} leverage on the exchange: {_exc}")
                     db.commit()
                     return
-                blb.push(bot.name, "INFO", f"Perpetual swap ({live_mode}): {_lev:g}x {_mm} confirmed on {api_key.exchange.upper()} for {len(symbols)} pair(s) — funding and liquidation are settled by the exchange")
+                blb.push(bot.name, "INFO", f"Perpetual swap ({live_mode}): {_lev:g}x {_mm} confirmed on {api_key.exchange.upper()} for {len(symbols)} pair(s) — funding and liquidation are settled by the exchange (funding is not included in these PnL numbers)")
+
+        # A drawdown entry block persisted by an earlier run (M17): re-arm it
+        # so a restart never resumes entries while the curve is still above
+        # the resume threshold — the live tick lifts it by its own rules
+        _blocked_at = risk.restore_blocked(bot)
+        if _blocked_at is not None:
+            engine._entries_blocked.add(bot.name)
+            blb.push(bot.name, "WARN", f"Entries still blocked by the drawdown guard since {_blocked_at:%Y-%m-%d %H:%M} UTC "
+                                       f"({bot.settings.get(risk.BLOCK_REASON_KEY) or 'persisted across restart'}) — "
+                                       "resumes by the block_entries rules (drawdown below half the limit, or flat for the cooldown)")
 
         # Make the backtest→live handover visible in the console: the next
         # tick only arrives when the current candle closes on the exchange
